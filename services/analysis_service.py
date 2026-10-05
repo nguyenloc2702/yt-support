@@ -8,6 +8,8 @@ from pipeline.proxy import create_proxy
 from pipeline.audio import extract_audio
 from pipeline.transcribe import transcribe_audio
 from pipeline.segments import build_candidate_segments
+from pipeline.transcript_quality import filter_transcript
+import hashlib
 from pipeline.ranker import HeuristicContentRanker
 from pipeline.timeline_builder import build_timeline
 from pipeline.ffmpeg import FFMPEG
@@ -113,6 +115,12 @@ class AnalysisService:
                     else None,
                 },
             )
+            self._write_manifest(
+                analysis_dir,
+                source_path=source_path,
+                media_info=media_info,
+                options=options,
+            )
 
             segments = self._load_json(analysis_dir / "transcription.json")
             if segments:
@@ -139,6 +147,7 @@ class AnalysisService:
                     checkpoint_path=analysis_dir / "transcription.partial.json",
                 )
                 segments = transcription["segments"]
+                segments, tq_meta = filter_transcript(segments)
                 self._write_json(analysis_dir / "transcription.json", segments)
                 self._write_json(
                     analysis_dir / "transcription_meta.json",
@@ -147,7 +156,13 @@ class AnalysisService:
                         "language_probability": transcription.get("language_probability"),
                         "model": options.get("whisper_model") or settings.whisper_model,
                         "duration_seconds": transcription.get("duration"),
+                        "quality": tq_meta,
                     },
+                )
+                report(
+                    55,
+                    f"Transcript quality: {tq_meta['label']} "
+                    f"({tq_meta['dropped_segments']} hallucinated segments dropped)",
                 )
 
             scenes = self._load_json(analysis_dir / "scenes.json")
@@ -219,6 +234,58 @@ class AnalysisService:
                 output_aspect_ratio=options.get("output_aspect_ratio", "16:9"),
             )
             timeline["project_id"] = project_id
+
+            # Semantic summary mode: let the LLM produce an outline and override
+            # the heuristic timeline. Falls back cleanly when LLM is not
+            # configured or returns an invalid outline.
+            if options.get("mode") == "summary" and options.get("use_semantic", True):
+                try:
+                    from pipeline.semantic_summary import build_semantic_summary
+
+                    outline = build_semantic_summary(
+                        segments=segments,
+                        shots=None,  # shots/keyframes wired in Phase 2 integration
+                        topic=options.get("topic", ""),
+                        keywords=options.get("keywords", []),
+                        target_duration=target_duration,
+                    )
+                    clips = []
+                    for i, clip in enumerate(sorted(
+                        outline["candidate_clips"], key=lambda c: c["start"]
+                    ), start=1):
+                        clips.append({
+                            "id": f"clip_{i:03d}",
+                            "source_start": clip["start"],
+                            "source_end": clip["end"],
+                            "order": i,
+                            "enabled": True,
+                            "label": "main_point",
+                            "reason": clip["reason"],
+                            "score": clip["confidence"],
+                            "transition": "cut",
+                        })
+                    if clips:
+                        timeline["clips"] = clips
+                        timeline["actual_duration"] = sum(
+                            c["source_end"] - c["source_start"] for c in clips
+                        )
+                        timeline["semantic"] = {
+                            "title": outline["title"],
+                            "summary": outline["summary"],
+                            "chapters": outline["chapters"],
+                        }
+                        timeline["mode"] = "summary"
+                        timeline["fallback"] = False
+                except Exception as exc:  # noqa: BLE001 - fallback, never fail
+                    from core.logging_config import get_logger
+                    get_logger(__name__).warning(
+                        "Semantic summary failed, falling back to heuristic: %s", exc
+                    )
+                    timeline["fallback"] = True
+                    timeline["fallback_reason"] = str(exc)[:300]
+            else:
+                timeline["fallback"] = options.get("mode") == "summary"
+
             self._write_json(proj_dir / "timelines" / "current.json", timeline)
 
             with SessionLocal() as db:
@@ -263,6 +330,29 @@ class AnalysisService:
             if project:
                 project.status = status.value
                 db.commit()
+
+    def _write_manifest(
+        self,
+        analysis_dir: Path,
+        source_path: Path,
+        media_info,
+        options: Dict[str, Any],
+    ) -> None:
+        """Persist analysis configuration + input fingerprint for cache invalidation."""
+        h = hashlib.sha256()
+        with open(source_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        self._write_json(
+            analysis_dir / "analysis_manifest.json",
+            {
+                "input_sha256": h.hexdigest(),
+                "input_size_bytes": source_path.stat().st_size,
+                "duration_seconds": media_info.duration_seconds,
+                "options": options,
+                "app_version": "0.1.0",
+            },
+        )
 
     def _detect_scenes(self, video_path: Path) -> list:
         video_manager = None

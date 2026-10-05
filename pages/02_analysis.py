@@ -228,11 +228,17 @@ with col_right:
             key="analysis_lang_select",
         )
 
+    topic_raw = st.text_input(
+        "Chủ đề chính (tùy chọn - dùng để ưu tiên nội dung liên quan)",
+        value=saved_options.get("topic", "") or "",
+        placeholder="VD: Du lịch, Nấu ăn, Review điện thoại...",
+        key="analysis_topic_input",
+    )
     keywords_raw = st.text_input(
-        "Chủ đề & Từ khóa ưu tiên (phân cách bằng dấu phẩy)",
+        "Từ khóa ưu tiên (tùy chọn, phân cách bằng dấu phẩy)",
         value=", ".join(saved_options.get("keywords", []) or []),
-        placeholder="+ Thêm từ khóa (nhấn Enter)...",
-        label_visibility="collapsed",
+        placeholder="VD: giá, chất lượng, so sánh...",
+        key="analysis_keywords_input",
     )
 
     c_chk, c_action = st.columns([1.5, 1])
@@ -266,8 +272,8 @@ with col_right:
                     "whisper_model": model_val,
                     "language": lang_val,
                     "target_duration": float(target_duration),
-                    "topic": "Tech Review",
-                    "keywords": [k.strip() for k in keywords_raw.split(",") if k.strip()] or ["AI", "Review", "Benchmark", "GPU"],
+                    "topic": topic_raw.strip(),
+                    "keywords": [k.strip() for k in keywords_raw.split(",") if k.strip()],
                 }
                 analysis_dir.mkdir(parents=True, exist_ok=True)
                 with open(options_file, "w", encoding="utf-8") as fh:
