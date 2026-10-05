@@ -125,6 +125,49 @@ def chat_json_multimodal(
         ) from exc
 
 
+_FENCE_RE = None  # compiled lazily
+
+
+def _strip_code_fences(content: str) -> str:
+    """Remove markdown code fences some models wrap around JSON output."""
+    global _FENCE_RE
+    if _FENCE_RE is None:
+        import re
+
+        _FENCE_RE = re.compile(
+            r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL
+        )
+    m = _FENCE_RE.match(content)
+    return m.group(1) if m else content
+
+
+def _extract_json_object(content: str) -> str:
+    """Last-resort: extract the first {...} or [...] block from the text."""
+    import re
+
+    m = re.search(r"[\[{].*[\]}]", content, re.DOTALL)
+    return m.group(0) if m else content
+
+
+def _parse_llm_json(content: str) -> dict[str, Any]:
+    """Parse LLM output tolerantly: fences → raw → first JSON block."""
+    import re
+
+    candidates = [content, _strip_code_fences(content), _extract_json_object(content)]
+    for cand in candidates:
+        try:
+            result = json.loads(cand)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            continue
+    raise LLMResponseError(
+        "LLM trả về JSON không hợp lệ: " + content[:200].encode(
+            "ascii", errors="replace"
+        ).decode("ascii") + "..."
+    )
+
+
 def chat_json(
     system_prompt: str,
     user_prompt: str,
@@ -164,15 +207,19 @@ def chat_json(
     try:
         response = client.chat.completions.create(**kwargs)
     except Exception as exc:
-        raise LLMResponseError(f"LLM request failed: {exc}") from exc
+        # Some OpenAI-compatible providers reject response_format entirely.
+        err = str(exc)
+        if "response_format" in err or "json_schema" in err or "json_object" in err:
+            kwargs.pop("response_format", None)
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as exc2:
+                raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
+        else:
+            raise LLMResponseError(f"LLM request failed: {exc}") from exc
 
     content = response.choices[0].message.content if response.choices else None
     if not content:
         raise LLMResponseError("LLM trả về nội dung rỗng.")
 
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise LLMResponseError(
-            f"LLM trả về JSON không hợp lệ: {content[:200]}..."
-        ) from exc
+    return _parse_llm_json(content)
