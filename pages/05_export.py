@@ -11,6 +11,7 @@ from core.render_schemas import (
     MusicOptions,
     RenderConfiguration,
     TestPreviewOptions,
+    TTSOptions,
     VoiceOptions,
 )
 from services.asset_service import AssetService
@@ -206,6 +207,74 @@ with col_left:
         key="norm_audio_en",
     )
 
+    # B2. TTS Narration (edge-tts)
+    st.markdown(
+        """
+        <div class="pro-card" style="margin-top: 16px;">
+            <div class="pro-card-header">
+                <span class="pro-card-title">🗣 B2. Lồng giọng AI (TTS Narration - edge-tts)</span>
+                <span class="pro-card-subtitle">Đọc script beat đã duyệt thành giọng nói</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    tts_en = st.checkbox(
+        "Lồng giọng AI đọc script (TTS)",
+        value=current_config.tts.enabled,
+        key="tts_en",
+        help="Tổng hợp giọng đọc từ text của từng beat trong script đã duyệt, đè lên audio gốc (giảm dB khi TTS nói)."
+    )
+
+    tts_voices = {
+        "vi-VN-HoaiMyNeural": "🇻🇳 Hoài My (Nữ, Việt Nam)",
+        "vi-VN-NamMinhNeural": "🇻🇳 Nam Minh (Nam, Việt Nam)",
+        "en-US-AriaNeural": "🇺🇸 Aria (Female, English)",
+        "en-US-GuyNeural": "🇺🇸 Guy (Male, English)",
+    }
+    current_voice = current_config.tts.voice if current_config.tts.voice in tts_voices else "vi-VN-HoaiMyNeural"
+    voice_keys = list(tts_voices.keys())
+    tts_voice = st.selectbox(
+        "Chọn giọng đọc",
+        options=voice_keys,
+        index=voice_keys.index(current_voice),
+        format_func=lambda v: tts_voices[v],
+        disabled=not tts_en,
+        key="tts_voice",
+    )
+    tc1, tc2 = st.columns(2)
+    with tc1:
+        tts_rate = st.slider(
+            "Tốc độ đọc (%)",
+            min_value=-30,
+            max_value=50,
+            value=0,
+            disabled=not tts_en,
+            key="tts_rate",
+        )
+    with tc2:
+        tts_vol_pct = st.slider(
+            "Âm lượng giọng TTS (%)",
+            min_value=0,
+            max_value=150,
+            value=100,
+            disabled=not tts_en,
+            key="tts_vol",
+        )
+    tts_duck = st.slider(
+        "Giảm âm lượng audio gốc khi TTS nói (dB)",
+        min_value=0,
+        max_value=30,
+        value=12,
+        disabled=not tts_en,
+        key="tts_duck",
+    )
+    tts_rate_str = f"{tts_rate:+d}%"
+    tts_gain_db = percent_to_db(tts_vol_pct) if tts_vol_pct not in (0, 100) else (-30.0 if tts_vol_pct == 0 else 0.0)
+    st.caption(
+        "ℹ️ Nếu script chưa được duyệt hoặc timeline không phải chế độ Script Review, xuất bản vẫn chạy bình thường không có TTS."
+    )
+
     # C. Background Music (BGM)
     st.markdown(
         """
@@ -384,6 +453,13 @@ with col_left:
                     timeline_start_seconds=bgm_timeline_start,
                     fade_in_seconds=bgm_fade_in,
                     fade_out_seconds=bgm_fade_out,
+                ),
+                tts=TTSOptions(
+                    enabled=tts_en,
+                    voice=tts_voice,
+                    rate=tts_rate_str,
+                    gain_db=tts_gain_db,
+                    duck_gain_db=float(-tts_duck),
                 ),
                 loudness=LoudnessOptions(enabled=norm_audio_en),
             )

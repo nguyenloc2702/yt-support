@@ -38,6 +38,14 @@ class MusicOptions(BaseModel):
     short_music_mode: Literal["loop", "stop"] = "loop"
 
 
+class TTSOptions(BaseModel):
+    enabled: bool = False
+    voice: str = "vi-VN-HoaiMyNeural"
+    rate: str = "+0%"
+    gain_db: float = Field(default=0.0, ge=-30.0, le=12.0)
+    duck_gain_db: float = Field(default=-12.0, ge=-40.0, le=0.0)
+
+
 class LoudnessOptions(BaseModel):
     enabled: bool = True
     target_lufs: float = Field(default=-16.0, ge=-24.0, le=-9.0)
@@ -53,6 +61,7 @@ class RenderConfiguration(BaseModel):
     preset_name: str = "youtube_1080p"
     voice: VoiceOptions = Field(default_factory=VoiceOptions)
     music: MusicOptions = Field(default_factory=MusicOptions)
+    tts: TTSOptions = Field(default_factory=TTSOptions)
     loudness: LoudnessOptions = Field(default_factory=LoudnessOptions)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

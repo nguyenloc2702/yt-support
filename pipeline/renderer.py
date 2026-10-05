@@ -144,12 +144,16 @@ def render_video(
             raise RenderError("Timeline concatenation produced no video file")
 
         # Phase 3: Global audio post-processing
+        tts_opts = getattr(render_configuration, "tts", None) if render_configuration else None
+        tts_enabled = bool(tts_opts and tts_opts.enabled)
+
         if render_configuration is not None:
             if progress_callback:
                 progress_callback(78, "Applying audio post-processing & BGM mixing")
+            mix_output = temp_dir / "mixed.mp4" if tts_enabled else output_path
             apply_global_audio_mix(
                 joined_video_path=joined_video_path,
-                output_path=output_path,
+                output_path=mix_output,
                 project_id=project_id,
                 configuration=render_configuration,
                 output_duration_seconds=total_timeline_dur,
@@ -157,8 +161,29 @@ def render_video(
                 progress_callback=progress_callback,
                 cancellation_token=cancellation_token,
                 base_percent=78,
-                span_percent=18,
+                span_percent=18 if tts_enabled else 18,
             )
+
+            # Phase 3b: TTS narration overlay (script beats -> speech)
+            if tts_enabled:
+                from pipeline.tts import generate_and_overlay_narration
+
+                result = generate_and_overlay_narration(
+                    video_path=mix_output,
+                    timeline=timeline,
+                    output_path=output_path,
+                    voice=tts_opts.voice,
+                    rate=tts_opts.rate,
+                    gain_db=tts_opts.gain_db,
+                    duck_gain_db=tts_opts.duck_gain_db,
+                    temp_dir=temp_dir / "tts",
+                    progress_callback=progress_callback,
+                )
+                if result is None:
+                    # No narration text in timeline — fall back to mixed output
+                    if output_path.exists():
+                        output_path.unlink()
+                    shutil.copy2(mix_output, output_path)
         else:
             # Fallback legacy mode: move joined directly to output
             if output_path.exists():
