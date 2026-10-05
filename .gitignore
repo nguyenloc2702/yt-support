@@ -1,0 +1,30 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+
+# Runtime data and large media
+/data/*
+!/data/.gitkeep
+/projects/*
+!/projects/.gitkeep
+/logs/*
+!/logs/.gitkeep
+*.sqlite3
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.m4v
+*.wav
+*.mp3
+*.flac
+*.aac
+*.ogg
+*.opus
+
+# Local model/cache directories
+.huggingface/
+.cache/

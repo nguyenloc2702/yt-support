@@ -1,0 +1,32 @@
+[Unit]
+Description=Local Video Editor Streamlit application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=videoedit
+Group=videoedit
+WorkingDirectory=/opt/local-video-editor/current
+EnvironmentFile=/etc/local-video-editor/app.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HOME=/opt/local-video-editor/shared/model-cache
+Environment=TRANSFORMERS_CACHE=/opt/local-video-editor/shared/model-cache
+ExecStart=/opt/local-video-editor/venv/bin/streamlit run app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true --browser.gatherUsageStats=false
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Keep media processing isolated from the rest of the VPS.
+CPUQuota=350%
+MemoryMax=8G
+TasksMax=128
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/local-video-editor/shared
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
