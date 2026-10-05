@@ -187,13 +187,21 @@ def overlay_narration(
     narration_path: Path,
     output_path: Path,
     duck_gain_db: float = -12.0,
+    replace_original: bool = False,
 ) -> Path:
     """
     Overlay the narration track onto a finished (already audio-mixed) video.
-    The original/program audio is attenuated by duck_gain_db so the TTS voice
-    stays on top. Video stream is stream-copied.
+
+    - replace_original=True: the TTS voice REPLACES the original voice entirely
+      (original program audio is removed; only TTS narration remains).
+    - replace_original=False: original/program audio is attenuated by
+      duck_gain_db and the TTS voice is mixed on top.
+
+    Video stream is stream-copied. Handles the no-source-audio case by making
+    the narration the only audio track.
     """
     from pipeline.ffmpeg import run_ffmpeg_with_progress
+    from pipeline.audio_mix import probe_joined_video
 
     video_path = Path(video_path)
     output_path = Path(output_path)
@@ -202,17 +210,28 @@ def overlay_narration(
     if partial.exists():
         partial.unlink()
 
-    filter_complex = (
-        f"[1:a]aresample=48000[tts];"
-        f"[0:a]volume={duck_gain_db:.2f}dB[bg];"
-        f"[bg][tts]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
-    )
+    has_audio, _ = probe_joined_video(video_path)
+
+    if not has_audio or replace_original:
+        # TTS narration is the only audio track.
+        filter_complex = "[1:a]aresample=48000[tts]"
+        map_label = "[tts]"
+        use_shortest = True
+    else:
+        filter_complex = (
+            f"[1:a]aresample=48000[tts];"
+            f"[0:a]volume={duck_gain_db:.2f}dB[bg];"
+            f"[bg][tts]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+        )
+        map_label = "[aout]"
+        use_shortest = False
+
     args = [
         "-i", str(video_path),
         "-i", str(narration_path),
         "-filter_complex", filter_complex,
         "-map", "0:v:0",
-        "-map", "[aout]",
+        "-map", map_label,
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "192k",
@@ -223,6 +242,8 @@ def overlay_narration(
         "-y",
         str(partial),
     ]
+    if use_shortest:
+        args.insert(args.index("-f"), "-shortest")
     try:
         run_ffmpeg_with_progress(
             args,
@@ -252,6 +273,7 @@ def generate_and_overlay_narration(
     rate: str = "+0%",
     gain_db: float = 0.0,
     duck_gain_db: float = -12.0,
+    replace_original: bool = False,
     temp_dir: Path = Path("temp_tts"),
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Optional[Path]:
@@ -282,4 +304,6 @@ def generate_and_overlay_narration(
     if progress_callback:
         progress_callback(98, "Overlaying narration onto video")
 
-    return overlay_narration(video_path, track, output_path, duck_gain_db=duck_gain_db)
+    return overlay_narration(
+        video_path, track, output_path, duck_gain_db=duck_gain_db, replace_original=replace_original
+    )

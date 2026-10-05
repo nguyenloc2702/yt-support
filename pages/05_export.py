@@ -261,12 +261,19 @@ with col_left:
             disabled=not tts_en,
             key="tts_vol",
         )
+    tts_replace = st.checkbox(
+        "Thay thế hoàn toàn giọng đọc gốc (chỉ còn giọng TTS)",
+        value=current_config.tts.replace_original,
+        disabled=not tts_en,
+        key="tts_replace",
+        help="Bật: video xuất ra CHỈ có giọng AI đọc script. Tắt: giữ giọng gốc ở nền (giảm dB theo slider dưới) và đè giọng AI lên.",
+    )
     tts_duck = st.slider(
         "Giảm âm lượng audio gốc khi TTS nói (dB)",
         min_value=0,
         max_value=30,
         value=12,
-        disabled=not tts_en,
+        disabled=not tts_en or tts_replace,
         key="tts_duck",
     )
     tts_rate_str = f"{tts_rate:+d}%"
@@ -460,6 +467,7 @@ with col_left:
                     rate=tts_rate_str,
                     gain_db=tts_gain_db,
                     duck_gain_db=float(-tts_duck),
+                    replace_original=tts_replace,
                 ),
                 loudness=LoudnessOptions(enabled=norm_audio_en),
             )

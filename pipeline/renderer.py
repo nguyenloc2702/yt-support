@@ -176,6 +176,7 @@ def render_video(
                     rate=tts_opts.rate,
                     gain_db=tts_opts.gain_db,
                     duck_gain_db=tts_opts.duck_gain_db,
+                    replace_original=bool(getattr(tts_opts, "replace_original", False)),
                     temp_dir=temp_dir / "tts",
                     progress_callback=progress_callback,
                 )

@@ -44,6 +44,9 @@ class TTSOptions(BaseModel):
     rate: str = "+0%"
     gain_db: float = Field(default=0.0, ge=-30.0, le=12.0)
     duck_gain_db: float = Field(default=-12.0, ge=-40.0, le=0.0)
+    # replace_original=True: TTS becomes the ONLY voice (original voice muted);
+    # False: duck original by duck_gain_db and mix TTS on top.
+    replace_original: bool = True
 
 
 class LoudnessOptions(BaseModel):
