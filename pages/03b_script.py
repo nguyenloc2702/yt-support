@@ -77,15 +77,18 @@ tab_original, tab_edit = st.tabs(["👀 Xem script", "✏️ Chỉnh sửa"])
 with tab_original:
     st.markdown(f"### {script.get('title', '')}")
     st.caption(f"Tông giọng: {script.get('tone', '')}")
-    transcript = None
+    seg_text = {}
     try:
         from services.script_service import ScriptService as _S
         transcript = _S._load_transcript(_S._project_dir(project_id))
+        seg_text = {
+            s["id"]: s.get("text", "") for s in transcript.get("segments", [])
+            if s.get("id") is not None
+        }
+    except AppError as exc:
+        st.warning(f"Không tải được transcript để hiển thị nguồn gốc: {exc}")
     except Exception:
-        pass
-    seg_text = {}
-    if transcript:
-        seg_text = {s["id"]: s.get("text", "") for s in transcript.get("segments", [])}
+        logger.exception("Failed to load transcript for display")
 
     for beat in beats:
         with st.expander(f"Beat {beat['id'] + 1} · {beat.get('emotion', 'neutral')}"):
@@ -117,10 +120,12 @@ with tab_edit:
             )
     if st.button("💾 Lưu chỉnh sửa", key="save_edits"):
         kept = [
-            {k: v for k, v in b.items() if not k.startswith("_") and k != "text" or k == "text"}
+            {k: v for k, v in b.items() if not k.startswith("_")}
             for b in edited_beats if b["_keep"]
         ]
-        kept = [{k: v for k, v in b.items() if not k.startswith("_")} for b in kept]
+        # Re-number beat ids sequentially so beat_mapper stays consistent.
+        for new_id, b in enumerate(kept):
+            b["id"] = new_id
         try:
             service.save_edits(project_id, kept, title=new_title or None)
             st.success("Đã lưu. Trạng thái: EDITED — hãy duyệt lại.")

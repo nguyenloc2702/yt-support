@@ -151,6 +151,10 @@ class ScriptService:
                 "Chưa có transcript. Chạy phân tích video trước khi viết script."
             )
         data = read_json(path)
+        # transcription.json may be either a bare list of segments (current
+        # AnalysisService format) or a dict with a "segments" key (legacy).
+        if isinstance(data, list):
+            data = {"segments": data}
         if not isinstance(data, dict) or not data.get("segments"):
             raise AnalysisError("Transcript trống hoặc hỏng.")
         return data
