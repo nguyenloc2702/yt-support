@@ -197,8 +197,11 @@ def render_video(
 
         expect_audio = True
         if render_configuration:
-            expect_audio = render_configuration.voice.enabled or (
-                render_configuration.music.enabled and bool(render_configuration.music.asset_id)
+            tts_enabled = bool(getattr(render_configuration, "tts", None) and render_configuration.tts.enabled)
+            expect_audio = (
+                render_configuration.voice.enabled
+                or tts_enabled
+                or (render_configuration.music.enabled and bool(render_configuration.music.asset_id))
             )
 
         qc_result = validate_rendered_output(

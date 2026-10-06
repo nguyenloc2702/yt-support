@@ -108,11 +108,12 @@ class ScriptService:
         if not clips:
             raise AnalysisError("Không map được beat nào sang clip. Kiểm tra script/transcript.")
 
-        # Attach beat narration text to each clip for TTS export.
+        # Attach beat narration text + emotion to each clip for TTS export.
         beats = script.get("beats", [])
         for i, clip in enumerate(clips):
             if i < len(beats):
                 clip["narration_text"] = str(beats[i].get("text") or beats[i].get("new_text") or "").strip()
+                clip["emotion"] = str(beats[i].get("emotion") or "neutral").strip()
 
         timeline = {
             "mode": "script_review",
@@ -127,6 +128,7 @@ class ScriptService:
                     "label": "script_beat",
                     "reason": f"beat: {str(c.get('text', ''))[:80]}",
                     "narration_text": c.get("narration_text", ""),
+                    "emotion": c.get("emotion", "neutral"),
                     "score": 1.0,
                     "transition": "cut",
                 }

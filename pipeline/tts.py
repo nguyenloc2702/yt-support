@@ -22,6 +22,82 @@ MAX_TEMPO = 1.6
 # Only speed up when narration exceeds clip duration by more than 5%.
 TEMPO_TRIGGER = 1.05
 
+# Rough speaking rate for Vietnamese TTS at rate=+0% (chars per second).
+DEFAULT_CHARS_PER_SECOND = 14.0
+
+# Per-emotion TTS adjustments: (rate, pitch)
+EMOTION_TTS_STYLE = {
+    "hype": ("+8%", "+5Hz"),
+    "hoang_mang": ("+4%", "+10Hz"),
+    "bua": ("+2%", "+2Hz"),
+    "xuc_dong": ("-4%", "-2Hz"),
+    "gian": ("+6%", "-8Hz"),
+    "thuong_hai": ("+2%", "+0Hz"),
+    "neutral": ("+0%", "+0Hz"),
+}
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split Vietnamese text into sentence-ish cues."""
+    import re
+
+    parts = re.split(r"(?<=[.!?…])\s+", text.strip())
+    cues = [p.strip() for p in parts if p.strip()]
+    # Break very long sentences (no punctuation) into ~clause chunks
+    out: list[str] = []
+    for cue in cues:
+        if len(cue) > 120:
+            words = cue.split()
+            chunk: list[str] = []
+            n = 0
+            for w in words:
+                chunk.append(w)
+                n += len(w) + 1
+                if n > 90:
+                    out.append(" ".join(chunk))
+                    chunk, n = [], 0
+            if chunk:
+                out.append(" ".join(chunk))
+        else:
+            out.append(cue)
+    return out
+
+
+def estimate_narration_duration(text: str, chars_per_second: float = DEFAULT_CHARS_PER_SECOND) -> float:
+    """Rough duration estimate for TTS of the given text."""
+    return max(0.5, len(text) / max(chars_per_second, 1.0))
+
+
+def distribute_cues_over_clip(
+    text: str,
+    clip_duration: float,
+) -> list[dict]:
+    """
+    Split beat text into sentence cues and assign each cue an offset so the
+    narration is spread over the whole clip instead of clumped at the start.
+
+    If the estimated narration is shorter than the clip, cues are spaced out
+    evenly (with small leading offset). If longer, cues pack tightly from the
+    start (renderer will tempo-fit or the tail simply spills to next clip).
+    """
+    cues = _split_sentences(text)
+    if not cues:
+        return []
+
+    total_est = sum(estimate_narration_duration(c) for c in cues)
+    free = max(0.0, clip_duration - total_est)
+    # Spread leftover time as inter-cue gaps (keep 0.4s lead-in).
+    lead = min(0.4, clip_duration * 0.05) if clip_duration > 2 else 0.0
+    gap = free / len(cues) if len(cues) > 1 and free > 0 else 0.0
+
+    items = []
+    t = lead
+    for cue in cues:
+        dur = estimate_narration_duration(cue)
+        items.append({"text": cue, "output_start": round(t, 3), "clip_duration": dur})
+        t += dur + gap
+    return items
+
 
 def narration_items_from_timeline(timeline: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -66,17 +142,28 @@ async def _synthesize_one(text: str, voice: str, rate: str, volume: str, out_pat
     await communicate.save(str(out_path))
 
 
+async def _synthesize_one_pitch(
+    text: str, voice: str, rate: str, volume: str, pitch: str, out_path: Path
+) -> None:
+    import edge_tts
+
+    communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
+    await communicate.save(str(out_path))
+
+
 def synthesize_narration(
     items: List[Dict[str, Any]],
     out_dir: Path,
     voice: str = "vi-VN-HoaiMyNeural",
     rate: str = "+0%",
     volume: str = "+0%",
+    pitch: str = "+0Hz",
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Synthesize each item's text to an MP3 file in out_dir.
-    Returns items annotated with: audio_path, raw_duration, tempo (fit factor).
+    Each item may carry its own "rate"/"pitch" (emotion style) which overrides
+    the defaults. Returns items annotated with: audio_path, raw_duration, tempo.
     """
     if not items:
         return []
@@ -88,8 +175,12 @@ def synthesize_narration(
     try:
         for i, item in enumerate(items):
             mp3_path = out_dir / f"narr_{i:03d}.mp3"
+            item_rate = item.get("rate") or rate
+            item_pitch = item.get("pitch") or pitch
             try:
-                asyncio.run(_synthesize_one(item["text"], voice, rate, volume, mp3_path))
+                asyncio.run(
+                    _synthesize_one_pitch(item["text"], voice, item_rate, volume, item_pitch, mp3_path)
+                )
             except Exception as exc:
                 raise RenderError(f"TTS synthesis failed for segment {i}: {exc}") from exc
 
@@ -279,20 +370,45 @@ def generate_and_overlay_narration(
 ) -> Optional[Path]:
     """
     Full narration stage: timeline beats -> TTS -> track -> overlay.
+
+    Beat text is split into sentence cues spread across each clip so the
+    narration follows the picture instead of clumping at clip start.
+    Emotion per clip (if present) adjusts rate/pitch of the voice.
     Returns the new output path, or None when the timeline has no narration text.
     """
-    items = narration_items_from_timeline(timeline)
+    # Build per-clip items with cue distribution and emotion style.
+    items: List[Dict[str, Any]] = []
+    accumulated = 0.0
+    for clip in timeline.get("clips", []):
+        if not clip.get("enabled", True):
+            continue
+        start = float(clip.get("source_start", 0.0))
+        end = float(clip.get("source_end", 0.0))
+        clip_dur = max(0.0, end - start)
+        text = str(clip.get("narration_text") or "").strip()
+        if text:
+            emotion = str(clip.get("emotion") or "neutral")
+            emo_rate, emo_pitch = EMOTION_TTS_STYLE.get(emotion, EMOTION_TTS_STYLE["neutral"])
+            cues = distribute_cues_over_clip(text, clip_dur)
+            for cue in cues:
+                items.append(
+                    {
+                        "output_start": accumulated + cue["output_start"],
+                        "text": cue["text"],
+                        "clip_duration": cue["clip_duration"],
+                        "rate": emo_rate,
+                        "pitch": emo_pitch,
+                    }
+                )
+        accumulated += clip_dur
+
     if not items:
         return None
 
-    total = float(timeline.get("actual_duration", 0.0)) or sum(
-        max(0.0, float(c.get("source_end", 0)) - float(c.get("source_start", 0)))
-        for c in timeline.get("clips", [])
-        if c.get("enabled", True)
-    )
+    total = float(timeline.get("actual_duration", 0.0)) or accumulated
 
     if progress_callback:
-        progress_callback(96, "Synthesizing TTS narration")
+        progress_callback(96, f"Synthesizing TTS narration ({len(items)} cues)")
 
     narrated = synthesize_narration(items, Path(temp_dir), voice=voice, rate=rate)
 

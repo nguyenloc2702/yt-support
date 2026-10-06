@@ -486,6 +486,11 @@ with col_left:
             """,
             unsafe_allow_html=True,
         )
+        st.info(
+            f"⚠️ Preview/Render dùng cấu hình **v{current_config.version}** đã lưu. "
+            "Nếu bạn vừa đổi giọng TTS hoặc thông số, hãy bấm **Lưu cấu hình render mới** trước khi render.",
+            icon="ℹ️",
+        )
 
 # ================= RIGHT COLUMN: LIVE QC, RENDER PROGRESS & EXECUTION =================
 with col_right:

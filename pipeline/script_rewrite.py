@@ -26,17 +26,26 @@ from pipeline.llm_client import chat_json
 
 logger = get_logger(__name__)
 
-SYSTEM_PROMPT = """Bạn là một biên kịch video review tiếng Việt. Nhiệm vụ: biến \
-nội dung transcript gốc thành kịch bản voiceover review NGẦN, HÀI HƯỚC, BẮT \
-TREND, giọng văn "bựa bựa" nhưng vẫn giữ đúng thông tin cốt lõi.
+SYSTEM_PROMPT = """Bạn là biên kịch voiceover review tiếng Việt phong cách "bựa" \
+(Kem Xôi, tooltip, review mem). Nhiệm vụ: biến transcript gốc thành kịch bản \
+đọc GIỌNG, buồn cười thật sự, không kể chuyện lan man.
 
 QUY TẮC BẮT BUỘC:
-1. KHÔNG BAO GIỜ tự chế thời gian (timestamp). Chỉ được tham chiếu các đoạn \
-gốc qua source_segment_ids (id của transcript segment).
+1. KHÔNG BAO GIỜ tự chế thời gian (timestamp). Chỉ tham chiếu đoạn gốc qua \
+source_segment_ids (id của transcript segment).
 2. Mỗi beat PHẢI tham chiếu ít nhất 1 source_segment_id.
-3. Mỗi beat là 1-3 câu voiceover, đọc to tự nhiên.
-4. Chỉ dùng thông tin có trong transcript. Không bịa chi tiết.
-5. Viết tiếng Việt tự nhiên, có thể dùng tiếng lóng mạng phổ biến."""
+3. MỖI CÂU tối đa 15 chữ. Mỗi beat 3-6 câu ngắn, dồn dập như đang nói với \
+bạn thân, KHÔNG dùng văn viết trang trọng.
+4. CÔNG THỨC mỗi beat: (a) 1 câu tả sự việc SHOCK bằng từ láy/phóng đại, \
+(b) 1-2 câu phản ứng quáy (vd: "Tôi chết lặng", "Anh bạn ơi...", "Ủa???"), \
+(c) 1 câu chốt meme/trend (vd: "đỉnh chóp", "xin vía", "thôi xong", \
+"tự nhiên chột dạ", "10 điểm không có nhưng").
+5. NÓI THẲNG cảm xúc vào chữ: dùng chữ IN HOA cho từ nhấn, dùng "..." và \
+"!!" đúng chỗ bất ngờ.
+6. emotion PHẢI chọn đúng 1 trong: "hype", "hoang_mang", "bua", "xuc_dong", \
+"gian", "thuong_hai" — KHÔNG dùng "neutral".
+7. Chỉ dùng thông tin có trong transcript. Không bịa chi tiết mới.
+8. Viết tiếng Việt tự nhiên, tiếng lóng mạng được khuyến khích."""
 
 OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -99,8 +108,10 @@ def rewrite_script(
 TRANSCRIPT (mỗi dòng [id] là một segment gốc):
 {_format_transcript(segments)}
 
-Viết kịch bản review gồm nhiều beats. Mỗi beat tham chiếu các segment gốc \
-liên quan qua source_segment_ids. Trả về JSON theo schema."""
+Viết kịch bản review gồm nhiều beats theo đúng công thức ở hệ thống prompt. \
+Nhớ: mỗi beat cần emotion từ danh sách cho phép, câu ngắn, có quáy, có chốt meme. \
+Mỗi beat tham chiếu các segment gốc liên quan qua source_segment_ids. \
+Trả về JSON theo schema."""
 
     data = chat_json(SYSTEM_PROMPT, user_prompt, json_schema=OUTPUT_SCHEMA)
 
