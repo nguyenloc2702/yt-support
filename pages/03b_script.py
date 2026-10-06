@@ -44,16 +44,37 @@ STATUS_BADGE = {
 
 # ---- generate ----
 st.subheader("1. Tạo script bằng AI")
-if script is None:
+
+# Duration controls (always visible so user can regenerate with a new target)
+g1, g2, g3 = st.columns([1, 1, 1.4])
+with g1:
+    target_preset = st.selectbox(
+        "Thời lượng mục tiêu",
+        options=[30, 60, 90, 120, 180],
+        index=1,
+        format_func=lambda s: f"{s} giây",
+    )
+with g2:
+    tolerance = st.number_input(
+        "Dung sai (giây)", min_value=1.0, max_value=10.0, value=2.0, step=0.5,
+    )
+with g3:
     tone = st.text_input(
         "Tông giọng mong muốn",
         value="bựa bựa, hài hước, bắt trend",
         help="Mô tả giọng văn review mong muốn.",
     )
+
+if script is None:
     if st.button("✨ Generate script", type="primary"):
         try:
             with st.spinner("AI đang viết script... (có thể mất 30-60s)"):
-                script = service.generate(project_id, tone=tone)
+                script = service.generate(
+                    project_id,
+                    tone=tone,
+                    target_duration_seconds=float(target_preset),
+                    duration_tolerance_seconds=float(tolerance),
+                )
             st.success("Đã tạo script! Hãy review bên dưới.")
             st.rerun()
         except AppError as exc:
@@ -63,6 +84,40 @@ if script is None:
             st.error(f"Lỗi không xác định: {exc}")
 else:
     st.info(f"Trạng thái script: **{STATUS_BADGE.get(script.get('status'), script.get('status'))}**")
+
+    # Duration check panel
+    check = service.duration_check(project_id)
+    if check:
+        within = check["within_tolerance"]
+        icon = "✅" if within else "⚠️"
+        st.markdown(
+            f"""{icon} **Kiểm tra thời lượng**
+- Yêu cầu: **{check['target_duration_seconds']:.0f}s** (dung sai ±{script.get('duration_tolerance_seconds', 2):.0f}s)
+- Ước tính lời đọc: **{check['estimated_duration_seconds']:.1f}s**
+- Sai số: **{check['delta_seconds']:+.1f}s** — {'ĐẠT' if within else 'VƯỢT dung sai'}
+- Số chữ: **{sum(len(str(b.get('text') or '').split()) for b in script.get('beats', []))}**"""
+        )
+        if not within:
+            st.warning("Script đang lệch target. Hãy chỉnh sửa các beat ở tab 'Chỉnh sửa' hoặc Generate lại.")
+
+    # Regenerate with new duration
+    with st.expander("🔄 Generate lại với thời lượng mới"):
+        if st.button("✨ Generate lại (xóa script hiện tại)", key="regen_btn"):
+            try:
+                with st.spinner("AI đang viết lại script... (có thể mất 30-60s)"):
+                    script = service.generate(
+                        project_id,
+                        tone=tone,
+                        target_duration_seconds=float(target_preset),
+                        duration_tolerance_seconds=float(tolerance),
+                    )
+                st.success("Đã tạo lại script!")
+                st.rerun()
+            except AppError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Script regeneration failed")
+                st.error(f"Lỗi không xác định: {exc}")
 
 if script is None:
     st.stop()

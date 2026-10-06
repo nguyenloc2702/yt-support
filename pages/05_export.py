@@ -88,6 +88,33 @@ if timeline_path.exists():
 
 timeline_duration = float(timeline_data.get("actual_duration", project.duration_seconds or 120.0))
 
+# Duration provenance: source vs script target vs output timeline.
+_script_meta_path = proj_dir / "scripts" / "current.json"
+_script_meta = None
+if _script_meta_path.exists():
+    try:
+        _script_meta = read_json(_script_meta_path)
+    except Exception:
+        _script_meta = None
+if _script_meta and _script_meta.get("target_duration_seconds"):
+    script_target = float(_script_meta["target_duration_seconds"])
+    _script_tol = float(_script_meta.get("duration_tolerance_seconds") or 2.0)
+    if _script_meta.get("status") != "approved":
+        st.warning(
+            "🔒 Script hiện tại chưa được Approve. Hãy vào trang Script Review duyệt lại "
+            "và tạo timeline mới trước khi render."
+        )
+    elif timeline_data.get("mode") == "script_review":
+        _delta = timeline_duration - script_target
+        _ok = abs(_delta) <= _script_tol
+        st.info(
+            f"📏 **Thời lượng**: nguồn {project.duration_seconds or 0:.0f}s → "
+            f"script yêu cầu **{script_target:.0f}s** → output timeline **{timeline_duration:.1f}s** "
+            f"({'✅ đạt' if _ok else f'⚠️ lệch {_delta:+.1f}s'})"
+        )
+        for _w in (timeline_data.get("warnings") or [])[:5]:
+            st.caption(f"⚠️ {_w}")
+
 # Load or initialize render configuration
 current_config = config_service.get_current(project_id)
 if not current_config:
@@ -226,22 +253,78 @@ with col_left:
         help="Tổng hợp giọng đọc từ text của từng beat trong script đã duyệt, đè lên audio gốc (giảm dB khi TTS nói)."
     )
 
-    tts_voices = {
-        "vi-VN-HoaiMyNeural": "🇻🇳 Hoài My (Nữ, Việt Nam)",
-        "vi-VN-NamMinhNeural": "🇻🇳 Nam Minh (Nam, Việt Nam)",
-        "en-US-AriaNeural": "🇺🇸 Aria (Female, English)",
-        "en-US-GuyNeural": "🇺🇸 Guy (Male, English)",
+    # Dynamic voice catalog from the provider (never hard-coded).
+    from services.voice_service import list_voices, preview_voice
+
+    v_f1, v_f2 = st.columns(2)
+    with v_f1:
+        voice_lang = st.selectbox(
+            "Ngôn ngữ giọng đọc",
+            options=["vi-VN", "en-US", "all"],
+            format_func=lambda l: {"vi-VN": "🇻🇳 Tiếng Việt", "en-US": "🇺🇸 English", "all": "🌍 Tất cả"}[l],
+            disabled=not tts_en,
+            key="tts_voice_lang",
+        )
+    with v_f2:
+        voice_gender = st.selectbox(
+            "Giọng",
+            options=["all", "Female", "Male"],
+            format_func=lambda g: {"all": "Tất cả", "Female": "Nữ", "Male": "Nam"}[g],
+            disabled=not tts_en,
+            key="tts_voice_gender",
+        )
+
+    try:
+        _voices = list_voices(
+            language=None if voice_lang == "all" else voice_lang,
+            gender=None if voice_gender == "all" else voice_gender,
+        )
+        _voice_error = None
+    except Exception as _vexc:
+        _voices = []
+        _voice_error = str(_vexc)
+
+    if _voice_error:
+        st.warning(f"Không tải được danh sách giọng đọc: {_voice_error}. Hãy thử lại.")
+
+    voice_labels = {
+        v["id"]: f"{v['id']} ({'Nữ' if v['gender'] == 'Female' else 'Nam'})"
+        for v in _voices
     }
-    current_voice = current_config.tts.voice if current_config.tts.voice in tts_voices else "vi-VN-HoaiMyNeural"
-    voice_keys = list(tts_voices.keys())
+    saved_voice = current_config.tts.voice
+    if saved_voice in voice_labels:
+        default_voice = saved_voice
+    elif saved_voice and saved_voice not in voice_labels:
+        # Saved voice no longer offered — surface clearly instead of silently switching.
+        st.warning(
+            f"Giọng đã lưu '{saved_voice}' không còn trong danh sách provider. "
+            "Hãy chọn giọng khác và Lưu cấu hình render mới."
+        )
+        default_voice = next(iter(voice_labels), saved_voice)
+    else:
+        default_voice = next(iter(voice_labels), "vi-VN-HoaiMyNeural")
+
+    voice_keys = list(voice_labels.keys()) or [saved_voice or "vi-VN-HoaiMyNeural"]
     tts_voice = st.selectbox(
         "Chọn giọng đọc",
         options=voice_keys,
-        index=voice_keys.index(current_voice),
-        format_func=lambda v: tts_voices[v],
+        index=voice_keys.index(default_voice) if default_voice in voice_keys else 0,
+        format_func=lambda v: voice_labels.get(v, v),
         disabled=not tts_en,
         key="tts_voice",
     )
+
+    if tts_en and tts_voice:
+        pv1, _ = st.columns([0.3, 0.7])
+        with pv1:
+            if st.button("▶ Nghe thử giọng", disabled=not tts_en, key="tts_preview_btn"):
+                import tempfile
+                sample_path = Path(tempfile.gettempdir()) / f"voice_preview_{tts_voice}.mp3"
+                try:
+                    preview_voice(tts_voice, sample_path)
+                    st.audio(str(sample_path))
+                except Exception as pexc:
+                    st.error(f"Nghe thử thất bại: {pexc}")
     tc1, tc2 = st.columns(2)
     with tc1:
         tts_rate = st.slider(

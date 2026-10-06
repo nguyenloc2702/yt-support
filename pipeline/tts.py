@@ -382,9 +382,14 @@ def generate_and_overlay_narration(
     for clip in timeline.get("clips", []):
         if not clip.get("enabled", True):
             continue
-        start = float(clip.get("source_start", 0.0))
-        end = float(clip.get("source_end", 0.0))
-        clip_dur = max(0.0, end - start)
+        # Prefer explicit output duration (script-led planner) over source span;
+        # fall back to source span for legacy timelines.
+        if "duration" in clip and float(clip["duration"]) > 0:
+            clip_dur = float(clip["duration"])
+        else:
+            start = float(clip.get("source_start", 0.0))
+            end = float(clip.get("source_end", 0.0))
+            clip_dur = max(0.0, end - start)
         text = str(clip.get("narration_text") or "").strip()
         if text:
             emotion = str(clip.get("emotion") or "neutral")

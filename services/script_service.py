@@ -20,8 +20,13 @@ from core.exceptions import (
     ScriptNotApprovedError,
 )
 from core.logging_config import get_logger
-from pipeline.beat_mapper import beats_to_clips, estimate_script_duration
-from pipeline.script_rewrite import load_script, rewrite_script, save_script
+from pipeline.script_timeline_planner import plan_script_timeline
+from pipeline.script_rewrite import (
+    duration_check,
+    load_script,
+    rewrite_script,
+    save_script,
+)
 from utils.json_io import read_json
 
 logger = get_logger(__name__)
@@ -42,14 +47,35 @@ class ScriptService:
 
     # ---- generation ----
 
-    def generate(self, project_id: str, tone: str = "bựa bựa, hài hước, bắt trend") -> Dict[str, Any]:
-        """Call the LLM to (re)write the script. Result starts as 'draft'."""
+    def generate(
+        self,
+        project_id: str,
+        tone: str = "bựa bựa, hài hước, bắt trend",
+        target_duration_seconds: float = 60.0,
+        duration_tolerance_seconds: float = 2.0,
+    ) -> Dict[str, Any]:
+        """Call the LLM to (re)write the script fitting target duration. Result starts as 'draft'."""
         proj_dir = self._project_dir(project_id)
         transcript = self._load_transcript(proj_dir)
-        script = rewrite_script(transcript, tone=tone)
+        script = rewrite_script(
+            transcript,
+            tone=tone,
+            target_duration_seconds=target_duration_seconds,
+            duration_tolerance_seconds=duration_tolerance_seconds,
+        )
         save_script(proj_dir, script)
-        logger.info("Script generated for project %s (%d beats)", project_id, len(script["beats"]))
+        logger.info(
+            "Script generated for project %s (%d beats, target %.0fs)",
+            project_id, len(script["beats"]), target_duration_seconds,
+        )
         return script
+
+    def duration_check(self, project_id: str) -> Dict[str, Any] | None:
+        """Estimated narration duration vs target for the current script, or None."""
+        script = self.get_script(project_id)
+        if not script:
+            return None
+        return duration_check(script)
 
     # ---- review workflow ----
 
@@ -104,40 +130,24 @@ class ScriptService:
         proj_dir = self._project_dir(project_id)
         script = load_script(proj_dir)
         transcript = self._load_transcript(proj_dir)
-        clips = beats_to_clips(script, transcript)
-        if not clips:
+
+        # Script-led planner: output timeline sized by script target duration;
+        # each beat gets its own output window (never stretched source gaps).
+        try:
+            timeline = plan_script_timeline(script, transcript)
+            timeline["script_status"] = status
+        except ValueError as exc:
+            raise AnalysisError(f"Không dựng được timeline: {exc}")
+
+        if not timeline.get("clips"):
             raise AnalysisError("Không map được beat nào sang clip. Kiểm tra script/transcript.")
 
-        # Attach beat narration text + emotion to each clip for TTS export.
-        beats = script.get("beats", [])
-        for i, clip in enumerate(clips):
-            if i < len(beats):
-                clip["narration_text"] = str(beats[i].get("text") or beats[i].get("new_text") or "").strip()
-                clip["emotion"] = str(beats[i].get("emotion") or "neutral").strip()
-
-        timeline = {
-            "mode": "script_review",
-            "name": f"Script review: {script.get('title', '')}",
-            "clips": [
-                {
-                    "id": f"clip_{i:03d}",
-                    "source_start": c["source_start"],
-                    "source_end": c["source_end"],
-                    "order": i,
-                    "enabled": True,
-                    "label": "script_beat",
-                    "reason": f"beat: {str(c.get('text', ''))[:80]}",
-                    "narration_text": c.get("narration_text", ""),
-                    "emotion": c.get("emotion", "neutral"),
-                    "score": 1.0,
-                    "transition": "cut",
-                }
-                for i, c in enumerate(clips, start=1)
-            ],
-            "actual_duration": sum(c["source_end"] - c["source_start"] for c in clips),
-            "target_duration": estimate_script_duration(script, transcript),
-            "script_status": status,
-        }
+        # Warn (not fail) when duration is out of tolerance — UI surfaces this.
+        if timeline.get("duration_status") == "out_of_tolerance":
+            logger.warning(
+                "Script timeline out of tolerance: %.1fs vs target %.1fs",
+                timeline["actual_duration"], timeline["target_duration"],
+            )
         logger.info(
             "Script timeline built for %s: %d clips, %.1fs",
             project_id, len(timeline["clips"]), timeline["actual_duration"],
