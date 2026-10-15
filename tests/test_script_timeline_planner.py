@@ -74,5 +74,12 @@ def test_clips_carry_narration_and_emotion():
 def test_plan_warns_on_missing_segments():
     script = _script(beats=[{"id": 0, "text": "x", "emotion": "hype", "source_segment_ids": [999]}])
     timeline = plan_script_timeline(script, _transcript())
-    assert timeline["clips"] == []
-    assert any("999" in w or "segment" in w for w in timeline["warnings"])
+    # Beat maps no referenced segment, but fallback fill still produces clips
+    # so the duration contract is honoured.
+    assert timeline["clips"]
+    assert any("map" in w.lower() or "segment" in w for w in timeline["warnings"])
+    # All clips come from valid transcript material.
+    segs = _transcript()["segments"]
+    max_end = max(s["end"] for s in segs)
+    for c in timeline["clips"]:
+        assert 0.0 <= c["source_start"] < c["source_end"] <= max_end + 0.01

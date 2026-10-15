@@ -1,5 +1,8 @@
-import streamlit as st
+import subprocess
 from pathlib import Path
+
+import streamlit as st
+
 from config.settings import settings
 from core.database import init_db
 from core.logging_config import get_logger
@@ -9,7 +12,6 @@ from utils.ui import (
     render_sidebar_hardware_status,
     render_studio_header,
 )
-import subprocess
 
 logger = get_logger(__name__)
 
@@ -54,8 +56,8 @@ def main():
         unsafe_allow_html=True,
     )
 
-    if st.sidebar.button("➕ Tạo dự án mới", use_container_width=True, type="primary"):
-        st.switch_page("pages/01_projects.py")
+    if st.sidebar.button("🎬 Workflow 5 bước", use_container_width=True, type="primary"):
+        st.switch_page("pages/00_workflow.py")
 
     # Sidebar Footer
     render_sidebar_hardware_status(whisper_status="Sẵn sàng", is_busy=False)
@@ -98,9 +100,9 @@ def main():
                 st.markdown(f"Trạng thái: <span style='color:{status_color}; font-weight:600;'>{p.status.value}</span>", unsafe_allow_html=True)
                 st.caption(f"Ngày tạo: {p.created_at.strftime('%Y-%m-%d %H:%M')}")
             with c3:
-                if st.button("Mở Studio", key=f"dash_open_{p.id}", use_container_width=True):
+                if st.button("Mở Workflow", key=f"dash_open_{p.id}", use_container_width=True):
                     st.session_state.project_id = p.id
-                    st.switch_page("pages/02_analysis.py")
+                    st.switch_page("pages/00_workflow.py")
             with c4:
                 if st.button("Xóa", key=f"dash_del_{p.id}", use_container_width=True):
                     service.delete_project(p.id)

@@ -1,7 +1,7 @@
-from datetime import datetime
-from pathlib import Path
-from typing import Callable, Optional
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 
 from config.settings import settings
 from core.database import SessionLocal
@@ -25,7 +25,7 @@ class RenderService:
         return self.projects_dir / project_id
 
     def _resolve_configuration(
-        self, project_id: str, render_config_version: Optional[int] = None
+        self, project_id: str, render_config_version: int | None = None
     ) -> RenderConfiguration:
         if render_config_version is not None:
             config = self.config_service.get_version(project_id, render_config_version)
@@ -90,8 +90,8 @@ class RenderService:
         project_id: str,
         timeline: dict,
         test_options: TestPreviewOptions,
-        render_config_version: Optional[int] = None,
-        progress_callback: Optional[Callable[[int, str], None]] = None,
+        render_config_version: int | None = None,
+        progress_callback: Callable[[int, str], None] | None = None,
         cancellation_token=None,
     ) -> Path:
         """Render a 10-30s derived slice of the timeline for rapid audio & pacing checks."""
@@ -131,7 +131,7 @@ class RenderService:
                 preset_name="test_preview_720p",
                 output_path=str(output_path),
                 status=RenderStatus.RENDERING.value,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(UTC).replace(tzinfo=None),
             )
             db.add(render)
             db.commit()
@@ -154,7 +154,7 @@ class RenderService:
                 r = db.query(Render).filter(Render.id == render_id).first()
                 if r:
                     r.status = RenderStatus.COMPLETED.value
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
 
             # Best-effort housekeeping: scratch dirs and old previews.
@@ -171,7 +171,7 @@ class RenderService:
                 r = db.query(Render).filter(Render.id == render_id).first()
                 if r:
                     r.status = RenderStatus.CANCELLED.value if hasattr(RenderStatus, "CANCELLED") else "cancelled"
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
             raise
         except Exception as exc:
@@ -180,19 +180,70 @@ class RenderService:
                 if r:
                     r.status = RenderStatus.FAILED.value
                     r.error_message = str(exc)
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
             raise
+
+    @staticmethod
+    def enforce_render_gates(
+        project_id: str,
+        timeline: dict,
+        audio_source: str = "original",
+        projects_dir: Path | None = None,
+    ) -> dict:
+        """Phase D gates: content approval + audio delivery approval.
+
+        Runs before any render call (preview, test and final share the same
+        gates). Returns the timeline unchanged when all gates pass; raises
+        RenderError otherwise.
+        """
+        from pipeline.audio_timeline import check_render_readiness
+        from services.media_analysis_service import MediaAnalysisService
+
+        # Gate 1: block-based timelines must pass content readiness
+        if timeline.get("analysis_id"):
+            doc = None
+            if projects_dir is not None:
+                try:
+                    doc = MediaAnalysisService(projects_dir=projects_dir).load_existing_document(project_id)
+                except Exception:
+                    doc = None
+            if doc is not None:
+                check = check_render_readiness(doc)
+                if not check["ready"]:
+                    raise RenderError(
+                        "Content gate failed: " + "; ".join(check["reasons"])
+                    )
+
+        # Gate 2: uploaded_blocks source requires all overlays approved and no overlap
+        if audio_source == "uploaded_blocks":
+            overlays = timeline.get("audio_overlays") or []
+            if not overlays:
+                raise RenderError(
+                    "Audio gate failed: audio_source='uploaded_blocks' nhưng không có "
+                    "audio_overlays đã duyệt."
+                )
+            sorted_ov = sorted(overlays, key=lambda o: float(o["output_start"]))
+            for a, b in zip(sorted_ov, sorted_ov[1:]):
+                if float(b["output_start"]) < float(a["output_end"]) - 1e-6:
+                    raise RenderError(
+                        f"Audio gate failed: overlap between {a.get('block_id')} and "
+                        f"{b.get('block_id')} — không cho phép render."
+                    )
+        return timeline
 
     def render_preview(
         self,
         project_id: str,
         timeline: dict,
-        render_config_version: Optional[int] = None,
-        progress_callback: Optional[Callable[[int, str], None]] = None,
+        render_config_version: int | None = None,
+        progress_callback: Callable[[int, str], None] | None = None,
         cancellation_token=None,
+        subtitle_mode: str = "none",
+        audio_source: str = "original",
     ) -> Path:
         """Render a full preview (720p) of the timeline with audio post-processing."""
+        self.enforce_render_gates(project_id, timeline, audio_source, self._get_project_dir(project_id).parent.parent)
         proj_dir = self._get_project_dir(project_id)
         source_path = proj_dir / "source" / "input.mp4"
         if not source_path.exists():
@@ -217,7 +268,7 @@ class RenderService:
                 preset_name="preview_720p",
                 output_path=str(output_path),
                 status=RenderStatus.RENDERING.value,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(UTC).replace(tzinfo=None),
             )
             db.add(render)
             db.commit()
@@ -233,13 +284,15 @@ class RenderService:
                 render_configuration=configuration,
                 project_id=project_id,
                 render_id=render_id,
+                subtitle_mode=subtitle_mode,
+                audio_source=audio_source,
             )
 
             with SessionLocal() as db:
                 r = db.query(Render).filter(Render.id == render_id).first()
                 if r:
                     r.status = RenderStatus.COMPLETED.value
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
 
             with SessionLocal() as db:
@@ -255,7 +308,7 @@ class RenderService:
                 r = db.query(Render).filter(Render.id == render_id).first()
                 if r:
                     r.status = RenderStatus.CANCELLED.value if hasattr(RenderStatus, "CANCELLED") else "cancelled"
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
             raise
         except Exception as exc:
@@ -264,7 +317,7 @@ class RenderService:
                 if r:
                     r.status = RenderStatus.FAILED.value
                     r.error_message = str(exc)
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
             raise
 
@@ -273,11 +326,13 @@ class RenderService:
         project_id: str,
         timeline: dict,
         preset_name: str = "youtube_1080p",
-        render_config_version: Optional[int] = None,
-        progress_callback: Optional[Callable[[int, str], None]] = None,
+        render_config_version: int | None = None,
+        progress_callback: Callable[[int, str], None] | None = None,
         cancellation_token=None,
+        audio_source: str = "original",
     ) -> Path:
         """Render final delivery video (1080p) with complete post-processing."""
+        self.enforce_render_gates(project_id, timeline, audio_source, self._get_project_dir(project_id).parent.parent)
         proj_dir = self._get_project_dir(project_id)
         source_path = proj_dir / "source" / "input.mp4"
         if not source_path.exists():
@@ -302,7 +357,7 @@ class RenderService:
                 preset_name=preset_name,
                 output_path=str(output_path),
                 status=RenderStatus.RENDERING.value,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(UTC).replace(tzinfo=None),
             )
             db.add(render)
             db.commit()
@@ -318,13 +373,14 @@ class RenderService:
                 render_configuration=configuration,
                 project_id=project_id,
                 render_id=render_id,
+                audio_source=audio_source,
             )
 
             with SessionLocal() as db:
                 r = db.query(Render).filter(Render.id == render_id).first()
                 if r:
                     r.status = RenderStatus.COMPLETED.value
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
 
             with SessionLocal() as db:
@@ -340,7 +396,7 @@ class RenderService:
                 r = db.query(Render).filter(Render.id == render_id).first()
                 if r:
                     r.status = RenderStatus.CANCELLED.value if hasattr(RenderStatus, "CANCELLED") else "cancelled"
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
             raise
         except Exception as exc:
@@ -349,6 +405,6 @@ class RenderService:
                 if r:
                     r.status = RenderStatus.FAILED.value
                     r.error_message = str(exc)
-                    r.finished_at = datetime.utcnow()
+                    r.finished_at = datetime.now(UTC).replace(tzinfo=None)
                     db.commit()
             raise

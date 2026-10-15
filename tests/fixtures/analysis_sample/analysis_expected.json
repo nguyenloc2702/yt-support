@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "analysis_id": "analysis_sample_001",
+  "project_id": "test_sample",
+  "created_at": "2026-10-11T04:00:00Z",
+  "media": {
+    "duration_ms": 10000,
+    "fps_num": 30000,
+    "fps_den": 1001,
+    "width": 1920,
+    "height": 1080,
+    "audio_sample_rate": 48000,
+    "audio_channels": 2,
+    "audio_codec": "aac",
+    "video_codec": "h264"
+  },
+  "speakers": [],
+  "shots": [
+    {
+      "shot_id": "shot_001",
+      "start_ms": 0,
+      "end_ms": 2500,
+      "duration_ms": 2500,
+      "frame_path": "frames/shot_001.jpg",
+      "frame_index": 0,
+      "confidence": 0.98,
+      "description": "Người nói chào camera, nền sáng."
+    },
+    {
+      "shot_id": "shot_002",
+      "start_ms": 2500,
+      "end_ms": 5000,
+      "duration_ms": 2500,
+      "frame_path": "frames/shot_002.jpg",
+      "frame_index": 75,
+      "confidence": 0.97,
+      "description": "Người nói giới thiệu chủ đề."
+    },
+    {
+      "shot_id": "shot_003",
+      "start_ms": 5000,
+      "end_ms": 7500,
+      "duration_ms": 2500,
+      "frame_path": "frames/shot_003.jpg",
+      "frame_index": 150,
+      "confidence": 0.96,
+      "description": "Người nói chia sẻ nội dung."
+    },
+    {
+      "shot_id": "shot_004",
+      "start_ms": 7500,
+      "end_ms": 10000,
+      "duration_ms": 2500,
+      "frame_path": "frames/shot_004.jpg",
+      "frame_index": 225,
+      "confidence": 0.95,
+      "description": "Người nói cảm ơn và kết thúc."
+    }
+  ],
+  "transcript_segments": [
+    {
+      "id": "seg_001",
+      "start_ms": 0,
+      "end_ms": 2500,
+      "duration_ms": 2500,
+      "text": "Xin chào các bạn đến với video của tôi.",
+      "speaker_id": null,
+      "confidence": 0.95,
+      "words": [
+        {"text": "Xin", "start_ms": 100, "end_ms": 400, "confidence": 0.98},
+        {"text": "chào", "start_ms": 400, "end_ms": 700, "confidence": 0.97},
+        {"text": "các", "start_ms": 700, "end_ms": 900, "confidence": 0.96},
+        {"text": "bạn", "start_ms": 900, "end_ms": 1100, "confidence": 0.95},
+        {"text": "đến", "start_ms": 1100, "end_ms": 1300, "confidence": 0.94},
+        {"text": "với", "start_ms": 1300, "end_ms": 1500, "confidence": 0.93},
+        {"text": "video", "start_ms": 1500, "end_ms": 1800, "confidence": 0.92},
+        {"text": "của", "start_ms": 1800, "end_ms": 2000, "confidence": 0.91},
+        {"text": "tôi.", "start_ms": 2000, "end_ms": 2500, "confidence": 0.90}
+      ]
+    },
+    {
+      "id": "seg_002",
+      "start_ms": 2500,
+      "end_ms": 5000,
+      "duration_ms": 2500,
+      "text": "Hôm nay tôi sẽ chia sẻ về chủ đề rất thú vị.",
+      "speaker_id": null,
+      "confidence": 0.94,
+      "words": [
+        {"text": "Hôm", "start_ms": 2600, "end_ms": 2800, "confidence": 0.97},
+        {"text": "nay", "start_ms": 2800, "end_ms": 3000, "confidence": 0.96},
+        {"text": "tôi", "start_ms": 3000, "end_ms": 3200, "confidence": 0.95},
+        {"text": "sẽ", "start_ms": 3200, "end_ms": 3400, "confidence": 0.94},
+        {"text": "chia", "start_ms": 3400, "end_ms": 3600, "confidence": 0.93},
+        {"text": "sẻ", "start_ms": 3600, "end_ms": 3800, "confidence": 0.92},
+        {"text": "về", "start_ms": 3800, "end_ms": 4000, "confidence": 0.91},
+        {"text": "chủ", "start_ms": 4000, "end_ms": 4200, "confidence": 0.90},
+        {"text": "đề", "start_ms": 4200, "end_ms": 4400, "confidence": 0.89},
+        {"text": "rất", "start_ms": 4400, "end_ms": 4600, "confidence": 0.88},
+        {"text": "thú", "start_ms": 4600, "end_ms": 4800, "confidence": 0.87},
+        {"text": "vị.", "start_ms": 4800, "end_ms": 5000, "confidence": 0.86}
+      ]
+    },
+    {
+      "id": "seg_003",
+      "start_ms": 5000,
+      "end_ms": 7500,
+      "duration_ms": 2500,
+      "text": "Hy vọng các bạn sẽ thích nội dung này.",
+      "speaker_id": null,
+      "confidence": 0.93,
+      "words": [
+        {"text": "Hy", "start_ms": 5100, "end_ms": 5300, "confidence": 0.96},
+        {"text": "vọng", "start_ms": 5300, "end_ms": 5500, "confidence": 0.95},
+        {"text": "các", "start_ms": 5500, "end_ms": 5700, "confidence": 0.94},
+        {"text": "bạn", "start_ms": 5700, "end_ms": 5900, "confidence": 0.93},
+        {"text": "sẽ", "start_ms": 5900, "end_ms": 6100, "confidence": 0.92},
+        {"text": "thích", "start_ms": 6100, "end_ms": 6300, "confidence": 0.91},
+        {"text": "nội", "start_ms": 6300, "end_ms": 6500, "confidence": 0.90},
+        {"text": "dung", "start_ms": 6500, "end_ms": 6700, "confidence": 0.89},
+        {"text": "này.", "start_ms": 6700, "end_ms": 7500, "confidence": 0.88}
+      ]
+    },
+    {
+      "id": "seg_004",
+      "start_ms": 7500,
+      "end_ms": 10000,
+      "duration_ms": 2500,
+      "text": "Cảm ơn các bạn đã xem video.",
+      "speaker_id": null,
+      "confidence": 0.92,
+      "words": [
+        {"text": "Cảm", "start_ms": 7600, "end_ms": 7800, "confidence": 0.95},
+        {"text": "ơn", "start_ms": 7800, "end_ms": 8000, "confidence": 0.94},
+        {"text": "các", "start_ms": 8000, "end_ms": 8200, "confidence": 0.93},
+        {"text": "bạn", "start_ms": 8200, "end_ms": 8400, "confidence": 0.92},
+        {"text": "đã", "start_ms": 8400, "end_ms": 8600, "confidence": 0.91},
+        {"text": "xem", "start_ms": 8600, "end_ms": 8800, "confidence": 0.90},
+        {"text": "video.", "start_ms": 8800, "end_ms": 10000, "confidence": 0.89}
+      ]
+    }
+  ],
+  "audio_events": [
+    {
+      "event_id": "ae_001",
+      "start_ms": 0,
+      "end_ms": 2500,
+      "type": "speech",
+      "transcript_segment_ids": ["seg_001"],
+      "confidence": 0.95
+    },
+    {
+      "event_id": "ae_002",
+      "start_ms": 2500,
+      "end_ms": 5000,
+      "type": "speech",
+      "transcript_segment_ids": ["seg_002"],
+      "confidence": 0.94
+    },
+    {
+      "event_id": "ae_003",
+      "start_ms": 5000,
+      "end_ms": 7500,
+      "type": "speech",
+      "transcript_segment_ids": ["seg_003"],
+      "confidence": 0.93
+    },
+    {
+      "event_id": "ae_004",
+      "start_ms": 7500,
+      "end_ms": 10000,
+      "type": "speech",
+      "transcript_segment_ids": ["seg_004"],
+      "confidence": 0.92
+    }
+  ],
+  "content_blocks": [
+    {
+      "block_id": "block_001",
+      "start_ms": 0,
+      "end_ms": 2500,
+      "source_start_ms": 0,
+      "source_end_ms": 2500,
+      "shot_ids": ["shot_001"],
+      "transcript_segment_ids": ["seg_001"],
+      "audio_event_ids": ["ae_001"],
+      "description": "Người nói chào camera, nền sáng.",
+      "transcript": "Xin chào các bạn đến với video của tôi.",
+      "speaker_ids": [],
+      "script_draft": "Xin chào các bạn đến với video của tôi.",
+      "script_final": null,
+      "confidence": 0.95,
+      "human_verified": false,
+      "review_note": "",
+      "audio_delivery": null
+    },
+    {
+      "block_id": "block_002",
+      "start_ms": 2500,
+      "end_ms": 5000,
+      "source_start_ms": 2500,
+      "source_end_ms": 5000,
+      "shot_ids": ["shot_002"],
+      "transcript_segment_ids": ["seg_002"],
+      "audio_event_ids": ["ae_002"],
+      "description": "Người nói giới thiệu chủ đề.",
+      "transcript": "Hôm nay tôi sẽ chia sẻ về chủ đề rất thú vị.",
+      "speaker_ids": [],
+      "script_draft": "Hôm nay tôi sẽ chia sẻ về chủ đề rất thú vị.",
+      "script_final": null,
+      "confidence": 0.94,
+      "human_verified": false,
+      "review_note": "",
+      "audio_delivery": null
+    },
+    {
+      "block_id": "block_003",
+      "start_ms": 5000,
+      "end_ms": 7500,
+      "source_start_ms": 5000,
+      "source_end_ms": 7500,
+      "shot_ids": ["shot_003"],
+      "transcript_segment_ids": ["seg_003"],
+      "audio_event_ids": ["ae_003"],
+      "description": "Người nói chia sẻ nội dung.",
+      "transcript": "Hy vọng các bạn sẽ thích nội dung này.",
+      "speaker_ids": [],
+      "script_draft": "Hy vọng các bạn sẽ thích nội dung này.",
+      "script_final": null,
+      "confidence": 0.93,
+      "human_verified": false,
+      "review_note": "",
+      "audio_delivery": null
+    },
+    {
+      "block_id": "block_004",
+      "start_ms": 7500,
+      "end_ms": 10000,
+      "source_start_ms": 7500,
+      "source_end_ms": 10000,
+      "shot_ids": ["shot_004"],
+      "transcript_segment_ids": ["seg_004"],
+      "audio_event_ids": ["ae_004"],
+      "description": "Người nói cảm ơn và kết thúc.",
+      "transcript": "Cảm ơn các bạn đã xem video.",
+      "speaker_ids": [],
+      "script_draft": "Cảm ơn các bạn đã xem video.",
+      "script_final": null,
+      "confidence": 0.92,
+      "human_verified": false,
+      "review_note": "",
+      "audio_delivery": null
+    }
+  ],
+  "review": {
+    "status": "draft",
+    "verified_block_ids": [],
+    "approved_at": null,
+    "approved_by": null
+  },
+  "metadata": {
+    "analysis_version": 1,
+    "pipeline_version": "1.0.0",
+    "created_at": "2026-10-11T04:00:00Z",
+    "updated_at": "2026-10-11T04:00:00Z"
+  }
+}

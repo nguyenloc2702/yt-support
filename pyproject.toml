@@ -44,3 +44,9 @@ line-length = 88
 [tool.black]
 line-length = 88
 target-version = ['py311']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-p no:capture"
+python_files = ["test_*.py"]

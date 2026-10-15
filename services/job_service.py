@@ -2,7 +2,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -166,7 +166,7 @@ class JobService:
                 "Bị gián đoạn do khởi động lại — có thể chạy nối tiếp từ bước "
                 f"“{step or 'không rõ'}” ({job.progress or 0}%)."
             ),
-            finished_at=datetime.utcnow(),
+            finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
 
     def find_resumable_job(
@@ -236,7 +236,7 @@ class JobService:
             self._set_job(
                 job_id,
                 status=JobStatus.RUNNING.value,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
             try:
                 AnalysisService().run_analysis(
@@ -250,21 +250,21 @@ class JobService:
                     status=JobStatus.COMPLETED.value,
                     progress=100,
                     current_step="done",
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
             except JobCancelledError:
                 self._set_job(
                     job_id,
                     status=JobStatus.CANCELLED.value,
                     current_step="cancelled",
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
             except Exception as exc:  # noqa: BLE001 - surface any pipeline error
                 self._set_job(
                     job_id,
                     status=JobStatus.FAILED.value,
                     error_message=str(exc),
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
 
         self._get_executor().submit(_run)
@@ -284,7 +284,7 @@ class JobService:
             self._set_job(
                 job_id,
                 status=JobStatus.RUNNING.value,
-                started_at=datetime.utcnow(),
+                started_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
             try:
                 runner(lambda p, m: self._update_progress(job_id, p, m), token)
@@ -293,21 +293,21 @@ class JobService:
                     status=JobStatus.COMPLETED.value,
                     progress=100,
                     current_step="done",
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
             except JobCancelledError:
                 self._set_job(
                     job_id,
                     status=JobStatus.CANCELLED.value,
                     current_step="cancelled",
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
             except Exception as exc:  # noqa: BLE001
                 self._set_job(
                     job_id,
                     status=JobStatus.FAILED.value,
                     error_message=str(exc),
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
 
         self._get_executor().submit(_run)
@@ -349,6 +349,7 @@ class JobService:
         project_id: str,
         timeline: dict,
         render_config_version: Optional[int] = None,
+        subtitle_mode: str = "none",
     ) -> str:
         from services.render_service import RenderService
 
@@ -358,6 +359,7 @@ class JobService:
             "timeline_version": timeline.get("version", 1),
             "render_config_version": render_config_version,
             "render_type": "preview",
+            "subtitle_mode": subtitle_mode,
         }
         return self._submit_render(
             project_id,
@@ -368,6 +370,7 @@ class JobService:
                 render_config_version=render_config_version,
                 progress_callback=cb,
                 cancellation_token=token,
+                subtitle_mode=subtitle_mode,
             ),
             payload=payload,
         )

@@ -19,10 +19,13 @@ PAGE_FILES = [
     "00_settings.py",
     "01_projects.py",
     "02_analysis.py",
-    "03_transcript.py",
-    "03b_script.py",
-    "04_timeline.py",
-    "05_export.py",
+    "04_transcript.py",
+    "05_media_analysis.py",
+    "05_script_review.py",
+    "06_audio_delivery.py",
+    "06_timeline.py",
+    "07_export.py",
+    "08_analysis_io.py",
 ]
 
 

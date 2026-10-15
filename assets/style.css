@@ -73,6 +73,18 @@ section[data-testid="stSidebar"] a[data-testid="stSidebarNavLink"][aria-current=
   font-weight: 600;
 }
 
+/* Hide redundant legacy pages from sidebar navigation in simplified 5-step mode */
+section[data-testid="stSidebar"] a[href*="04_transcript"],
+section[data-testid="stSidebar"] a[href*="05_media_analysis"],
+section[data-testid="stSidebar"] a[href*="05_script_review"],
+section[data-testid="stSidebar"] a[href*="06_audio_delivery"],
+section[data-testid="stSidebar"] a[href*="06_timeline"],
+section[data-testid="stSidebar"] a[href*="03_workflow_report"],
+section[data-testid="stSidebar"] a[href*="08_analysis_io"] {
+  display: none !important;
+}
+
+
 /* ---------- Buttons ---------- */
 .stButton > button,
 button[kind="primary"] {

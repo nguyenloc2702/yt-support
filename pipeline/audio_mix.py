@@ -1,5 +1,8 @@
+import logging
 import math
 import subprocess
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -251,6 +254,12 @@ def apply_global_audio_mix(
     )
 
 
+#: Tolerance (seconds) when comparing an output window against the available
+#: source span. The planner keeps them equal; anything beyond this suggests a
+#: malformed clip rather than a deliberate choice.
+_SRC_SPAN_TOLERANCE = 0.5
+
+
 def slice_timeline_by_output_range(
     timeline: Dict[str, Any],
     output_start: float,
@@ -261,49 +270,117 @@ def slice_timeline_by_output_range(
     Maps timestamps back to source clips so that the normal rendering pipeline can render
     a quick 10-30s test preview without re-rendering the whole project.
     Returns (derived_timeline, effective_output_start).
+
+    Output positions are resolved from absolute ``output_start``/``output_end``
+    clip coordinates when every enabled clip carries them (script-led planner
+    timelines). Legacy timelines without output coordinates fall back to
+    accumulating source spans in clip order.
     """
+    if duration <= 0:
+        raise RenderError(f"Test preview duration must be positive, got {duration}s")
+
     clips = [c for c in timeline.get("clips", []) if c.get("enabled", True)]
     if not clips:
         raise RenderError("Timeline contains no enabled clips to slice")
 
     output_end = output_start + duration
-    accumulated = 0.0
     sliced_clips: List[Dict[str, Any]] = []
 
-    for clip in clips:
-        src_start = float(clip["source_start"])
-        src_end = float(clip["source_end"])
-        clip_dur = max(0.0, src_end - src_start)
+    # --- Resolve output coordinates -------------------------------------
+    # Absolute mode: every enabled clip carries output_start/output_end
+    # (script-led planner). This honours gaps/overlaps in the timeline
+    # instead of assuming clip order equals output order.
+    use_absolute = all(
+        "output_start" in c and "output_end" in c for c in clips
+    )
+    warnings: List[str] = []
 
-        clip_out_start = accumulated
-        clip_out_end = accumulated + clip_dur
-        accumulated += clip_dur
+    if use_absolute:
+        ordered = sorted(clips, key=lambda c: float(c["output_start"]))
+        prev_end: Optional[float] = None
+        for clip in ordered:
+            clip_out_start = float(clip["output_start"])
+            clip_out_end = float(clip["output_end"])
+            if prev_end is not None and clip_out_start > prev_end + 1e-6:
+                warnings.append(
+                    f"Output gap {prev_end:.2f}s->{clip_out_start:.2f}s before clip "
+                    f"{clip.get('id', '?')}"
+                )
+            elif prev_end is not None and clip_out_start < prev_end - 1e-6:
+                warnings.append(
+                    f"Output overlap at {clip_out_start:.2f}s on clip {clip.get('id', '?')}"
+                )
+            prev_end = max(prev_end or clip_out_end, clip_out_end)
 
-        # Check intersection with [output_start, output_end]
-        inter_start = max(output_start, clip_out_start)
-        inter_end = min(output_end, clip_out_end)
+            inter_start = max(output_start, clip_out_start)
+            inter_end = min(output_end, clip_out_end)
+            if inter_start < inter_end:
+                sliced_clips.append((clip, clip_out_start, inter_start, inter_end))
+    else:
+        # Legacy mode: accumulate source spans in clip order.
+        accumulated = 0.0
+        for clip in clips:
+            src_start = float(clip["source_start"])
+            src_end = float(clip["source_end"])
+            clip_dur = max(0.0, src_end - src_start)
+            clip_out_start = accumulated
+            clip_out_end = accumulated + clip_dur
+            accumulated += clip_dur
 
-        if inter_start < inter_end:
-            # Overlap exists
-            offset_in_clip = inter_start - clip_out_start
-            overlap_dur = inter_end - inter_start
-
-            new_clip = clip.copy()
-            new_clip["id"] = f"slice_{len(sliced_clips) + 1}"
-            new_clip["source_start"] = src_start + offset_in_clip
-            new_clip["source_end"] = new_clip["source_start"] + overlap_dur
-            new_clip["order"] = len(sliced_clips) + 1
-            new_clip["enabled"] = True
-            sliced_clips.append(new_clip)
+            inter_start = max(output_start, clip_out_start)
+            inter_end = min(output_end, clip_out_end)
+            if inter_start < inter_end:
+                sliced_clips.append((clip, clip_out_start, inter_start, inter_end))
 
     if not sliced_clips:
         raise RenderError(f"Test preview range [{output_start}s - {output_end}s] does not overlap any clips")
 
-    total_sliced_dur = sum(float(c["source_end"]) - float(c["source_start"]) for c in sliced_clips)
+    # --- Map intersections back to source and rebase metadata ------------
+    derived_output_cursor = 0.0
+    mapped: List[Dict[str, Any]] = []
+    for clip, clip_out_start, inter_start, inter_end in sliced_clips:
+        overlap_dur = inter_end - inter_start
+        offset_in_clip = inter_start - clip_out_start
+        src_start = float(clip["source_start"])
+        src_end = float(clip["source_end"])
+        src_span = max(0.0, src_end - src_start)
+        clip_dur = float(clip["output_end"]) - float(clip["output_start"]) if use_absolute else clip_dur  # noqa: F821
+
+        # Defensive: the planner keeps the output window equal to the source
+        # span. A larger window means malformed visual material; clamp so the
+        # slice never reads past the end of the source material.
+        if clip_dur > src_span + _SRC_SPAN_TOLERANCE:
+            warnings.append(
+                f"Clip {clip.get('id', '?')} output window {clip_dur:.2f}s exceeds "
+                f"source span {src_span:.2f}s; clamping source read"
+            )
+            offset_in_clip = min(offset_in_clip, max(0.0, src_span - overlap_dur))
+
+        new_clip = clip.copy()
+        new_clip["id"] = f"slice_{len(mapped) + 1}"
+        new_clip["source_start"] = src_start + offset_in_clip
+        new_clip["source_end"] = new_clip["source_start"] + overlap_dur
+        # Rebase output metadata to the derived preview timeline. This keeps
+        # downstream TTS/QC consumers aligned with the sliced clip.
+        new_clip["duration"] = overlap_dur
+        new_clip["output_start"] = derived_output_cursor
+        new_clip["output_end"] = derived_output_cursor + overlap_dur
+        new_clip["order"] = len(mapped) + 1
+        new_clip["enabled"] = True
+        mapped.append(new_clip)
+        derived_output_cursor += overlap_dur
+
+    sliced_clips = mapped
+
+    total_sliced_dur = sum(float(c.get("duration", 0.0)) for c in sliced_clips)
 
     derived = timeline.copy()
     derived["clips"] = sliced_clips
     derived["actual_duration"] = total_sliced_dur
     derived["is_derived_preview"] = True
+    if warnings:
+        derived["warnings"] = warnings
+        for w in warnings:
+            logger.warning("slice_timeline_by_output_range: %s", w)
 
     return derived, output_start

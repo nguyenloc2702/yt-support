@@ -8,8 +8,8 @@ from services.script_service import ScriptService
 
 logger = get_logger(__name__)
 
-st.set_page_config(page_title="Script Review", page_icon="📝", layout="wide")
-st.title("📝 Script Review (AI Rewrite)")
+st.set_page_config(page_title="Duyệt Script", page_icon="📝", layout="wide")
+st.title("📝 Duyệt & Chỉnh sửa Script (AI viết lại)")
 
 service = ScriptService()
 
@@ -127,6 +127,40 @@ beats = script.get("beats", [])
 # ---- review: compare view ----
 st.subheader("2. Review script")
 
+
+def _fmt_tc(seconds: float) -> str:
+    m, s = divmod(max(0.0, float(seconds)), 60.0)
+    return f"{int(m):02d}:{s:04.1f}"
+
+
+# Load current timeline (if any) to show each beat's output window.
+tl_windows: dict[int, tuple[float, float]] = {}
+tl_warnings: dict[int, list[str]] = {}
+try:
+    from config.settings import settings as _settings
+    from pathlib import Path as _Path
+
+    _tl_path = _Path(_settings.projects_dir) / project_id / "timelines" / "current.json"
+    if _tl_path.is_file():
+        import json as _json
+
+        _tl = _json.loads(_tl_path.read_text(encoding="utf-8"))
+        for _c in _tl.get("clips", []):
+            bid = _c.get("beat_id")
+            if bid is None:
+                continue
+            s, e = float(_c.get("output_start", 0)), float(_c.get("output_end", 0))
+            if bid in tl_windows:
+                s0, e0 = tl_windows[bid]
+                tl_windows[bid] = (min(s0, s), max(e0, e))
+            else:
+                tl_windows[bid] = (s, e)
+            for w in _tl.get("warnings", []) or []:
+                if w.startswith(f"Beat {bid}:"):
+                    tl_warnings.setdefault(bid, []).append(w)
+except Exception:
+    logger.debug("No timeline for beat windows", exc_info=True)
+
 tab_original, tab_edit = st.tabs(["👀 Xem script", "✏️ Chỉnh sửa"])
 
 with tab_original:
@@ -146,7 +180,15 @@ with tab_original:
         logger.exception("Failed to load transcript for display")
 
     for beat in beats:
-        with st.expander(f"Beat {beat['id'] + 1} · {beat.get('emotion', 'neutral')}"):
+        bid = beat["id"]
+        win = tl_windows.get(bid)
+        head = f"Beat {bid + 1} · {beat.get('emotion', 'neutral')}"
+        if win:
+            head += f" · 🎬 lồng tiếng {_fmt_tc(win[0])} → {_fmt_tc(win[1])} ({win[1] - win[0]:.1f}s)"
+        with st.expander(head):
+            if bid in tl_warnings:
+                for w in tl_warnings[bid]:
+                    st.warning(f"⚠️ {w}")
             st.markdown(f"**Voiceover:** {beat.get('text', '')}")
             st.markdown("**Nguồn gốc (transcript):**")
             for sid in beat.get("source_segment_ids", []):
@@ -183,10 +225,87 @@ with tab_edit:
             b["id"] = new_id
         try:
             service.save_edits(project_id, kept, title=new_title or None)
-            st.success("Đã lưu. Trạng thái: EDITED — hãy duyệt lại.")
-            st.rerun()
+            # Keep the timeline in sync with the edited script when possible;
+            # the approve gate requires re-approval first (expected for EDITED).
+            timeline_note = ""
+            try:
+                service.build_script_timeline(project_id)
+                timeline_note = " Timeline đã được lập kế hoạch lại theo script mới."
+            except AppError:
+                timeline_note = " Timeline sẽ được lập lại sau khi bạn duyệt script."
+            # No st.rerun() here: it would wipe these messages on rerun.
+            st.success("Đã lưu. Trạng thái: EDITED — hãy duyệt lại." + timeline_note)
         except AppError as exc:
             st.error(str(exc))
+
+# ---- listen to the script before rendering ----
+with st.expander("🎧 Bước duyệt audio trước khi render (bắt buộc)", expanded=True):
+    st.caption(
+        "Xuất script (.txt) + audio TTS đọc toàn bộ script (MP3/WAV) kèm phụ đề SRT/karaoke ASS. "
+        "Nghe kiểm tra, rồi bấm '✅ Duyệt audio' để mở khóa xuất bản video."
+    )
+    ex1, ex2 = st.columns(2)
+    with ex1:
+        if st.button("⬇️ Xuất script (.txt)", key="export_txt_btn"):
+            try:
+                txt_path = service.export_script_txt(project_id)
+                st.success(f"Đã xuất: {txt_path}")
+                st.download_button(
+                    "⬇️ Tải script (.txt)",
+                    data=txt_path.read_text(encoding="utf-8"),
+                    file_name="script.txt",
+                    mime="text/plain",
+                    key="dl_script_txt",
+                )
+            except AppError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Script txt export failed")
+                st.error(f"Lỗi không xác định: {exc}")
+    with ex2:
+        if st.button("🎙️ Tạo audio duyệt (TTS)", key="export_audio_btn"):
+            try:
+                with st.spinner("Đang tổng hợp giọng đọc... (không cần duyệt script)"):
+                    res = service.export_script_audio(project_id)
+                st.session_state["script_audio"] = res
+            except AppError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Script audio export failed")
+                st.error(f"Lỗi không xác định: {exc}")
+    res = st.session_state.get("script_audio")
+    if res:
+        mp3 = res.get("mp3")
+        if mp3:
+            from pathlib import Path as _P
+
+            if _P(mp3).is_file():
+                st.audio(str(_P(mp3)), format="audio/mp3")
+            st.caption(f"Thời lượng: {res['duration_seconds']:.1f}s")
+            st.markdown(f"- WAV: `{res['wav']}`")
+            st.markdown(f"- MP3: `{res['mp3']}`")
+            st.markdown(f"- SRT (phụ đề theo câu): `{res['srt']}`")
+            if res.get("ass_karaoke"):
+                st.markdown(f"- ASS karaoke (highlight từng từ): `{res['ass_karaoke']}`")
+
+    # Audio approval gate
+    audio_ok = service.is_audio_approved(project_id)
+    if audio_ok:
+        st.success("✅ Audio đã được duyệt — có thể sang trang Xuất bản để render.")
+    else:
+        if st.button("✅ Duyệt audio này", type="primary", key="approve_audio_btn",
+                     help="Chỉ bấm sau khi đã nghe thử file audio phía trên."):
+            try:
+                service.approve_audio(project_id)
+                st.success("Đã duyệt audio. Trang Xuất bản đã được mở khóa.")
+                st.rerun()
+            except AppError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Audio approval failed")
+                st.error(f"Lỗi không xác định: {exc}")
+        else:
+            st.warning("🔒 Chưa duyệt audio — trang Xuất bản sẽ bị khóa render cho đến khi bạn duyệt.")
 
 # ---- confirm gate ----
 st.subheader("3. Duyệt script (Confirm gate)")

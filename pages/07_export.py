@@ -1,10 +1,11 @@
 import json
 import time
 from pathlib import Path
+
 import streamlit as st
 
-from core.database import init_db, SessionLocal
-from core.enums import RenderStatus, RenderType
+from core.database import SessionLocal, init_db
+from core.enums import RenderStatus
 from core.models import Render
 from core.render_schemas import (
     LoudnessOptions,
@@ -21,13 +22,17 @@ from services.render_config_service import RenderConfigService
 from services.render_service import RenderService
 from utils.audio import db_to_percent, percent_to_db
 from utils.json_io import read_json
-from utils.ui import inject_pro_css, render_sidebar_hardware_status, render_studio_header
+from utils.ui import (
+    inject_pro_css,
+    render_sidebar_hardware_status,
+    render_studio_header,
+)
 
 init_db()
 inject_pro_css()
 
 st.set_page_config(
-    page_title="Export Studio - Local Video Editor",
+    page_title="Xuất bản - Local Video Editor",
     page_icon="🎬",
     layout="wide",
 )
@@ -115,6 +120,156 @@ if _script_meta and _script_meta.get("target_duration_seconds"):
         for _w in (timeline_data.get("warnings") or [])[:5]:
             st.caption(f"⚠️ {_w}")
 
+# Audio approval gate (P4): require review-audio approval only for script-led timelines.
+from services.script_service import ScriptService as _ScriptSvc
+
+_is_script_review_mode = timeline_data.get("mode") == "script_review"
+_audio_approved = _ScriptSvc().is_audio_approved(project_id) if _is_script_review_mode else True
+if _is_script_review_mode and not _audio_approved:
+    st.error(
+        "🔒 **Chưa duyệt audio:** hãy sang trang **Script Review**, tạo audio TTS nghe thử và bấm "
+        "**'✅ Duyệt audio'** trước khi xuất bản. Bước này tránh render ra video không có tiếng/sai giọng."
+    )
+
+
+# ======================================================================
+# Phase E: block-based analysis gates + delivery report + audio source
+# ======================================================================
+from services.audio_delivery_service import AudioDeliveryService
+from services.media_analysis_service import MediaAnalysisService
+
+_media_svc = MediaAnalysisService(projects_dir="projects")
+_delivery_svc = AudioDeliveryService(projects_dir="projects")
+
+_block_doc = None
+try:
+    _block_doc = _media_svc.get_current_analysis(project_id)
+except Exception:
+    _block_doc = None
+
+_block_gate_errors: list[str] = []
+_selected_audio_source = "original"
+
+if _block_doc is not None:
+    # Analysis version + review status summary
+    _review_status = getattr(_block_doc.review.status, "value", str(_block_doc.review.status))
+    st.info(
+        f"🧩 **Phân tích khối**: version **{_block_doc.version}** • review: **{_review_status}** • "
+        f"{len(_block_doc.content_blocks)} blocks"
+    )
+
+    # Delivery report
+    try:
+        _report = _delivery_svc.get_delivery_report(project_id)
+    except Exception as _exc:
+        _report = None
+        _block_gate_errors.append(f"Không đọc được delivery report: {_exc}")
+
+    if _report is not None:
+        c_a, c_b, c_c, c_d = st.columns(4)
+        c_a.metric("Blocks", _report["total_blocks"])
+        c_b.metric("Approved", _report["approved"])
+        c_c.metric("Pending", _report["pending"])
+        c_d.metric("Render ready", "✅" if _report["render_ready"] else "🔒")
+        if _report["errors"]:
+            for _e in _report["errors"][:10]:
+                _block_gate_errors.append(_e)
+        with st.expander("📋 Chi tiết audio delivery theo block", expanded=bool(_report["errors"])):
+            for _b in _report["blocks"]:
+                _icon = "✅" if _b["approved"] else ("⚠️" if _b["status"] != "missing" else "❌")
+                st.caption(
+                    f"{_icon} `{_b['block_id']}` expected {_b['expected_start_ms']}-"
+                    f"{_b['expected_end_ms']}ms • actual {_b['actual_duration_ms']}ms • "
+                    f"overlap {_b['overlap_ms']}ms • mode {_b['fit_mode']}"
+                )
+
+    # Overlap check
+    if _block_doc.has_overlap():
+        _block_gate_errors.append("Các khối narration chồng lấn nhau (overlap).")
+
+    # Unapproved blocks detail
+    _unapproved = [
+        b.block_id for b in _block_doc.content_blocks
+        if not b.human_verified or not (b.script_final or "").strip()
+    ]
+    if _unapproved:
+        _block_gate_errors.append(
+            "Blocks chưa duyệt nội dung / thiếu script_final: " + ", ".join(_unapproved)
+        )
+
+    # Audio source selector (user choice, never auto-mixed)
+    _audio_source_label = st.radio(
+        "Nguồn audio cho render",
+        options=["original", "uploaded_blocks", "tts"],
+        format_func=lambda s: {
+            "original": "🔊 Audio gốc",
+            "uploaded_blocks": "📦 Audio đã upload theo block",
+            "tts": "🗣 TTS (legacy)",
+        }[s],
+        horizontal=True,
+        key="phase_e_audio_source",
+        help="uploaded_blocks: dùng audio track đã duyệt theo khối. TTS sẽ KHÔNG chạy khi chọn mục này.",
+    )
+    _selected_audio_source = _audio_source_label
+
+    if _selected_audio_source == "uploaded_blocks":
+        _missing_audio = [
+            b.block_id for b in _block_doc.content_blocks
+            if b.audio_delivery is None or not Path(b.audio_delivery.file_path).exists()
+        ]
+        if _missing_audio:
+            _block_gate_errors.append(
+                "uploaded_blocks được chọn nhưng thiếu file audio cho: " + ", ".join(_missing_audio)
+            )
+    if _selected_audio_source == "tts" and not _audio_approved:
+        _block_gate_errors.append("audio_source='tts' nhưng chưa duyệt audio TTS ở Script Review.")
+
+    # Downloads: analysis JSON + reviewed script JSON
+    _dl1, _dl2 = st.columns(2)
+    try:
+        _analysis_json = _media_svc.export_json(project_id)
+        _dl1.download_button(
+            "⬇️ Tải analysis JSON",
+            data=_analysis_json,
+            file_name=f"analysis_v{_block_doc.version}.json",
+            mime="application/json",
+        )
+    except Exception:
+        pass
+    try:
+        _script_json = json.dumps(
+            {
+                "schema_version": _block_doc.schema_version,
+                "analysis_id": _block_doc.analysis_id,
+                "version": _block_doc.version,
+                "blocks": [
+                    {"block_id": b.block_id, "script_final": b.script_final,
+                     "human_verified": b.human_verified}
+                    for b in _block_doc.content_blocks
+                ],
+            },
+            indent=2, ensure_ascii=False,
+        )
+        _dl2.download_button(
+            "⬇️ Tải reviewed script JSON",
+            data=_script_json,
+            file_name=f"reviewed_script_v{_block_doc.version}.json",
+            mime="application/json",
+        )
+    except Exception:
+        pass
+
+# Phase E render lock: only lock if block audio is selected and missing files
+_block_locked = bool(_block_gate_errors) and _selected_audio_source == "uploaded_blocks"
+if _block_locked:
+    st.error(
+        "🔒 **Render bị khóa bởi gate phân tích khối (khi dùng audio khối):**\n\n"
+        + "\n".join(f"- ❌ {_e}" for _e in _block_gate_errors[:15])
+    )
+elif _block_doc is not None:
+    st.success("✅ Gate phân tích khối: tất cả điều kiện đều đạt.")
+
+
 # Load or initialize render configuration
 current_config = config_service.get_current(project_id)
 if not current_config:
@@ -139,7 +294,7 @@ def _sec_to_tc(seconds: float) -> str:
 render_studio_header(
     project_name=f"{project.name}",
     resolution=f"{project.width}x{project.height}" if project.width else "1080p",
-    codec="EBU R128 Master",
+    codec="Chuẩn EBU R128",
     timecode=_sec_to_tc(timeline_duration),
 )
 
@@ -149,14 +304,20 @@ st.markdown(
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
         <div>
             <h3 style="margin: 0; color: #ffffff; font-weight: 800; font-size: 1.25rem;">Cấu hình xuất bản & Xử lý âm thanh</h3>
-            <div style="font-size: 0.8rem; color: #94a3b8; margin-top: 4px;">Streamlit Audio Engine • FFmpeg v6.1 Audio Post-production & EBU R128 Normalizer</div>
+            <div style="font-size: 0.8rem; color: #94a3b8; margin-top: 4px;">Động cơ âm thanh • Hậu kỳ FFmpeg & Chuẩn hóa EBU R128</div>
         </div>
         <span style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.4); color: #93c5fd; padding: 4px 10px; border-radius: 4px; font-size: 0.78rem; font-weight: 600;">
-            EBU R128 Active
+            EBU R128 đang bật
         </span>
     </div>
     """,
     unsafe_allow_html=True,
+)
+
+st.caption(
+    "🎙 Trạng thái audio duyệt: **{}**".format(
+        "✅ đã duyệt — có thể kết xuất" if _audio_approved else "❌ chưa duyệt — render bị khóa"
+    )
 )
 
 col_left, col_right = st.columns([1.1, 1], gap="large")
@@ -169,7 +330,7 @@ with col_left:
         <div class="pro-card" style="margin-bottom: 16px;">
             <div class="pro-card-header">
                 <span class="pro-card-title">🎛 A. Cấu hình định dạng đầu ra (Output Preset)</span>
-                <span class="pro-card-subtitle">Preset Profile</span>
+                <span class="pro-card-subtitle">Hồ sơ preset</span>
             </div>
         </div>
         """,
@@ -371,7 +532,7 @@ with col_left:
         <div class="pro-card" style="margin-top: 16px;">
             <div class="pro-card-header">
                 <span class="pro-card-title">🎵 C. Nhạc nền (Background Music - BGM)</span>
-                <span class="pro-card-subtitle">Local Library & Post-mix</span>
+                <span class="pro-card-subtitle">Thư viện nội bộ & Trộn sau</span>
             </div>
         </div>
         """,
@@ -386,7 +547,17 @@ with col_left:
             type=["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"],
             key="bgm_file_uploader",
         )
-        r_type = st.selectbox("Loại giấy phép / bản quyền", ["owned", "licensed", "creative_commons", "public_domain"])
+        _license_map = {
+            "owned": "Sở hữu",
+            "licensed": "Được cấp phép",
+            "creative_commons": "Creative Commons (CC)",
+            "public_domain": "Phạm vi công cộng",
+        }
+        r_type = st.selectbox(
+            "Loại giấy phép / bản quyền",
+            list(_license_map.keys()),
+            format_func=lambda k: _license_map[k],
+        )
         r_source_url = st.text_input("URL nguồn (nếu có)", "")
         r_notes = st.text_input("Ghi chú bản quyền (mã license, tác giả...)", "")
         r_confirmed = st.checkbox(
@@ -457,7 +628,7 @@ with col_left:
                         </div>
                     </div>
                     <span style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); color: #34d399; font-size: 0.72rem; font-weight: 600; padding: 3px 8px; border-radius: 4px;">
-                        ✓ {chosen_asset.rights_type.capitalize()}
+                        ✓ {_license_map.get(chosen_asset.rights_type, chosen_asset.rights_type)}
                     </span>
                 </div>
                 """,
@@ -522,44 +693,9 @@ with col_left:
             disabled=not bgm_en,
         )
 
-    # Save Configuration Action
+    # Configuration info (cấu hình được tự động lưu khi bấm render).
     st.markdown("---")
-    col_save, col_ver_info = st.columns([1.2, 1])
-    with col_save:
-        if st.button("💾 Lưu cấu hình render mới", use_container_width=True, type="primary"):
-            new_cfg = RenderConfiguration(
-                id=f"cfg_{time.time()}",
-                project_id=project_id,
-                version=current_config.version,
-                timeline_version=int(timeline_data.get("version", 1)),
-                preset_name=selected_preset,
-                voice=VoiceOptions(enabled=src_audio_en, gain_db=calculated_voice_db),
-                music=MusicOptions(
-                    enabled=bgm_en,
-                    asset_id=selected_asset_id,
-                    gain_db=calculated_bgm_db,
-                    loop=bgm_loop,
-                    source_offset_seconds=bgm_offset,
-                    timeline_start_seconds=bgm_timeline_start,
-                    fade_in_seconds=bgm_fade_in,
-                    fade_out_seconds=bgm_fade_out,
-                ),
-                tts=TTSOptions(
-                    enabled=tts_en,
-                    voice=tts_voice,
-                    rate=tts_rate_str,
-                    gain_db=tts_gain_db,
-                    duck_gain_db=float(-tts_duck),
-                    replace_original=tts_replace,
-                ),
-                loudness=LoudnessOptions(enabled=norm_audio_en),
-            )
-            saved = config_service.save_new_version(project_id, new_cfg)
-            st.success(f"Đã lưu cấu hình Render phiên bản **v{saved.version}** thành công!")
-            time.sleep(0.5)
-            st.rerun()
-
-    with col_ver_info:
+    with st.container():
         all_versions = config_service.list_versions(project_id)
         st.markdown(
             f"""
@@ -570,8 +706,8 @@ with col_left:
             unsafe_allow_html=True,
         )
         st.info(
-            f"⚠️ Preview/Render dùng cấu hình **v{current_config.version}** đã lưu. "
-            "Nếu bạn vừa đổi giọng TTS hoặc thông số, hãy bấm **Lưu cấu hình render mới** trước khi render.",
+            "⏱ **Thời lượng video** được chỉnh ở trang **Script Review** (mục \"🔄 Generate lại với thời lượng mới\") "
+            f"hoặc trên Timeline. Hiện tại: **{_sec_to_tc(timeline_duration)}** • Cấu hình: **v{current_config.version}**",
             icon="ℹ️",
         )
 
@@ -583,48 +719,109 @@ with col_right:
         <div class="pro-card" style="margin-bottom: 14px; padding: 14px;">
             <div class="pro-card-header" style="margin-bottom: 8px;">
                 <span class="pro-card-title">🚀 Khởi động kết xuất (Render Engine)</span>
-                <span class="pro-card-subtitle">FFmpeg Hardware Accelerated</span>
+                <span class="pro-card-subtitle">FFmpeg tăng tốc phần cứng</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Test preview settings
-    t_c1, t_c2 = st.columns(2)
-    with t_c1:
-        test_start = st.number_input("Bắt đầu thử tại (giây)", min_value=0.0, max_value=max(0.0, timeline_duration - 5.0), value=0.0, step=5.0)
-    with t_c2:
-        test_dur = st.slider("Thời lượng thử (giây)", min_value=10, max_value=30, value=20, step=5)
+    # Helper: persist current UI options into a new config version before render.
+    def _save_config_if_dirty() -> int:
+        version = current_config.version
+        if tts_en and tts_voice and not tts_voice.startswith("vi-"):
+            st.error(
+                f"❌ Giọng TTS '{tts_voice}' không phải giọng tiếng Việt, trong khi script là tiếng Việt. "
+                "Hãy chọn giọng vi-VN trong phần B2, hoặc tắt Lồng giọng AI."
+            )
+            st.stop()
+        new_cfg = RenderConfiguration(
+            id=f"cfg_{time.time()}",
+            project_id=project_id,
+            version=current_config.version,
+            timeline_version=int(timeline_data.get("version", 1)),
+            preset_name=selected_preset,
+            voice=VoiceOptions(enabled=src_audio_en, gain_db=calculated_voice_db),
+            music=MusicOptions(
+                enabled=bgm_en,
+                asset_id=selected_asset_id,
+                gain_db=calculated_bgm_db,
+                loop=bgm_loop,
+                source_offset_seconds=bgm_offset,
+                timeline_start_seconds=bgm_timeline_start,
+                fade_in_seconds=bgm_fade_in,
+                fade_out_seconds=bgm_fade_out,
+            ),
+            tts=TTSOptions(
+                enabled=tts_en,
+                voice=tts_voice,
+                rate=tts_rate_str,
+                gain_db=tts_gain_db,
+                duck_gain_db=float(-tts_duck),
+                replace_original=tts_replace,
+            ),
+            loudness=LoudnessOptions(enabled=norm_audio_en),
+        )
+        saved = config_service.save_new_version(project_id, new_cfg)
+        st.toast(f"Đã lưu cấu hình render v{saved.version}")
+        return saved.version
 
-    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    _render_locked = is_busy or (_is_script_review_mode and not _audio_approved) or _block_locked
+    if _is_script_review_mode and not _audio_approved:
+        st.caption("🔒 Các nút kết xuất đang khóa — cần duyệt audio ở trang Script Review trước.")
+
+    # Subtitle mode for TTS narration (requires script-led timeline).
+    subtitle_mode = st.radio(
+        "Phụ đề lồng tiếng (TTS narration)",
+        options=["none", "sentence", "karaoke"],
+        format_func=lambda m: {
+            "none": "Không phụ đề",
+            "sentence": "Phụ đề theo câu (gắn cứng vào video)",
+            "karaoke": "Karaoke — highlight từng từ",
+        }[m],
+        horizontal=True,
+        index=0,
+        help="Chỉ có tác dụng khi timeline có thoại TTS. Karaoke dùng timing từng từ từ edge-tts.",
+    )
+
+    btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
-        if st.button("⚡ Test Preview (20s)", disabled=is_busy, use_container_width=True):
+        if st.button("🎬 Xem trước (720p)", disabled=_render_locked, use_container_width=True, type="primary"):
+            _version = _save_config_if_dirty()
+            job_service.submit_preview_render(
+                project_id=project_id,
+                timeline=timeline_data,
+                render_config_version=_version,
+                subtitle_mode=subtitle_mode,
+            )
+            st.rerun()
+
+    with btn_col2:
+        if st.button("🚀 Xuất video hoàn chỉnh (1080p)", disabled=_render_locked, use_container_width=True):
+            _version = _save_config_if_dirty()
+            job_service.submit_final_render(
+                project_id=project_id,
+                timeline=timeline_data,
+                preset_name=selected_preset,
+                render_config_version=_version,
+            )
+            st.rerun()
+
+    # Advanced test preview tucked away to keep the main flow simple.
+    with st.expander("⚡ Test nhanh một đoạn (nâng cao)"):
+        t_c1, t_c2 = st.columns(2)
+        with t_c1:
+            test_start = st.number_input("Bắt đầu thử tại (giây)", min_value=0.0, max_value=max(0.0, timeline_duration - 5.0), value=0.0, step=5.0)
+        with t_c2:
+            test_dur = st.slider("Thời lượng thử (giây)", min_value=10, max_value=30, value=20, step=5)
+        if st.button("Chạy test đoạn ngắn", disabled=_render_locked, use_container_width=True):
+            _version = _save_config_if_dirty()
             test_opts = TestPreviewOptions(output_start_seconds=test_start, duration_seconds=float(test_dur))
             job_service.submit_test_preview_render(
                 project_id=project_id,
                 timeline=timeline_data,
                 test_options=test_opts,
-                render_config_version=current_config.version,
-            )
-            st.rerun()
-
-    with btn_col2:
-        if st.button("🎬 Preview 720p", disabled=is_busy, use_container_width=True):
-            job_service.submit_preview_render(
-                project_id=project_id,
-                timeline=timeline_data,
-                render_config_version=current_config.version,
-            )
-            st.rerun()
-
-    with btn_col3:
-        if st.button("🚀 Render Final", disabled=is_busy, use_container_width=True, type="primary"):
-            job_service.submit_final_render(
-                project_id=project_id,
-                timeline=timeline_data,
-                preset_name=selected_preset,
-                render_config_version=current_config.version,
+                render_config_version=_version,
             )
             st.rerun()
 
@@ -694,7 +891,7 @@ with col_right:
                 <div style="background: #070a10; border: 1px solid #232f48; border-radius: 8px; height: 180px; position: relative; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 10px;">
                     <span style="font-size: 2.2rem; color: #3b82f6; margin-bottom: 6px;">🖥️</span>
                     <span style="font-size: 0.82rem; font-weight: 600; color: #cbd5e1;">Chưa có bản kết xuất nào</span>
-                    <span style="font-size: 0.72rem; color: #64748b;">Nhấn 'Render Test Preview' hoặc 'Render Final' để xem video kết quả</span>
+                    <span style="font-size: 0.72rem; color: #64748b;">Nhấn '⚡ Test Preview' hoặc '🚀 Render Final' để xem video kết quả</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -706,7 +903,7 @@ with col_right:
         <div class="pro-card" style="margin: 14px 0; padding: 14px;">
             <div class="pro-card-header" style="margin-bottom: 8px; padding-bottom: 6px;">
                 <span class="pro-card-title" style="font-size: 0.85rem;">📄 Tóm tắt thông số kết xuất (Output Summary)</span>
-                <span style="font-family: monospace; font-size: 0.72rem; color: #93c5fd;">Config-v{current_config.version}</span>
+                <span style="font-family: monospace; font-size: 0.72rem; color: #93c5fd;">Cấu hình v{current_config.version}</span>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.78rem;">
                 <div><span style="color: #64748b;">Preset mục tiêu:</span> <strong>{selected_preset_label}</strong></div>
@@ -714,7 +911,7 @@ with col_right:
                 <div><span style="color: #64748b;">Video Codec:</span> <strong>H.264 (yuv420p)</strong></div>
                 <div><span style="color: #64748b;">Audio Codec:</span> <strong>AAC-LC 192k 48kHz Stereo</strong></div>
                 <div><span style="color: #64748b;">Phiên bản Timeline:</span> <strong>v{timeline_data.get('version', 1)}</strong></div>
-                <div><span style="color: #64748b;">Chuẩn âm thanh:</span> <strong style="color: #34d399;">{'EBU R128 (-16 LUFS)' if norm_audio_en else 'Gain Manual'}</strong></div>
+                <div><span style="color: #64748b;">Chuẩn âm thanh:</span> <strong style="color: #34d399;">{'EBU R128 (-16 LUFS)' if norm_audio_en else 'Tinh chỉnh thủ công'}</strong></div>
             </div>
         </div>
         """,
@@ -817,6 +1014,15 @@ with col_right:
     if recent_renders:
         for r in recent_renders:
             fname = Path(r.output_path).name if r.output_path else f"Render {r.id}"
+            _status_vi = {
+                "completed": "Hoàn tất",
+                "failed": "Thất bại",
+                "running": "Đang chạy",
+                "pending": "Đang chờ",
+                "cancelled": "Đã hủy",
+                "queued": "Trong hàng chờ",
+            }
+            _status_text = _status_vi.get(r.status, r.status)
             st_color = "#34d399" if r.status == "completed" else ("#f87171" if r.status == "failed" else "#60a5fa")
             st.markdown(
                 f"""
@@ -825,7 +1031,7 @@ with col_right:
                         <strong style="color: #f1f5f9;">{fname}</strong>
                         <span style="color: #64748b; margin-left: 6px;">({r.preset_name} • v{r.render_config_version or 1})</span>
                     </div>
-                    <span style="color: {st_color}; font-weight: 600; text-transform: uppercase; font-size: 0.68rem;">{r.status}</span>
+                    <span style="color: {st_color}; font-weight: 600; font-size: 0.72rem;">{_status_text}</span>
                 </div>
                 """,
                 unsafe_allow_html=True,

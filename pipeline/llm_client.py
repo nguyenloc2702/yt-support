@@ -150,17 +150,23 @@ def _extract_json_object(content: str) -> str:
 
 
 def _parse_llm_json(content: str) -> dict[str, Any]:
-    """Parse LLM output tolerantly: fences → raw → first JSON block."""
+    """Parse LLM output tolerantly: fences → raw → first JSON block.
+
+    A bare JSON array is wrapped as {"items": [...]} so callers that expect
+    an object can still normalize it (e.g. treat items as beats).
+    """
     import re
 
     candidates = [content, _strip_code_fences(content), _extract_json_object(content)]
     for cand in candidates:
         try:
             result = json.loads(cand)
-            if isinstance(result, dict):
-                return result
         except json.JSONDecodeError:
             continue
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list):
+            return {"items": result}
     raise LLMResponseError(
         "LLM trả về JSON không hợp lệ: " + content[:200].encode(
             "ascii", errors="replace"
@@ -223,3 +229,40 @@ def chat_json(
         raise LLMResponseError("LLM trả về nội dung rỗng.")
 
     return _parse_llm_json(content)
+
+
+def chat_text(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 2048,
+) -> str:
+    """
+    Send a chat completion and return the raw text response (no JSON parsing).
+
+    Used for plain-text generation such as per-block script drafts
+    (Phase 8 block-based workflow). Raises LLMResponseError on unusable output.
+    """
+    client = get_llm_client()
+    model = get_llm_model() or "gemini-2.0-flash"
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+    except LLMResponseError:
+        raise
+    except Exception as exc:
+        raise LLMResponseError(f"LLM request failed: {exc}") from exc
+
+    content = response.choices[0].message.content if response.choices else None
+    if not content or not content.strip():
+        raise LLMResponseError("LLM trả về nội dung rỗng.")
+
+    return content.strip()

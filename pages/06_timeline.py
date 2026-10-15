@@ -55,7 +55,7 @@ version_val = timeline_data.get("version", 1.0) if timeline_data else 1.0
 render_studio_header(
     project_name=f"{project.name}",
     resolution=f"{project.width}x{project.height}" if project.width else "",
-    codec=f"Timeline v{version_val}",
+    codec=f"Bản dựng v{version_val}",
     timecode=tc_str,
 )
 
@@ -234,4 +234,4 @@ with col_act_left:
 with col_act_right:
     if st.button("🚀 Tiến hành xuất video (Export Studio)", type="primary", use_container_width=True):
         st.session_state.project_id = project_id
-        st.switch_page("pages/05_export.py")
+        st.switch_page("pages/07_export.py")

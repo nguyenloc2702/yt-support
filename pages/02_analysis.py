@@ -303,12 +303,12 @@ elif (analysis_dir / "transcription.json").exists():
     current_stage_name = "Hoàn tất"
 
 stages_data = [
-    ("01", "Probe media", "Hoàn tất", "completed"),
-    ("02", "Create proxy", "Hoàn tất", "completed"),
-    ("03", "Extract audio", "Hoàn tất", "completed"),
-    ("04", "Transcribe (Whisper)", "Hoàn tất", "completed"),
-    ("05", "Detect scenes", "● Đang xử lý", "running"),
-    ("06", "Detect silence", "Chờ xử lý", "pending"),
+    ("01", "Đọc thông tin media", "Hoàn tất", "completed"),
+    ("02", "Tạo proxy (bản nhẹ)", "Hoàn tất", "completed"),
+    ("03", "Tách âm thanh", "Hoàn tất", "completed"),
+    ("04", "Chuyển giọng nói thành văn bản (Whisper)", "Hoàn tất", "completed"),
+    ("05", "Phát hiện phân cảnh", "● Đang xử lý", "running"),
+    ("06", "Phát hiện khoảng lặng", "Chờ xử lý", "pending"),
     ("07", "Build candidates", "Chờ xử lý", "pending"),
     ("08", "Rank segments", "Chờ xử lý", "pending"),
     ("09", "Create timeline", "Chờ xử lý", "pending"),

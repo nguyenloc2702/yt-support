@@ -127,7 +127,12 @@ def plan_script_timeline(
     clips have source_start/source_end/output_start/output_end, narration_text,
     emotion, beat_id. actual_duration == total output duration.
     """
-    segments = transcript.get("segments") or []
+    # Accept both a bare segment list (current AnalysisService on-disk format)
+    # and a dict with a "segments" key (legacy/in-memory format).
+    if isinstance(transcript, list):
+        segments = transcript
+    else:
+        segments = transcript.get("segments") or []
     index = _build_index(segments)
 
     beats = [b for b in script.get("beats") or [] if str(b.get("text") or "").strip()]
@@ -139,30 +144,59 @@ def plan_script_timeline(
     clips: List[Dict[str, Any]] = []
     warnings: List[str] = []
 
+    all_ranges = _contiguous_ranges(
+        sorted(segments, key=lambda s: float(s["start"]))
+    )
+
     for win in windows:
         beat = next(
             (b for b in beats if int(b.get("id", -1)) == win["beat_id"]), beats[windows.index(win)]
         )
         budget = win["duration"]
 
-        # Collect visual candidates from the beat's referenced segments only.
+        # Collect visual candidates from the beat's referenced segments first.
         ref_ids = [int(sid) for sid in beat.get("source_segment_ids") or [] if int(sid) in index]
         ref_segments = [index[sid] for sid in ref_ids]
         if not ref_segments:
             warnings.append(f"Beat {win['beat_id']}: không map được segment nguồn nào.")
-            continue
 
-        # Tighten first segment boundary to word timestamps when available.
-        first_seg = min(ref_segments, key=lambda s: float(s["start"]))
-        t_start, _ = _tighten_with_words(first_seg, float(first_seg["start"]), float(first_seg["end"]))
-        ref_segments = [{**first_seg, "start": t_start}] + [
-            s for s in ref_segments if s is not first_seg
-        ]
-
-        ranges = _contiguous_ranges(ref_segments)
-        chosen = _collect_visual_budget(ranges, budget)
+        chosen: List[tuple[float, float]] = []
+        if ref_segments:
+            # Tighten first segment boundary to word timestamps when available.
+            first_seg = min(ref_segments, key=lambda s: float(s["start"]))
+            t_start, _ = _tighten_with_words(first_seg, float(first_seg["start"]), float(first_seg["end"]))
+            ref_segments = [{**first_seg, "start": t_start}] + [
+                s for s in ref_segments if s is not first_seg
+            ]
+            ranges = _contiguous_ranges(ref_segments)
+            chosen = _collect_visual_budget(ranges, budget)
 
         filled = sum(e - s for s, e in chosen)
+        if filled < budget - 0.5:
+            # Fallback 1: fill the remainder with unused nearby material so the
+            # beat window stays full and the duration contract is honoured.
+            remaining = budget - filled
+            extra = _collect_visual_budget(
+                [r for r in all_ranges if _score_range(r, used_ranges) > 0], remaining
+            )
+            if extra:
+                chosen = chosen + extra
+                filled = sum(e - s for s, e in chosen)
+        if filled < budget - 0.5 and chosen and segments:
+            # Fallback 2 (last resort): loop the beat's own material to fill.
+            remaining = budget - filled
+            src = chosen[0]
+            src_dur = src[1] - src[0]
+            max_end = float(segments[-1]["end"])
+            cursor = src[1]
+            while remaining > MIN_CLIP_SECONDS and cursor + MIN_CLIP_SECONDS <= max_end:
+                take = min(src_dur, remaining, max_end - cursor)
+                if take < MIN_CLIP_SECONDS:
+                    break
+                chosen.append((cursor, cursor + take))
+                cursor += take
+                remaining -= take
+            filled = sum(e - s for s, e in chosen)
         if filled < budget - 0.5:
             warnings.append(
                 f"Beat {win['beat_id']}: hình nguồn chỉ phủ {filled:.1f}s / cần {budget:.1f}s."

@@ -1,9 +1,9 @@
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
-from config.settings import settings
 from core.exceptions import JobCancelledError, RenderError
 from core.render_schemas import RenderConfiguration
 from pipeline.audio_mix import apply_global_audio_mix
@@ -18,17 +18,52 @@ def _build_scale_filter(width: int, height: int) -> str:
     )
 
 
+def _mix_with_block_track(
+    joined_video_path: Path,
+    track_path: Path,
+    output_path: Path,
+    project_id: str,
+    configuration: RenderConfiguration,
+) -> None:
+    """Replace the joined video's audio with the built block audio track.
+
+    Uses the same global mix chain (BGM, loudness) but swaps the source
+    voice audio for the uploaded-block track.
+    """
+
+    from pipeline.ffmpeg import run_ffmpeg
+
+    # Simple replace: map video from joined, audio from track
+    args = [
+        "-y",
+        "-i", str(joined_video_path),
+        "-i", str(track_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        str(output_path),
+    ]
+    result = run_ffmpeg(args)
+    if result.returncode != 0:
+        raise RenderError(f"Failed to mix block audio track: {result.stderr[-400:]}")
+
+
 def render_video(
     source_path: Path,
-    timeline: Dict[str, Any],
+    timeline: dict[str, Any],
     output_path: Path,
-    preset: Dict[str, Any],
-    progress_callback: Optional[Callable[[int, str], None]] = None,
+    preset: dict[str, Any],
+    progress_callback: Callable[[int, str], None] | None = None,
     cancellation_token=None,
-    render_configuration: Optional[RenderConfiguration] = None,
+    render_configuration: RenderConfiguration | None = None,
     project_id: str = "",
     render_id: str = "",
     output_timeline_offset_seconds: float = 0.0,
+    subtitle_mode: str = "none",
+    audio_source: str = "original",
+    sync_report_path: Path | None = None,
 ) -> Path:
     """
     Render a video from a timeline.
@@ -37,7 +72,23 @@ def render_video(
     3. Performs global audio post-processing (source voice gain, BGM mixing, loudness normalization).
     4. Validates output and generates Quality Control (.qc.json) report.
     5. Supports cooperative cancellation and writes safely to .partial.mp4 before atomic replace.
+
+    audio_source (Phase D):
+        - "uploaded_blocks": mix the track built from approved block audio
+          deliveries (audio_overlays in the timeline); TTS is NEVER run.
+        - "tts": legacy TTS narration (user must explicitly opt in).
+        - "original": keep the source audio (default).
     """
+    allowed_sources = {"uploaded_blocks", "tts", "original"}
+    if audio_source not in allowed_sources:
+        raise RenderError(
+            f"Invalid audio_source '{audio_source}'. Allowed: {sorted(allowed_sources)}"
+        )
+    if audio_source == "uploaded_blocks" and not timeline.get("audio_overlays"):
+        raise RenderError(
+            "audio_source='uploaded_blocks' nhưng timeline không có audio_overlays "
+            "đã duyệt — fail rõ ràng thay vì fallback im lặng."
+        )
     clips = [c for c in timeline.get("clips", []) if c.get("enabled", True)]
     if not clips:
         raise RenderError("Timeline has no enabled clips")
@@ -112,8 +163,7 @@ def render_video(
         # Phase 2: Concatenate clips
         concat_file = temp_dir / "concat.txt"
         with open(concat_file, "w", encoding="utf-8") as fh:
-            for cf in clip_files:
-                fh.write(f"file '{cf.absolute().as_posix()}'\n")
+            fh.writelines(f"file '{cf.absolute().as_posix()}'\n" for cf in clip_files)
 
         if progress_callback:
             progress_callback(66, "Concatenating clips")
@@ -150,41 +200,84 @@ def render_video(
         if render_configuration is not None:
             if progress_callback:
                 progress_callback(78, "Applying audio post-processing & BGM mixing")
-            mix_output = temp_dir / "mixed.mp4" if tts_enabled else output_path
-            apply_global_audio_mix(
-                joined_video_path=joined_video_path,
-                output_path=mix_output,
-                project_id=project_id,
-                configuration=render_configuration,
-                output_duration_seconds=total_timeline_dur,
-                output_timeline_offset_seconds=output_timeline_offset_seconds,
-                progress_callback=progress_callback,
-                cancellation_token=cancellation_token,
-                base_percent=78,
-                span_percent=18 if tts_enabled else 18,
-            )
 
-            # Phase 3b: TTS narration overlay (script beats -> speech)
-            if tts_enabled:
-                from pipeline.tts import generate_and_overlay_narration
+            # Phase 3a (Phase D): uploaded block audio track replaces source audio
+            if audio_source == "uploaded_blocks":
+                from pipeline.audio_track_builder import build_audio_track
 
-                result = generate_and_overlay_narration(
-                    video_path=mix_output,
-                    timeline=timeline,
-                    output_path=output_path,
-                    voice=tts_opts.voice,
-                    rate=tts_opts.rate,
-                    gain_db=tts_opts.gain_db,
-                    duck_gain_db=tts_opts.duck_gain_db,
-                    replace_original=bool(getattr(tts_opts, "replace_original", False)),
-                    temp_dir=temp_dir / "tts",
-                    progress_callback=progress_callback,
+                track_path = temp_dir / "block_audio_track.wav"
+                sync_report = build_audio_track(
+                    audio_overlays=timeline.get("audio_overlays", []),
+                    total_duration_seconds=total_timeline_dur,
+                    output_path=track_path,
+                    sync_report_path=sync_report_path,
                 )
-                if result is None:
-                    # No narration text in timeline — fall back to mixed output
-                    if output_path.exists():
-                        output_path.unlink()
-                    shutil.copy2(mix_output, output_path)
+                # Force TTS off — never layer two voices by accident
+                tts_enabled = False
+                if tts_opts is not None:
+                    tts_opts.enabled = False
+
+                mix_output = temp_dir / "mixed.mp4"
+                _mix_with_block_track(
+                    joined_video_path=joined_video_path,
+                    track_path=track_path,
+                    output_path=mix_output,
+                    project_id=project_id,
+                    configuration=render_configuration,
+                )
+                if output_path.exists():
+                    output_path.unlink()
+                shutil.copy2(mix_output, output_path)
+                timeline["audio_source"] = audio_source
+                timeline["sync_report"] = {
+                    k: sync_report[k] for k in (
+                        "items", "gaps", "total_duration_ms",
+                        "track_duration_ms", "warnings", "errors",
+                    )
+                }
+            elif audio_source == "tts" and not tts_enabled:
+                raise RenderError(
+                    "audio_source='tts' nhưng TTS không được bật trong render configuration."
+                )
+
+            if audio_source != "uploaded_blocks":
+                mix_output = temp_dir / "mixed.mp4" if tts_enabled else output_path
+                apply_global_audio_mix(
+                    joined_video_path=joined_video_path,
+                    output_path=mix_output,
+                    project_id=project_id,
+                    configuration=render_configuration,
+                    output_duration_seconds=total_timeline_dur,
+                    output_timeline_offset_seconds=output_timeline_offset_seconds,
+                    progress_callback=progress_callback,
+                    cancellation_token=cancellation_token,
+                    base_percent=78,
+                    span_percent=18 if tts_enabled else 18,
+                )
+
+                # Phase 3b: TTS narration overlay (script beats -> speech)
+                if tts_enabled:
+                    from pipeline.tts import generate_and_overlay_narration
+
+                    result = generate_and_overlay_narration(
+                        video_path=mix_output,
+                        timeline=timeline,
+                        output_path=output_path,
+                        voice=tts_opts.voice,
+                        rate=tts_opts.rate,
+                        gain_db=tts_opts.gain_db,
+                        duck_gain_db=tts_opts.duck_gain_db,
+                        replace_original=bool(getattr(tts_opts, "replace_original", False)),
+                        temp_dir=temp_dir / "tts",
+                        progress_callback=progress_callback,
+                        subtitle_mode=subtitle_mode,
+                        output_size=(int(preset.get("width", 1280)), int(preset.get("height", 720))),
+                    )
+                    if result is None:
+                        # No narration text in timeline — fall back to mixed output
+                        if output_path.exists():
+                            output_path.unlink()
+                        shutil.copy2(mix_output, output_path)
         else:
             # Fallback legacy mode: move joined directly to output
             if output_path.exists():
@@ -219,6 +312,7 @@ def render_video(
             project_id=project_id,
             timeline_version=timeline.get("version", 1),
             render_config_version=render_configuration.version if render_configuration else 1,
+            audio_source=audio_source,
         )
 
         if not qc_result.valid:

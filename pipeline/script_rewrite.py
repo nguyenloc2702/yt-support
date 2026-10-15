@@ -176,23 +176,62 @@ Trả về JSON theo schema."""
 
     data = chat_json(SYSTEM_PROMPT, user_prompt, json_schema=OUTPUT_SCHEMA)
 
+    # Models occasionally return a bare array instead of {"title":..., "beats":...}.
+    if isinstance(data, list):
+        data = {"title": "Review script", "beats": data}
+
     valid_ids = {int(s["id"]) for s in segments}
+    # Alternate key names some models use for the narration text / segment refs.
+    _TEXT_KEYS = ("text", "content", "narration", "script", "voiceover")
+    _IDS_KEYS = ("source_segment_ids", "segment_ids", "source_ids", "refs")
+    _EMOTION_KEYS = ("emotion", "mood", "tone_beat")
+
+    def _first_str(beat: Dict[str, Any], keys: tuple) -> str:
+        for k in keys:
+            v = beat.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for k in keys:
+            v = beat.get(k)
+            if isinstance(v, list):
+                joined = "\n".join(str(x).strip() for x in v if str(x).strip())
+                if joined:
+                    return joined
+        return ""
+
+    raw_beats = data.get("beats") or data.get("items") or []
     beats: List[Dict[str, Any]] = []
-    for i, beat in enumerate(data.get("beats") or []):
-        ref_ids = [sid for sid in (beat.get("source_segment_ids") or []) if int(sid) in valid_ids]
-        if not ref_ids:
-            logger.warning("Beat %d bị bỏ vì không tham chiếu segment hợp lệ", i)
+    for i, beat in enumerate(raw_beats):
+        if isinstance(beat, str):
+            beat = {"text": beat}
+        if not isinstance(beat, dict):
+            logger.warning("Beat %d skipped: unsupported shape", i)
             continue
+        text = _first_str(beat, _TEXT_KEYS)
+        raw_ids = next(
+            (beat[k] for k in _IDS_KEYS if isinstance(beat.get(k), list)), []
+        )
+        try:
+            ref_ids = [int(sid) for sid in raw_ids if int(sid) in valid_ids]
+        except (TypeError, ValueError):
+            ref_ids = []
+        if not text or not ref_ids:
+            logger.warning("Beat %d skipped: missing text or no valid segment refs", i)
+            continue
+        emotion = next(
+            (str(beat[k]).strip() for k in _EMOTION_KEYS if isinstance(beat.get(k), str)),
+            "neutral",
+        )
         beats.append(
             {
                 "id": len(beats),
-                "text": (beat.get("text") or "").strip(),
+                "text": text,
                 "source_segment_ids": ref_ids,
-                "emotion": (beat.get("emotion") or "neutral").strip(),
+                "emotion": emotion,
             }
         )
     if not beats:
-        raise AnalysisError("LLM không trả về beat nào tham chiếu transcript hợp lệ.")
+        raise AnalysisError("LLM không trả về beat nào có nội dung hợp lệ, hãy thử generate lại.")
 
     return {
         "title": (data.get("title") or "Review script").strip(),

@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Optional
 
 from config.settings import settings
 from core.render_schemas import OutputValidationResult
@@ -13,7 +12,7 @@ def validate_rendered_output(
     expected_width: int,
     expected_height: int,
     expect_audio: bool,
-    duration_tolerance_seconds: Optional[float] = None,
+    duration_tolerance_seconds: float | None = None,
 ) -> OutputValidationResult:
     """
     Automated post-render Quality Control (QC).
@@ -99,6 +98,7 @@ def generate_qc_report(
     project_id: str,
     timeline_version: int,
     render_config_version: int,
+    audio_source: str = "original",
 ) -> Path:
     """Generate and persist a standardized .qc.json report alongside the rendered video."""
     output_path = Path(output_path)
@@ -109,6 +109,7 @@ def generate_qc_report(
         "project_id": project_id,
         "timeline_version": timeline_version,
         "render_config_version": render_config_version,
+        "audio_source": audio_source,
         "valid": validation_result.valid,
         "errors": validation_result.errors,
         "warnings": validation_result.warnings,

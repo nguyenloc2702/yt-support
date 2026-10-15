@@ -288,6 +288,22 @@ class AnalysisService:
 
             self._write_json(proj_dir / "timelines" / "current.json", timeline)
 
+            # Build a report in output-timeline coordinates for the simplified
+            # workflow UI. This is deterministic evidence, not final script text.
+            report(97, "Building output timeline report...")
+            from pipeline.timeline_report import build_timeline_report
+
+            timeline_report = build_timeline_report(
+                timeline=timeline,
+                transcript=segments,
+                scenes=scenes,
+                silences=silences,
+            )
+            self._write_json(
+                analysis_dir / "timeline_report.json",
+                timeline_report,
+            )
+
             with SessionLocal() as db:
                 project = db.query(Project).filter(Project.id == project_id).first()
                 if project:

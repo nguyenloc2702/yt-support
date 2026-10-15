@@ -76,5 +76,13 @@ def test_gate_allows_approved(tmp_path, monkeypatch, transcript):
     svc = ScriptService()
     timeline = svc.build_script_timeline("p1")
     assert timeline["mode"] == "script_review"
-    assert len(timeline["clips"]) == 1
+    # First clip maps to the beat's referenced segment.
     assert timeline["clips"][0]["source_start"] == 0.0
+    # Fallback fills the beat window from unused material instead of
+    # returning an underfilled timeline (duration contract honoured).
+    assert timeline["actual_duration"] > 3.0
+    assert len(timeline["clips"]) > 1
+    # Clips stay within transcript bounds.
+    max_end = max(s["end"] for s in transcript["segments"])
+    for c in timeline["clips"]:
+        assert 0.0 <= c["source_start"] < c["source_end"] <= max_end + 0.01

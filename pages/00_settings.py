@@ -18,7 +18,7 @@ from services.settings_service import (
 logger = get_logger(__name__)
 
 st.set_page_config(page_title="Settings", page_icon="⚙️", layout="wide")
-st.title("⚙️ Settings")
+st.title("⚙️ Cài đặt")
 st.caption(
     "Cấu hình nhà cung cấp AI (OpenAI-compatible, ví dụ xKiro). "
     "API key được mã hóa trước khi lưu vào database."

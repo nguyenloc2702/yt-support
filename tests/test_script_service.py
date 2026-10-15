@@ -72,7 +72,10 @@ def test_full_flow_edited_approved(tmp_path, monkeypatch, project_with_script):
     svc.approve("p1")
     timeline = svc.build_script_timeline("p1")
     assert timeline["mode"] == "script_review"
-    assert len(timeline["clips"]) == 2
+    # Both beats get visual material (beat 1 via fallback fill).
+    beat_ids = {c["beat_id"] for c in timeline["clips"]}
+    assert beat_ids == {0, 1}
+    assert len(timeline["clips"]) >= 2
     assert timeline["clips"][0]["label"] == "script_beat"
 
 

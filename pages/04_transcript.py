@@ -44,7 +44,7 @@ tc_str = f"{mins:02d}:{secs:02d}" if total_sec else ""
 render_studio_header(
     project_name=f"{project.name}",
     resolution=f"{project.width}x{project.height}" if project.width else "",
-    codec="Whisper Transcript",
+    codec="Văn bản Whisper",
     timecode=tc_str,
 )
 
@@ -135,7 +135,7 @@ with col_left:
 
     if st.button("⏩ Chuyển sang biên tập Dòng thời gian (Timeline)", type="primary", use_container_width=True):
         st.session_state.project_id = project_id
-        st.switch_page("pages/04_timeline.py")
+        st.switch_page("pages/06_timeline.py")
 
 # ================= RIGHT COLUMN: Transcript Cards =================
 with col_right:

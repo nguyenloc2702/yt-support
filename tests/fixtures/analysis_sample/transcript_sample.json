@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "media_duration_ms": 10000,
+  "language": "vi",
+  "segments": [
+    {
+      "id": "seg_001",
+      "start_ms": 0,
+      "end_ms": 2500,
+      "duration_ms": 2500,
+      "text": "Xin chào các bạn đến với video của tôi.",
+      "speaker_id": null,
+      "confidence": 0.95,
+      "words": [
+        {"text": "Xin", "start_ms": 100, "end_ms": 400, "confidence": 0.98},
+        {"text": "chào", "start_ms": 400, "end_ms": 700, "confidence": 0.97},
+        {"text": "các", "start_ms": 700, "end_ms": 900, "confidence": 0.96},
+        {"text": "bạn", "start_ms": 900, "end_ms": 1100, "confidence": 0.95},
+        {"text": "đến", "start_ms": 1100, "end_ms": 1300, "confidence": 0.94},
+        {"text": "với", "start_ms": 1300, "end_ms": 1500, "confidence": 0.93},
+        {"text": "video", "start_ms": 1500, "end_ms": 1800, "confidence": 0.92},
+        {"text": "của", "start_ms": 1800, "end_ms": 2000, "confidence": 0.91},
+        {"text": "tôi.", "start_ms": 2000, "end_ms": 2500, "confidence": 0.90}
+      ]
+    },
+    {
+      "id": "seg_002",
+      "start_ms": 2500,
+      "end_ms": 5000,
+      "duration_ms": 2500,
+      "text": "Hôm nay tôi sẽ chia sẻ về chủ đề rất thú vị.",
+      "speaker_id": null,
+      "confidence": 0.94,
+      "words": [
+        {"text": "Hôm", "start_ms": 2600, "end_ms": 2800, "confidence": 0.97},
+        {"text": "nay", "start_ms": 2800, "end_ms": 3000, "confidence": 0.96},
+        {"text": "tôi", "start_ms": 3000, "end_ms": 3200, "confidence": 0.95},
+        {"text": "sẽ", "start_ms": 3200, "end_ms": 3400, "confidence": 0.94},
+        {"text": "chia", "start_ms": 3400, "end_ms": 3600, "confidence": 0.93},
+        {"text": "sẻ", "start_ms": 3600, "end_ms": 3800, "confidence": 0.92},
+        {"text": "về", "start_ms": 3800, "end_ms": 4000, "confidence": 0.91},
+        {"text": "chủ", "start_ms": 4000, "end_ms": 4200, "confidence": 0.90},
+        {"text": "đề", "start_ms": 4200, "end_ms": 4400, "confidence": 0.89},
+        {"text": "rất", "start_ms": 4400, "end_ms": 4600, "confidence": 0.88},
+        {"text": "thú", "start_ms": 4600, "end_ms": 4800, "confidence": 0.87},
+        {"text": "vị.", "start_ms": 4800, "end_ms": 5000, "confidence": 0.86}
+      ]
+    },
+    {
+      "id": "seg_003",
+      "start_ms": 5000,
+      "end_ms": 7500,
+      "duration_ms": 2500,
+      "text": "Hy vọng các bạn sẽ thích nội dung này.",
+      "speaker_id": null,
+      "confidence": 0.93,
+      "words": [
+        {"text": "Hy", "start_ms": 5100, "end_ms": 5300, "confidence": 0.96},
+        {"text": "vọng", "start_ms": 5300, "end_ms": 5500, "confidence": 0.95},
+        {"text": "các", "start_ms": 5500, "end_ms": 5700, "confidence": 0.94},
+        {"text": "bạn", "start_ms": 5700, "end_ms": 5900, "confidence": 0.93},
+        {"text": "sẽ", "start_ms": 5900, "end_ms": 6100, "confidence": 0.92},
+        {"text": "thích", "start_ms": 6100, "end_ms": 6300, "confidence": 0.91},
+        {"text": "nội", "start_ms": 6300, "end_ms": 6500, "confidence": 0.90},
+        {"text": "dung", "start_ms": 6500, "end_ms": 6700, "confidence": 0.89},
+        {"text": "này.", "start_ms": 6700, "end_ms": 7500, "confidence": 0.88}
+      ]
+    },
+    {
+      "id": "seg_004",
+      "start_ms": 7500,
+      "end_ms": 10000,
+      "duration_ms": 2500,
+      "text": "Cảm ơn các bạn đã xem video.",
+      "speaker_id": null,
+      "confidence": 0.92,
+      "words": [
+        {"text": "Cảm", "start_ms": 7600, "end_ms": 7800, "confidence": 0.95},
+        {"text": "ơn", "start_ms": 7800, "end_ms": 8000, "confidence": 0.94},
+        {"text": "các", "start_ms": 8000, "end_ms": 8200, "confidence": 0.93},
+        {"text": "bạn", "start_ms": 8200, "end_ms": 8400, "confidence": 0.92},
+        {"text": "đã", "start_ms": 8400, "end_ms": 8600, "confidence": 0.91},
+        {"text": "xem", "start_ms": 8600, "end_ms": 8800, "confidence": 0.90},
+        {"text": "video.", "start_ms": 8800, "end_ms": 10000, "confidence": 0.89}
+      ]
+    }
+  ],
+  "silence_segments": [
+    {"start_ms": 2300, "end_ms": 2500, "duration_ms": 200},
+    {"start_ms": 4800, "end_ms": 5000, "duration_ms": 200},
+    {"start_ms": 7300, "end_ms": 7500, "duration_ms": 200}
+  ]
+}

@@ -24,8 +24,8 @@ render_sidebar_hardware_status()
 
 # Studio Header
 render_studio_header(
-    project_name="Quản lý Dự án (Project Manager)",
-    resolution="Pro Studio v2.4",
+    project_name="Quản lý Dự án",
+    resolution="Studio Pro v2.4",
     codec="Local Storage",
     timecode="--:--:--:--",
 )
