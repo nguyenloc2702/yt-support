@@ -6,6 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from config.settings import settings
 from core.database import init_db
 from services.media_analysis_service import MediaAnalysisService
 from services.project_service import ProjectService
@@ -45,7 +46,7 @@ except Exception as exc:
     st.error(f"Không tìm thấy project: {exc}")
     st.stop()
 
-media_service = MediaAnalysisService(projects_dir=Path("projects"))
+media_service = MediaAnalysisService(projects_dir=settings.projects_dir)
 
 # ---------------------------------------------------------------------------
 # Header
@@ -78,7 +79,7 @@ else:
         if st.button("⬇ Tạo tệp JSON", type="primary", use_container_width=True):
             try:
                 json_str = media_service.export_document_json(project_id)
-                exports_dir = Path("projects") / project_id / "exports"
+                exports_dir = settings.projects_dir / project_id / "exports"
                 exports_dir.mkdir(parents=True, exist_ok=True)
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 out_path = exports_dir / f"analysis_document_{stamp}.json"

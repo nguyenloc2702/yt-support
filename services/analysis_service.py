@@ -1,26 +1,29 @@
+import hashlib
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
+from config.settings import settings
+from core.database import SessionLocal
+from core.enums import ProjectStatus
+from core.exceptions import AnalysisError, InvalidMediaError, JobCancelledError
+from core.logging_config import get_logger
+from core.models import Project
+from pipeline.audio import extract_audio
+from pipeline.ffmpeg import FFMPEG
 from pipeline.probe import probe_media
 from pipeline.proxy import create_proxy
-from pipeline.audio import extract_audio
-from pipeline.transcribe import transcribe_audio
-from pipeline.segments import build_candidate_segments
-from pipeline.transcript_quality import filter_transcript
-import hashlib
 from pipeline.ranker import HeuristicContentRanker
+from pipeline.segments import build_candidate_segments
 from pipeline.timeline_builder import build_timeline
-from pipeline.ffmpeg import FFMPEG
+from pipeline.transcribe import transcribe_audio
+from pipeline.transcript_quality import filter_transcript
 from utils.cleanup import cleanup_analysis_artifacts, cleanup_render_temp
 from utils.disk import ensure_free_space
 
-from core.database import SessionLocal
-from core.models import Project
-from core.enums import ProjectStatus
-from core.exceptions import AnalysisError, InvalidMediaError, JobCancelledError
-from config.settings import settings
+logger = get_logger(__name__)
 
 
 class AnalysisService:
@@ -33,9 +36,9 @@ class AnalysisService:
     def run_analysis(
         self,
         project_id: str,
-        progress_callback: Optional[Callable[[int, str], None]] = None,
+        progress_callback: Callable[[int, str], None] | None = None,
         cancellation_token=None,
-        options: Optional[Dict[str, Any]] = None,
+        options: dict[str, Any] | None = None,
     ) -> dict:
         """
         Run the full analysis pipeline for a project.
@@ -182,6 +185,56 @@ class AnalysisService:
                 self._write_json(analysis_dir / "scenes.json", scenes)
             else:
                 report(68, f"Scenes already exist ({len(scenes)}), skipping.")
+
+            shots_path = analysis_dir / "shots.json"
+            shots = self._load_json(shots_path)
+            if shots is None:
+                report(69, "Extracting representative keyframes...")
+                check_cancel()
+                try:
+                    from pipeline.keyframes import KeyframeExtractor
+
+                    kf_extractor = KeyframeExtractor()
+                    kf_dir = proj_dir / "keyframes"
+                    shot_source = proxy_path if self._is_valid_video(proxy_path) else source_path
+                    shots = kf_extractor.extract_for_shots(
+                        video_path=shot_source,
+                        shots=scenes or [],
+                        out_dir=kf_dir,
+                        cancellation_token=cancellation_token,
+                    )
+                except Exception as kf_exc:  # noqa: BLE001
+                    logger.warning("Keyframe extraction skipped: %s", kf_exc)
+                    shots = [dict(s) for s in (scenes or [])]
+
+                use_vlm = options.get("use_vlm", False)
+                if not use_vlm:
+                    try:
+                        from services.settings_service import is_vlm_enabled
+                        use_vlm = is_vlm_enabled()
+                    except Exception:  # noqa: BLE001
+                        use_vlm = False
+
+                if use_vlm and shots:
+                    report(70, "Làm giàu mô tả hình ảnh bằng VLM...")
+                    check_cancel()
+                    try:
+                        from pipeline.vlm_captioning import caption_all_shots_parallel
+                        from services.settings_service import get_vlm_model
+
+                        vlm_model = options.get("vlm_model") or get_vlm_model()
+                        shots = caption_all_shots_parallel(
+                            shots=shots,
+                            model=vlm_model,
+                            max_workers=3,
+                            progress_callback=lambda p, m: report(70 + int(p * 0.02), m),
+                        )
+                    except Exception as vlm_exc:  # noqa: BLE001
+                        logger.warning("VLM batch captioning skipped: %s", vlm_exc)
+
+                self._write_json(shots_path, shots)
+            else:
+                report(71, f"Shots already exist ({len(shots)}), skipping.")
 
             silences = self._load_json(analysis_dir / "silences.json")
             if silences is None:
@@ -352,7 +405,7 @@ class AnalysisService:
         analysis_dir: Path,
         source_path: Path,
         media_info,
-        options: Dict[str, Any],
+        options: dict[str, Any],
     ) -> None:
         """Persist analysis configuration + input fingerprint for cache invalidation."""
         h = hashlib.sha256()
@@ -373,7 +426,7 @@ class AnalysisService:
     def _detect_scenes(self, video_path: Path) -> list:
         video_manager = None
         try:
-            from scenedetect import VideoManager, SceneManager
+            from scenedetect import SceneManager, VideoManager
             from scenedetect.detectors import ContentDetector
 
             video_manager = VideoManager([str(video_path)])

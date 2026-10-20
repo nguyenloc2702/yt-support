@@ -6,6 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from config.settings import settings
 from core.database import init_db
 from services.job_service import JobService
 from services.media_analysis_service import MediaAnalysisService
@@ -47,7 +48,7 @@ except Exception as exc:
     st.error(f"Không tìm thấy project: {exc}")
     st.stop()
 
-media_service = MediaAnalysisService(projects_dir=Path("projects"))
+media_service = MediaAnalysisService(projects_dir=settings.projects_dir)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -143,7 +144,7 @@ with tab_run:
         submitted = st.form_submit_button("🚀 Bắt đầu phân tích", type="primary")
 
     if submitted:
-        source_path = Path("projects") / project_id / "source" / "input.mp4"
+        source_path = settings.projects_dir / project_id / "source" / "input.mp4"
         if not source_path.exists():
             st.error(f"Không tìm thấy file nguồn: {source_path}")
         else:

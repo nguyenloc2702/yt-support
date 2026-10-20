@@ -8,6 +8,7 @@ that knows how to talk to the provider.
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 from core.logging_config import get_logger
@@ -66,6 +67,7 @@ def chat_json_multimodal(
     user_text: str,
     images: list[bytes] | None = None,
     json_schema: dict[str, Any] | None = None,
+    model: str | None = None,
     temperature: float = 0.3,
     max_tokens: int = 4096,
 ) -> dict[str, Any]:
@@ -73,16 +75,23 @@ def chat_json_multimodal(
     Multimodal chat completion: text + optional inline images (base64 JPEG/PNG).
 
     Used by the VLM keyframe captioning stage. Images are sent as data URLs;
-    they are never logged. Raises LLMResponseError on unusable output.
+    they are never logged. Robust against markdown code fences and unsupported
+    response_format on custom providers. Raises LLMResponseError on unusable output.
     """
     import base64
 
+    from services.settings_service import get_vlm_model
+
     client = get_llm_client()
-    model = get_llm_model() or "gemini-2.0-flash"
+    selected_model = model or get_vlm_model()
 
     content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     for img in images or []:
-        b64 = base64.b64encode(img).decode("ascii")
+        if isinstance(img, (str, Path)):
+            raw_bytes = Path(img).read_bytes()
+        else:
+            raw_bytes = img
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
         content.append(
             {
                 "type": "image_url",
@@ -91,7 +100,7 @@ def chat_json_multimodal(
         )
 
     kwargs: dict[str, Any] = {
-        "model": model,
+        "model": selected_model,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "messages": [
@@ -110,19 +119,23 @@ def chat_json_multimodal(
     try:
         response = client.chat.completions.create(**kwargs)
     except Exception as exc:
-        raise LLMResponseError(f"VLM request failed: {exc}") from exc
+        err = str(exc)
+        if "response_format" in err or "json_schema" in err or "json_object" in err:
+            kwargs.pop("response_format", None)
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as exc2:
+                raise LLMResponseError(f"VLM request failed: {exc2}") from exc2
+        else:
+            raise LLMResponseError(f"VLM request failed: {exc}") from exc
 
     msg = response.choices[0].message if response.choices else None
     content_out = getattr(msg, "content", None)
     if not content_out:
         raise LLMResponseError("VLM trả về nội dung rỗng.")
 
-    try:
-        return json.loads(content_out)
-    except json.JSONDecodeError as exc:
-        raise LLMResponseError(
-            f"VLM trả về JSON không hợp lệ: {str(content_out)[:200]}..."
-        ) from exc
+    return _parse_llm_json(content_out)
+
 
 
 _FENCE_RE = None  # compiled lazily
@@ -155,7 +168,6 @@ def _parse_llm_json(content: str) -> dict[str, Any]:
     A bare JSON array is wrapped as {"items": [...]} so callers that expect
     an object can still normalize it (e.g. treat items as beats).
     """
-    import re
 
     candidates = [content, _strip_code_fences(content), _extract_json_object(content)]
     for cand in candidates:

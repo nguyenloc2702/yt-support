@@ -60,10 +60,21 @@ def _evidence_for_segment(segment: str, rows: list[dict[str, Any]]) -> dict[str,
     audio_state = best_row.get("audio_state", "unknown")
     has_speech = bool(best_row.get("has_speech"))
 
-    if best_score >= 0.45:
+    visual_words = _words(str(best_row.get("visual_description") or ""))
+    transcript_words = _words(str(best_row.get("transcript") or ""))
+    has_vlm = bool(best_row.get("has_vlm"))
+
+    visual_overlap = script_words & visual_words
+    transcript_overlap = script_words & transcript_words
+
+    if best_score >= 0.40:
         status = "matched"
         severity = "low"
-        message = f"từ {start:.1f}s đến {end:.1f}s: Nội dung script có evidence khớp tốt trong timeline."
+        if has_vlm and len(visual_overlap) >= len(transcript_overlap) and visual_overlap:
+            cues = ", ".join(sorted(visual_overlap)[:3])
+            message = f"từ {start:.1f}s đến {end:.1f}s: Khớp tốt với bối cảnh hình ảnh VLM (từ khóa: {cues})."
+        else:
+            message = f"từ {start:.1f}s đến {end:.1f}s: Nội dung script có evidence khớp tốt trong timeline."
     elif best_score >= 0.15:
         status = "partial"
         severity = "medium"
@@ -71,7 +82,11 @@ def _evidence_for_segment(segment: str, rows: list[dict[str, Any]]) -> dict[str,
     else:
         status = "miss"
         severity = "high"
-        message = f"từ {start:.1f}s đến {end:.1f}s: Không tìm thấy evidence đủ rõ cho nội dung script."
+        if has_vlm and best_row.get("visual_description"):
+            short_desc = str(best_row.get("visual_description"))[:45]
+            message = f"từ {start:.1f}s đến {end:.1f}s: Lệch hình ảnh — VLM ghi nhận '{short_desc}...' không khớp script."
+        else:
+            message = f"từ {start:.1f}s đến {end:.1f}s: Không tìm thấy evidence đủ rõ cho nội dung script."
 
     # Audio missing detection: script requires speech / narration cue
     requires_speech = bool(_SPEECH_CUES_RE.search(segment))

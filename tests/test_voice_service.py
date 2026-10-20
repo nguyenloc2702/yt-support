@@ -78,3 +78,26 @@ def test_provider_failure_no_cache_raises(monkeypatch):
     monkeypatch.setattr("edge_tts.list_voices", boom)
     with pytest.raises(RenderError, match="danh sách giọng"):
         voice_service.list_voices()
+
+
+def test_xkiro_voices_metadata():
+    assert len(voice_service.XKIRO_VOICES_METADATA) == 4
+    ids = {v["id"] for v in voice_service.XKIRO_VOICES_METADATA}
+    assert "confident-male-vietnamese" in ids
+    assert "sweet-female-vietnamese" in ids
+
+
+def test_preview_voice_routes_xkiro(monkeypatch, tmp_path):
+    called = []
+
+    def fake_synth(text, voice, out_path):
+        called.append((text, voice, out_path))
+        out_path.write_bytes(b"dummy_mp3")
+
+    monkeypatch.setattr("pipeline.tts.synthesize_one_xkiro", fake_synth)
+    out = tmp_path / "sample.mp3"
+    voice_service.preview_voice("confident-male-vietnamese", out)
+    assert len(called) == 1
+    assert called[0][1] == "confident-male-vietnamese"
+    assert out.exists()
+

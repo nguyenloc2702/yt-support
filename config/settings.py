@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("./data")
     projects_dir: Path = Path("./projects")
+    downloads_dir: Path = Path("G:/My Drive/Video_Projects/downloads")
     log_dir: Path = Path("./logs")
 
     max_upload_gb: int = 10

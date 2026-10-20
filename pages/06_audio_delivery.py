@@ -5,6 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from config.settings import settings
 from core.database import init_db
 from services.audio_delivery_service import AudioDeliveryService
 from services.project_service import ProjectService
@@ -44,7 +45,7 @@ except Exception as exc:
     st.error(f"Không tìm thấy project: {exc}")
     st.stop()
 
-delivery_service = AudioDeliveryService(projects_dir=Path("projects"))
+delivery_service = AudioDeliveryService(projects_dir=settings.projects_dir)
 
 # ---------------------------------------------------------------------------
 # Sidebar & Header
@@ -152,7 +153,7 @@ with tab_upload:
 
     if submit_btn and uploaded_file is not None:
         # Save to disk under projects/<id>/audio_deliveries/
-        audio_dir = Path("projects") / project_id / "audio_deliveries"
+        audio_dir = settings.projects_dir / project_id / "audio_deliveries"
         audio_dir.mkdir(parents=True, exist_ok=True)
         dest_path = audio_dir / f"{selected_block.block_id}_{uploaded_file.name}"
         with open(dest_path, "wb") as fh:

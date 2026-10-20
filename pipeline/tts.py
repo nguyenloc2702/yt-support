@@ -227,6 +227,56 @@ async def _synthesize_one_pitch(
     await communicate.save(str(out_path))
 
 
+XKIRO_VOICES = {
+    "confident-male-vietnamese",
+    "sweet-female-vietnamese",
+    "gentle-female-vietnamese",
+    "standard-female-vietnamese",
+}
+
+
+def is_xkiro_voice(voice: str) -> bool:
+    if not voice:
+        return False
+    v = voice.lower()
+    return v in XKIRO_VOICES or v.startswith("xkiro:") or ("vietnamese" in v and not v.startswith("vi-"))
+
+
+def synthesize_one_xkiro(text: str, voice: str, out_path: Path) -> None:
+    """Synthesize text using xKiro TTS API."""
+    import json
+    import urllib.request
+    from services.settings_service import get_llm_api_key
+
+    api_key = get_llm_api_key()
+    if not api_key:
+        raise RenderError("xKiro API key không tồn tại. Vui lòng cấu hình API key trong Cài đặt.")
+
+    actual_voice = voice.replace("xkiro:", "")
+    payload = {
+        "model": "xkiro-voice",
+        "voice": actual_voice,
+        "input": text,
+    }
+    req = urllib.request.Request(
+        "https://api.xkiro.com/v1/audio/speech",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            audio_bytes = resp.read()
+            if not audio_bytes:
+                raise RenderError(f"xKiro TTS trả về audio rỗng cho giọng '{actual_voice}'")
+            out_path.write_bytes(audio_bytes)
+    except Exception as exc:
+        raise RenderError(f"Lỗi khi gọi xKiro TTS API ({actual_voice}): {exc}") from exc
+
+
 def synthesize_narration(
     items: List[Dict[str, Any]],
     out_dir: Path,
@@ -257,56 +307,62 @@ def synthesize_narration(
             if not text:
                 raise RenderError(f"TTS synthesis failed for segment {i}: empty narration text")
 
-            # Edge-tts randomly returns NoAudioReceived ~5-10% of requests, even
-            # with pitch="+0Hz"; omitting the pitch parameter entirely is the
-            # only reliable fallback. Neutral pitch is skipped from the start.
-            neutral_pitch = item_pitch in ("+0Hz", "+0hz", "0Hz", "")
-            plan = (
-                [(None, _TTS_MAX_ATTEMPTS + 1)]
-                if neutral_pitch
-                else [(item_pitch, _TTS_MAX_ATTEMPTS), (None, _TTS_MAX_ATTEMPTS)]
-            )
-            last_exc: Exception | None = None
-            # Persistent cache: previously synthesized cues are reused across
-            # runs so a mid-batch failure only re-requests the failed segment.
-            cache_pitch = None if neutral_pitch else item_pitch
-            cached = _cache_lookup(text, voice, item_rate, cache_pitch, mp3_path)
-            for pitch_value, attempts in ([] if cached else plan):
-                for attempt in range(attempts):
-                    try:
-                        if pitch_value is None:
-                            synthesize_coro = _synthesize_one(
-                                text, voice, item_rate, volume, mp3_path
-                            )
+            if is_xkiro_voice(voice):
+                cached = _cache_lookup(text, voice, item_rate, None, mp3_path)
+                if not cached:
+                    synthesize_one_xkiro(text, voice, mp3_path)
+                    _cache_store(text, voice, item_rate, None, mp3_path)
+            else:
+                # Edge-tts randomly returns NoAudioReceived ~5-10% of requests, even
+                # with pitch="+0Hz"; omitting the pitch parameter entirely is the
+                # only reliable fallback. Neutral pitch is skipped from the start.
+                neutral_pitch = item_pitch in ("+0Hz", "+0hz", "0Hz", "")
+                plan = (
+                    [(None, _TTS_MAX_ATTEMPTS + 1)]
+                    if neutral_pitch
+                    else [(item_pitch, _TTS_MAX_ATTEMPTS), (None, _TTS_MAX_ATTEMPTS)]
+                )
+                last_exc: Exception | None = None
+                # Persistent cache: previously synthesized cues are reused across
+                # runs so a mid-batch failure only re-requests the failed segment.
+                cache_pitch = None if neutral_pitch else item_pitch
+                cached = _cache_lookup(text, voice, item_rate, cache_pitch, mp3_path)
+                for pitch_value, attempts in ([] if cached else plan):
+                    for attempt in range(attempts):
+                        try:
+                            if pitch_value is None:
+                                synthesize_coro = _synthesize_one(
+                                    text, voice, item_rate, volume, mp3_path
+                                )
+                            else:
+                                synthesize_coro = _synthesize_one_pitch(
+                                    text, voice, item_rate, volume, pitch_value, mp3_path
+                                )
+                            asyncio.run(synthesize_coro)
+                            last_exc = None
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            last_exc = exc
+                            if attempt < attempts - 1:
+                                time.sleep(_TTS_RETRY_BACKOFF_SECONDS * (attempt + 1))
                         else:
-                            synthesize_coro = _synthesize_one_pitch(
-                                text, voice, item_rate, volume, pitch_value, mp3_path
-                            )
-                        asyncio.run(synthesize_coro)
-                        last_exc = None
+                            continue
+                        # Retry exhausted for this pitch mode: cool down before
+                        # switching strategy (rate-limit window is ~60s).
+                        if attempts > 1:
+                            time.sleep(_TTS_RATE_LIMIT_COOLDOWN_SECONDS)
+                    if last_exc is None:
                         break
-                    except Exception as exc:  # noqa: BLE001
-                        last_exc = exc
-                        if attempt < attempts - 1:
-                            time.sleep(_TTS_RETRY_BACKOFF_SECONDS * (attempt + 1))
-                    else:
-                        continue
-                    # Retry exhausted for this pitch mode: cool down before
-                    # switching strategy (rate-limit window is ~60s).
-                    if attempts > 1:
-                        time.sleep(_TTS_RATE_LIMIT_COOLDOWN_SECONDS)
-                if last_exc is None:
-                    break
 
-            if last_exc is not None:
-                raise RenderError(
-                    f"TTS synthesis failed for segment {i}: {last_exc}"
-                ) from last_exc
+                if last_exc is not None:
+                    raise RenderError(
+                        f"TTS synthesis failed for segment {i}: {last_exc}"
+                    ) from last_exc
 
-            if not mp3_path.exists() or mp3_path.stat().st_size == 0:
-                raise RenderError(f"TTS produced empty audio for segment {i}")
+                if not mp3_path.exists() or mp3_path.stat().st_size == 0:
+                    raise RenderError(f"TTS produced empty audio for segment {i}")
 
-            _cache_store(text, voice, item_rate, cache_pitch, mp3_path)
+                _cache_store(text, voice, item_rate, cache_pitch, mp3_path)
 
             # Throttle consecutive requests; edge-tts rate-limits bursts.
             if i < len(items) - 1:

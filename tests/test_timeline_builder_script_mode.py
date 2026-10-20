@@ -36,3 +36,27 @@ def test_all_clips_renderer_compatible_fields():
         assert "transition" in clip
     assert tl["actual_duration"] > 0
     assert tl["render_options"]["video_codec"] == "h264"
+
+
+def test_summary_stratified_spans_entire_video():
+    # 20 candidates spanning 1000s
+    candidates = [
+        _candidate(i * 50, (i + 1) * 50, score=0.6)
+        for i in range(20)
+    ]
+    tl = build_timeline(candidates, "summary", target_duration=200.0, source_duration=1000.0)
+    clips = tl["clips"]
+    assert len(clips) >= 4
+    # The summary MUST span from early video to late video (not clustered in first 20%)
+    first_clip_start = clips[0]["source_start"]
+    last_clip_end = clips[-1]["source_end"]
+    assert first_clip_start < 200.0
+    assert last_clip_end > 700.0
+    # Total duration should be close to target 200.0s
+    actual_dur = sum(c["source_end"] - c["source_start"] for c in clips)
+    assert abs(actual_dur - 200.0) <= 2.0
+    # Story arc labels must be assigned
+    labels = {c.get("label") for c in clips}
+    assert "hook" in labels
+    assert "conclusion" in labels
+

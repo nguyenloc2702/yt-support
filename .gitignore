@@ -33,4 +33,11 @@ __pycache__/
 scripts_tmp_*.py
 pw_out/
 temp_tts_*/
+temp_*/
+scratch/
+*.words.json
+
+# Account sessions and pool state (CRITICAL SECURITY: never commit cookies)
+/sessions/*
+!/sessions/.gitkeep
 

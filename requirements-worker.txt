@@ -1,0 +1,13 @@
+# Worker container requirements for production VPS
+gemini-webapi==2.1.1
+curl-cffi~=0.16.2
+loguru~=0.7.3
+requests>=2.31.0
+filelock>=3.15.0
+pydantic>=2.8,<3.0
+pydantic-settings>=2.4,<3.0
+python-dotenv>=1.0,<2.0
+edge-tts>=7.0,<8.0
+yt-dlp>=2024.8.6
+faster-whisper>=1.0,<2.0
+numpy>=1.26,<3.0

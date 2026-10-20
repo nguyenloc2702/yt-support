@@ -1,0 +1,32 @@
+services:
+  video-worker:
+    image: ${WORKER_IMAGE:-ghcr.io/nguyenloc2702/support-video-edit/worker:latest}
+    container_name: support-video-worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - APP_ENV=production
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - RCLONE_REMOTE=${RCLONE_REMOTE:-gdrive}
+      - RCLONE_REMOTE_FOLDER=${RCLONE_REMOTE_FOLDER:-Video_Projects/history_of_microsoft/raw_shots}
+    volumes:
+      # Persistent external volumes on host VPS
+      - /opt/support-video-edit/shared/sessions:/app/sessions
+      - /opt/support-video-edit/shared/data:/app/data
+      - /opt/support-video-edit/shared/logs:/app/logs
+      - /opt/support-video-edit/shared/rclone:/root/.config/rclone
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

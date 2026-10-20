@@ -74,31 +74,106 @@ def build_timeline(
         if preserve_source_order:
             selected.sort(key=lambda x: x["source_start"])
     elif mode == "summary":
-        # For summary, we need to assign labels: hook, context, main_point, conclusion
-        # Use heuristics: first candidate as hook, last as conclusion, others as main_point
-        # For simplicity, select top candidates sorted by overall, then reorder by source_start
-        sorted_candidates = sorted(candidates, key=lambda x: x["scores"].get("overall", 0), reverse=True)
-        # Select up to target duration
+        # Stratified temporal window sampling:
+        # Ensures coverage across the entire video arc (Intro -> Rising action -> Climax -> Ending).
+        if not source_duration or source_duration <= 0:
+            source_duration = max((c["source_end"] for c in candidates), default=target_duration)
+
+        # Divide source video into balanced temporal windows
+        num_windows = max(4, min(16, int(target_duration / 40.0)))
+        win_size = source_duration / num_windows
+        budget_per_win = target_duration / num_windows
+
+        def _cand_key(c: Dict[str, Any]) -> Any:
+            return c.get("id") or (round(float(c.get("source_start", 0.0)), 3), round(float(c.get("source_end", 0.0)), 3))
+
         selected = []
         total_duration = 0.0
-        for cand in sorted_candidates:
-            if total_duration + cand["duration"] <= target_duration:
-                selected.append(cand)
-                total_duration += cand["duration"]
-            else:
-                remaining = target_duration - total_duration
-                if remaining >= 1.0 and cand["duration"] > remaining:
+        used_ids = set()
+
+        # Step 1: Pick top highlight candidate(s) from each temporal window
+        for w in range(num_windows):
+            w_start = w * win_size
+            w_end = (w + 1) * win_size
+
+            win_cands = [
+                c for c in candidates
+                if _cand_key(c) not in used_ids and not (c["source_end"] <= w_start or c["source_start"] >= w_end)
+            ]
+            if not win_cands:
+                continue
+
+            win_cands.sort(key=lambda x: x["scores"].get("overall", 0), reverse=True)
+
+            win_used = 0.0
+            for cand in win_cands:
+                if total_duration >= target_duration:
+                    break
+
+                rem_win_budget = budget_per_win - win_used
+                rem_total_budget = target_duration - total_duration
+                max_allowed = min(rem_win_budget, rem_total_budget)
+
+                if max_allowed < 3.0:
+                    break
+
+                cand_dur = cand["duration"]
+                if cand_dur <= max_allowed:
+                    selected.append(cand)
+                    used_ids.add(_cand_key(cand))
+                    win_used += cand_dur
+                    total_duration += cand_dur
+                else:
                     trim_cand = cand.copy()
-                    trim_cand["source_end"] = trim_cand["source_start"] + remaining
-                    trim_cand["duration"] = remaining
+                    trim_cand["source_end"] = trim_cand["source_start"] + max_allowed
+                    trim_cand["duration"] = max_allowed
                     selected.append(trim_cand)
-                    total_duration += remaining
-                break
+                    used_ids.add(_cand_key(cand))
+                    win_used += max_allowed
+                    total_duration += max_allowed
+                    break
+
+        # Step 2: Fill remaining budget with highest overall candidates if any window had spare budget
+        if total_duration < target_duration - 1.0:
+            remaining_cands = sorted(
+                [c for c in candidates if _cand_key(c) not in used_ids],
+                key=lambda x: x["scores"].get("overall", 0),
+                reverse=True,
+            )
+            for cand in remaining_cands:
+                rem = target_duration - total_duration
+                if rem < 1.0:
+                    break
+                cand_dur = cand["duration"]
+                if cand_dur <= rem:
+                    selected.append(cand)
+                    used_ids.add(_cand_key(cand))
+                    total_duration += cand_dur
+                elif rem >= 3.0:
+                    trim_cand = cand.copy()
+                    trim_cand["source_end"] = trim_cand["source_start"] + rem
+                    trim_cand["duration"] = rem
+                    selected.append(trim_cand)
+                    used_ids.add(_cand_key(cand))
+                    total_duration += rem
+                    break
+
         if not selected and candidates:
             selected = [candidates[0]]
-        # Sort by source_start to preserve order (or we could reorder for summary)
-        # For summary, we might reorder to hook->context->main->conclusion, but preserve order for now
+
         selected.sort(key=lambda x: x["source_start"])
+
+        # Step 3: Assign story-arc labels based on temporal progress
+        for idx, cand in enumerate(selected):
+            progress = (cand["source_start"] + cand["source_end"]) / (2 * max(source_duration, 1.0))
+            if idx == 0 or progress < 0.10:
+                cand["label"] = "hook"
+            elif idx == len(selected) - 1 or progress >= 0.85:
+                cand["label"] = "conclusion"
+            elif progress < 0.40:
+                cand["label"] = "context"
+            else:
+                cand["label"] = "main_point"
     else:
         # Default: use all candidates sorted by source_start
         selected = sorted(candidates, key=lambda x: x["source_start"])
@@ -112,7 +187,7 @@ def build_timeline(
             "source_end": cand["source_end"],
             "order": i,
             "enabled": True,
-            "label": "other",
+            "label": cand.get("label", "other"),
             "reason": cand.get("reason", ""),
             "score": cand["scores"].get("overall", 0.5),
             "transition": "cut"

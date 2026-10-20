@@ -51,16 +51,32 @@ class HeuristicContentRanker:
                 clarity *= (1.0 - (silence_ratio - 0.3) * 0.5)
             clarity = max(0.0, min(clarity, 1.0))
 
+            # Visual scene activity: candidates spanning multiple fast cuts indicate action
+            scene_count = len(cand.get("scene_ids", []))
+            visual_score = min(scene_count / 3.0, 1.0)
+
+            # Action and emotional arousal keywords (Vietnamese & English)
+            text_lower = (cand.get("text") or "").lower()
+            action_cues = (
+                "snake", "snakes", "rắn", "trăn", "python", "bite", "bit", "cắn",
+                "blood", "máu", "dead", "death", "chết", "danger", "nguy hiểm",
+                "attack", "tấn công", "hét", "sợ", "chạy", "run", "boat", "thuyền",
+                "lost", "mất", "god", "chúa", "trời", "holy", "look", "nhìn", "wow",
+            )
+            action_hits = sum(1 for cue in action_cues if cue in text_lower)
+            action_score = min(action_hits * 0.15, 1.0)
+
             # Relevance from TF-IDF
             relevance = relevance_scores.get(i, 0.5)
 
             # Overall score (heuristic)
             overall = (
                 0.30 * relevance +
-                0.25 * info_density +
-                0.20 * clarity +
+                0.20 * info_density +
+                0.15 * clarity +
                 0.15 * hook +
-                0.10 * 0.5  # visual_score default 0.5
+                0.10 * action_score +
+                0.10 * visual_score
             )
             # Penalize redundancy later (after computing similarity)
             overall = max(0.0, min(overall, 1.0))
@@ -70,7 +86,8 @@ class HeuristicContentRanker:
                 "information_density": info_density,
                 "clarity": clarity,
                 "hook": hook,
-                "visual": 0.5,
+                "action": action_score,
+                "visual": visual_score,
                 "overall": overall,
             }
 
@@ -84,7 +101,33 @@ class HeuristicContentRanker:
     def _compute_relevance(self, candidates: List[Dict[str, Any]]) -> Dict[int, float]:
         """Compute TF-IDF similarity between candidate text and topic/keywords."""
         if not self.topic and not self.keywords:
-            return {i: 0.5 for i in range(len(candidates))}
+            # Auto-extract top thematic keywords from the entire corpus (Global Topic Discovery)
+            texts = [c.get("text", "") for c in candidates if c.get("text")]
+            if not texts or len(texts) < 2:
+                return {i: 0.5 for i in range(len(candidates))}
+            try:
+                vectorizer = TfidfVectorizer(max_features=40, stop_words="english", token_pattern=r"(?u)\b\w+\b")
+                tfidf_matrix = vectorizer.fit_transform(texts)
+                centroid = np.asarray(tfidf_matrix.mean(axis=0))
+                similarities = cosine_similarity(tfidf_matrix, centroid).flatten()
+                min_s = float(similarities.min())
+                max_s = float(similarities.max())
+                if max_s > min_s:
+                    normalized = 0.3 + 0.6 * (similarities - min_s) / (max_s - min_s)
+                else:
+                    normalized = np.full_like(similarities, 0.5)
+
+                idx_map = {}
+                text_idx = 0
+                for i, c in enumerate(candidates):
+                    if c.get("text"):
+                        idx_map[i] = float(normalized[text_idx])
+                        text_idx += 1
+                    else:
+                        idx_map[i] = 0.3
+                return idx_map
+            except Exception:
+                return {i: 0.5 for i in range(len(candidates))}
 
         texts = [c["text"] for c in candidates]
         if not texts:

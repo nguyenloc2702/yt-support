@@ -33,6 +33,12 @@ from services.asset_service import AssetService
 from services.job_service import JobService
 from services.project_service import ProjectService
 from services.render_config_service import RenderConfigService
+from services.settings_service import (
+    PROVIDER_PRESETS,
+    get_provider_preset,
+    get_vlm_model,
+    is_vlm_enabled,
+)
 from utils.ui import inject_pro_css, render_sidebar_hardware_status
 
 st.set_page_config(
@@ -250,6 +256,15 @@ else:
             step=10,
             help="Thời lượng video tổng hợp sau khi cắt gọn.",
         )
+        use_vlm_toggle = st.checkbox(
+            "👁️ Bật phân tích bối cảnh AI (VLM)",
+            value=is_vlm_enabled(),
+            help="Tự động trích xuất keyframe và phân tích bối cảnh chân thực bằng AI thị giác.",
+        )
+        preset_info = PROVIDER_PRESETS.get(get_provider_preset(), {})
+        st.caption(
+            f"Provider: **{preset_info.get('name', 'Custom')}** • Model VLM: `{get_vlm_model()}`"
+        )
 
     with col_action:
         st.write("")
@@ -269,6 +284,8 @@ else:
                 "topic": "",
                 "keywords": [],
                 "use_semantic": True,
+                "use_vlm": use_vlm_toggle,
+                "vlm_model": get_vlm_model(),
             }
             _save_json_file(opts_path, options)
             job_service.submit_analysis(project_id, options)
@@ -301,24 +318,84 @@ else:
             trans_path = proj_dir / "analysis" / "transcription.json"
             scenes_path = proj_dir / "analysis" / "scenes.json"
             silences_path = proj_dir / "analysis" / "silences.json"
+            shots_path = proj_dir / "analysis" / "shots.json"
             transcript = _load_json_file(trans_path) or []
             scenes = _load_json_file(scenes_path) or []
             silences = _load_json_file(silences_path) or []
+            shots = _load_json_file(shots_path) or []
             report_data = build_timeline_report(
                 timeline=timeline_data,
                 transcript=transcript if isinstance(transcript, list) else [],
                 scenes=scenes if isinstance(scenes, list) else [],
                 silences=silences if isinstance(silences, list) else [],
+                shots=shots if isinstance(shots, list) else [],
             )
             _save_json_file(report_path, report_data)
 
         if report_data:
             rows = report_data.get("rows") or []
+            vlm_count = sum(1 for r in rows if r.get("has_vlm"))
+
+            col_vlm_info, col_vlm_btn = st.columns([3, 1])
+            with col_vlm_info:
+                if vlm_count:
+                    st.caption(f"✨ Đã làm giàu mô tả VLM cho **{vlm_count}/{len(rows)}** mốc thời gian.")
+                else:
+                    st.caption("ℹ️ Chưa có mô tả VLM cho timeline này. Bấm nút bên cạnh để phân tích hình ảnh.")
+            with col_vlm_btn:
+                if st.button("✨ Làm giàu mô tả VLM", use_container_width=True, help="Trích xuất keyframes và gọi VLM để làm giàu mô tả bối cảnh"):
+                    with st.spinner("Đang trích xuất keyframes và phân tích VLM..."):
+                        try:
+                            from pipeline.keyframes import KeyframeExtractor
+                            from pipeline.vlm_captioning import (
+                                caption_all_shots_parallel,
+                            )
+
+                            proxy_p = proj_dir / "proxy" / "proxy_720p.mp4"
+                            src_p = proj_dir / "source" / project.source_filename
+                            shot_video = proxy_p if proxy_p.exists() else src_p
+
+                            kf_extractor = KeyframeExtractor()
+                            kf_dir = proj_dir / "keyframes"
+                            scenes_p = proj_dir / "analysis" / "scenes.json"
+                            scenes_list = _load_json_file(scenes_p) or []
+
+                            raw_shots = kf_extractor.extract_for_shots(
+                                video_path=shot_video,
+                                shots=scenes_list,
+                                out_dir=kf_dir,
+                            )
+                            captioned = caption_all_shots_parallel(
+                                shots=raw_shots,
+                                model=get_vlm_model(),
+                                max_workers=3,
+                            )
+                            shots_p = proj_dir / "analysis" / "shots.json"
+                            _save_json_file(shots_p, captioned)
+
+                            trans_p = proj_dir / "analysis" / "transcription.json"
+                            silences_p = proj_dir / "analysis" / "silences.json"
+                            tr_list = _load_json_file(trans_p) or []
+                            sil_list = _load_json_file(silences_p) or []
+
+                            report_data = build_timeline_report(
+                                timeline=timeline_data,
+                                transcript=tr_list if isinstance(tr_list, list) else [],
+                                scenes=scenes_list if isinstance(scenes_list, list) else [],
+                                silences=sil_list if isinstance(sil_list, list) else [],
+                                shots=captioned,
+                            )
+                            _save_json_file(report_path, report_data)
+                            st.success("Đã hoàn tất làm giàu mô tả bằng VLM!")
+                            st.rerun()
+                        except Exception as vlm_ui_exc:  # noqa: BLE001
+                            st.error(f"Lỗi phân tích VLM: {vlm_ui_exc}")
+
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Tổng số đoạn", len(rows))
             m2.metric("Thời lượng tổng hợp", f"{float(report_data.get('output_duration_seconds') or 0):.1f}s")
             m3.metric("Đoạn có thoại", sum(1 for r in rows if r.get("has_speech")))
-            m4.metric("Khoảng lặng (Silence)", sum(1 for r in rows if r.get("audio_state") == "silence"))
+            m4.metric("Đoạn có VLM", vlm_count)
 
             with st.expander("📋 Bảng mô tả chi tiết từng mốc timestamp", expanded=True):
                 for row in rows:
@@ -328,6 +405,7 @@ else:
                     src_e = float(row.get("source_end") or 0)
                     aud_state = row.get("audio_state", "unknown")
                     conf = row.get("confidence", "low")
+                    vlm_tag = " `[👁️ VLM AI]`" if row.get("has_vlm") else ""
 
                     aud_badge = {
                         "speech_detected": "🗣 Thoại",
@@ -335,7 +413,7 @@ else:
                     }.get(aud_state, "🎵 Âm nền/Nhạc")
 
                     st.markdown(
-                        f"**⏱ {out_s:06.2f}s → {out_e:06.2f}s** `[{aud_badge}]` "
+                        f"**⏱ {out_s:06.2f}s → {out_e:06.2f}s** `[{aud_badge}]`{vlm_tag} "
                         f"*(Nguồn: {src_s:.1f}s - {src_e:.1f}s • Độ tin cậy: {conf})*"
                     )
                     st.write(f"• **Hình ảnh / Hành động:** {row.get('visual_description') or 'Chưa có mô tả'}")

@@ -8,6 +8,7 @@ never display labels, so configs stay valid across UI changes.
 """
 
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.exceptions import RenderError
@@ -66,12 +67,46 @@ def validate_voice(voice_id: str, provider: str = "edge-tts") -> bool:
     return get_voice(voice_id, provider) is not None
 
 
+XKIRO_VOICES_METADATA: List[Dict[str, Any]] = [
+    {
+        "id": "confident-male-vietnamese",
+        "locale": "vi-VN",
+        "gender": "Male",
+        "styles": ["xKiro AI", "Nam tự tin, đĩnh đạc", "Review / Phim"],
+    },
+    {
+        "id": "sweet-female-vietnamese",
+        "locale": "vi-VN",
+        "gender": "Female",
+        "styles": ["xKiro AI", "Nữ ngọt ngào", "Kể chuyện"],
+    },
+    {
+        "id": "gentle-female-vietnamese",
+        "locale": "vi-VN",
+        "gender": "Female",
+        "styles": ["xKiro AI", "Nữ dịu dàng (VIP)"],
+    },
+    {
+        "id": "standard-female-vietnamese",
+        "locale": "vi-VN",
+        "gender": "Female",
+        "styles": ["xKiro AI", "Nữ chuẩn (VIP)"],
+    },
+]
+
+
 def preview_voice(
     voice_id: str, out_path, sample_text: Optional[str] = None
 ) -> None:
-    """Synthesize a short sample of `voice_id` to `out_path` (async via edge-tts)."""
-    import asyncio
+    """Synthesize a short sample of `voice_id` to `out_path` (xKiro or edge-tts)."""
+    from pipeline.tts import is_xkiro_voice, synthesize_one_xkiro
 
+    if is_xkiro_voice(voice_id):
+        text = sample_text or DEFAULT_SAMPLE_TEXT.get("vi", "Xin chào, đây là giọng đọc mẫu.")
+        synthesize_one_xkiro(text, voice_id, Path(out_path))
+        return
+
+    import asyncio
     import edge_tts
 
     # Pick sample text matching the voice locale.
@@ -117,10 +152,11 @@ def _fetch_voices(provider: str = "edge-tts") -> List[Dict[str, Any]]:
         ]
 
     try:
-        voices = asyncio.run(_run())
-        _voice_cache["voices"] = voices
+        edge_voices = asyncio.run(_run())
+        all_voices = list(XKIRO_VOICES_METADATA) + edge_voices
+        _voice_cache["voices"] = all_voices
         _voice_cache["fetched_at"] = now
-        return voices
+        return all_voices
     except Exception as exc:
         if _voice_cache["voices"] is not None:
             logger.warning("Voice provider unreachable (%s); using cached list.", exc)

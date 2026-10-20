@@ -103,6 +103,11 @@ def _normalize_item(item: Any, fallback_id_prefix: str = "item") -> dict[str, An
         "start": start,
         "end": end,
         "description": str(data.get("description") or "").strip(),
+        "vlm_description": str(data.get("vlm_description") or "").strip(),
+        "vlm_subject": str(data.get("vlm_subject") or "").strip(),
+        "vlm_action": str(data.get("vlm_action") or "").strip(),
+        "vlm_context": str(data.get("vlm_context") or "").strip(),
+        "vlm_success": bool(data.get("vlm_success")),
         "keyframes": data.get("keyframes") or [],
         "confidence": _as_float(data.get("confidence"), 1.0),
     }
@@ -116,15 +121,22 @@ def _generate_visual_description(
     audio_state: str,
     duration: float,
 ) -> str:
-    """Generate a rich, deterministic description of visual and action elements."""
-    explicit_desc = clip.get("visual_description") or clip.get("description")
+    """Generate a rich description of visual and action elements with VLM priority."""
+    # 1. Direct explicit description on clip
+    explicit_desc = clip.get("vlm_description") or clip.get("visual_description") or clip.get("description")
     if explicit_desc:
         return str(explicit_desc).strip()
 
-    # If any matched shot has explicit description
+    # 2. VLM descriptions from matched shots (AI Vision)
+    vlm_descs = [s["vlm_description"] for s in matched_shots if s.get("vlm_description")]
+    if vlm_descs:
+        unique_vlm = list(dict.fromkeys(vlm_descs))
+        return " | ".join(unique_vlm)
+
+    # 3. Traditional shot descriptions
     shot_descs = [s["description"] for s in matched_shots if s.get("description")]
     if shot_descs:
-        return " | ".join(shot_descs)
+        return " | ".join(dict.fromkeys(shot_descs))
 
     parts: list[str] = []
 
@@ -255,10 +267,12 @@ def build_timeline_report(
 
             # Determine confidence
             has_speech = bool(speech_text)
+            has_vlm = any(bool(s.get("vlm_description")) for s in matched_shots) or bool(clip.get("vlm_description"))
             has_visual_evidence = bool(matched_scenes or matched_shots)
-            if has_speech and has_visual_evidence:
+
+            if (has_speech and (has_vlm or has_visual_evidence)) or (has_vlm and has_visual_evidence):
                 confidence = "high"
-            elif has_speech or has_visual_evidence:
+            elif has_vlm or has_speech or has_visual_evidence:
                 confidence = "medium"
             else:
                 confidence = "low"
@@ -284,6 +298,7 @@ def build_timeline_report(
                     "visual_description": visual_desc,
                     "transcript": speech_text,
                     "has_speech": has_speech,
+                    "has_vlm": has_vlm,
                     "audio_state": audio_state,
                     "confidence": confidence,
                 }
