@@ -121,7 +121,11 @@ def deduplicate_vtt_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, A
                 continue
         if prev_clean and clean_lower in prev_clean:
             continue
-        deduped.append({"start": seg["start"], "end": seg["end"], "text": txt})
+        start_t = float(seg.get("start", 0.0))
+        end_t = float(seg.get("end", start_t + 1.0))
+        if end_t <= start_t:
+            end_t = start_t + 1.0
+        deduped.append({"start": start_t, "end": end_t, "text": txt})
         prev_clean = clean_lower
     return deduped
 
@@ -165,20 +169,19 @@ class AutomatedFactory:
 
             # 2. Extract Transcript (Try subtitles first to save Whisper CPU/RAM)
             raw_sub_segments = try_extract_subtitles(project_dir)
+            transcript_source = "youtube_subtitles"
             if not raw_sub_segments:
-                # Concurrency Semaphore check before running heavy Whisper
-                while not self.jq.acquire_heavy_lock(job_id):
-                    logger.info("VPS đang bận xử lý 1 tác vụ nặng khác. Job %s chờ 15s...", job_id)
-                    time.sleep(15)
+                transcript_source = "whisper_stt"
+                if self.notifier.is_configured:
+                    self.notifier.send_message(f"🎙 <i>[Job {job_id}] Đang bóc băng Whisper lời thoại gốc...</i>")
 
-                try:
-                    if self.notifier.is_configured:
-                        self.notifier.send_message(f"🎙 <i>[Job {job_id}] Đang bóc băng Whisper lời thoại gốc...</i>")
+                # Concurrency Semaphore check with active heartbeat during heavy Whisper
+                with self.jq.heavy_lock_lease(job_id, interval=15.0):
                     from pipeline.transcribe import transcribe_audio
                     stt_res = transcribe_audio(raw_video, model_size="small", compute_type="int8")
                     raw_sub_segments = stt_res.get("segments", [])
-                finally:
-                    self.jq.release_heavy_lock(job_id)
+
+            logger.info("Transcript acquired from source: %s (%d segments)", transcript_source, len(raw_sub_segments or []))
 
             # Standardize segments with 1-based sequential IDs
             segments = []
@@ -310,123 +313,120 @@ class AutomatedFactory:
         project_dir = Path(job["project_dir"] or (self.output_dir / job_id))
         output_final = project_dir / f"final_{job_id}.mp4"
 
-        # Concurrency Semaphore check before heavy FFmpeg render
-        while not self.jq.acquire_heavy_lock(job_id):
-            time.sleep(15)
-
         temp_render_dir = project_dir / "temp_reup_render"
         temp_tts_dir = project_dir / "temp_tts"
 
         try:
-            logger.info("Executing approved Smart Reup render for %s...", job_id)
-            raw_video = next(project_dir.glob("download.*"), None)
-            if not raw_video:
-                raise FileNotFoundError(f"Source video not found in {project_dir}")
+            with self.jq.heavy_lock_lease(job_id, interval=15.0):
+                logger.info("Executing approved Smart Reup render for %s...", job_id)
+                raw_video = next(project_dir.glob("download.*"), None)
+                if not raw_video:
+                    raise FileNotFoundError(f"Source video not found in {project_dir}")
 
-            # 1. Load script and transcript
-            script_file = project_dir / "script.json"
-            transcript_file = project_dir / "transcript.json"
-            if not script_file.exists() or not transcript_file.exists():
-                raise FileNotFoundError(f"Missing script.json or transcript.json in {project_dir}")
+                # 1. Load script and transcript
+                script_file = project_dir / "script.json"
+                transcript_file = project_dir / "transcript.json"
+                if not script_file.exists() or not transcript_file.exists():
+                    raise FileNotFoundError(f"Missing script.json or transcript.json in {project_dir}")
 
-            script_data = json.loads(script_file.read_text(encoding="utf-8"))
-            transcript_data = json.loads(transcript_file.read_text(encoding="utf-8"))
+                script_data = json.loads(script_file.read_text(encoding="utf-8"))
+                transcript_data = json.loads(transcript_file.read_text(encoding="utf-8"))
 
-            # 2. Match video scenes to script beats using script-led planner
-            from pipeline.script_timeline_planner import plan_script_timeline
-            timeline = plan_script_timeline(script_data, transcript_data)
-            timeline_file = project_dir / "timeline.json"
-            timeline_file.write_text(json.dumps(timeline, indent=2, ensure_ascii=False), encoding="utf-8")
+                # 2. Match video scenes to script beats using script-led planner
+                from pipeline.script_timeline_planner import plan_script_timeline
+                timeline = plan_script_timeline(script_data, transcript_data)
+                timeline_file = project_dir / "timeline.json"
+                timeline_file.write_text(json.dumps(timeline, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            # 3. Cut matched source video clips
-            temp_render_dir.mkdir(parents=True, exist_ok=True)
-            clip_files = []
-            clips = [c for c in timeline.get("clips", []) if c.get("enabled", True)]
-            if not clips:
-                raise ValueError("Timeline contains no enabled video clips.")
+                # 3. Cut matched source video clips
+                temp_render_dir.mkdir(parents=True, exist_ok=True)
+                clip_files = []
+                clips = [c for c in timeline.get("clips", []) if c.get("enabled", True)]
+                if not clips:
+                    raise ValueError("Timeline contains no enabled video clips.")
 
-            logger.info("Cutting %d video clips according to script timeline...", len(clips))
-            for i, clip in enumerate(clips):
-                c_start = float(clip.get("source_start", 0.0))
-                c_end = float(clip.get("source_end", c_start + 5.0))
-                c_dur = max(0.5, c_end - c_start)
-                clip_out = temp_render_dir / f"clip_{i:03d}.mp4"
+                logger.info("Cutting %d video clips according to script timeline...", len(clips))
+                for i, clip in enumerate(clips):
+                    c_start = float(clip.get("source_start", 0.0))
+                    c_end = float(clip.get("source_end", c_start + 5.0))
+                    c_dur = max(0.5, c_end - c_start)
+                    clip_out = temp_render_dir / f"clip_{i:03d}.mp4"
 
-                cmd_cut = [
+                    cmd_cut = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{c_start:.3f}",
+                        "-i", str(raw_video),
+                        "-t", f"{c_dur:.3f}",
+                        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,setsar=1",
+                        "-r", "30",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                        str(clip_out),
+                    ]
+                    subprocess.run(cmd_cut, check=True, capture_output=True)
+                    clip_files.append(clip_out)
+
+                # Concatenate cut clips into joined video
+                concat_list = temp_render_dir / "concat.txt"
+                concat_lines = [f"file '{cf.resolve().as_posix()}'" for cf in clip_files]
+                concat_list.write_text("\n".join(concat_lines), encoding="utf-8")
+                joined_video = temp_render_dir / "joined.mp4"
+
+                cmd_join = [
                     "ffmpeg", "-y",
-                    "-ss", f"{c_start:.3f}",
-                    "-i", str(raw_video),
-                    "-t", f"{c_dur:.3f}",
-                    "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,setsar=1",
-                    "-r", "30",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                    str(clip_out),
+                    "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list),
+                    "-c", "copy",
+                    str(joined_video),
                 ]
-                subprocess.run(cmd_cut, check=True, capture_output=True)
-                clip_files.append(clip_out)
+                subprocess.run(cmd_join, check=True, capture_output=True)
 
-            # Concatenate cut clips into joined video
-            concat_list = temp_render_dir / "concat.txt"
-            concat_lines = [f"file '{cf.resolve().as_posix()}'" for cf in clip_files]
-            concat_list.write_text("\n".join(concat_lines), encoding="utf-8")
-            joined_video = temp_render_dir / "joined.mp4"
+                # 4. Generate Vietnamese Edge-TTS voiceover and mix with auto-ducking BGM
+                from pipeline.tts import generate_and_overlay_narration
+                temp_tts_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Synthesizing Edge-TTS voiceover with auto-ducked original audio...")
 
-            cmd_join = [
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", str(concat_list),
-                "-c", "copy",
-                str(joined_video),
-            ]
-            subprocess.run(cmd_join, check=True, capture_output=True)
+                narrated_video = generate_and_overlay_narration(
+                    video_path=joined_video,
+                    timeline=timeline,
+                    output_path=output_final,
+                    voice="vi-VN-HoaiMyNeural",
+                    gain_db=1.5,
+                    duck_gain_db=-12.0,
+                    temp_dir=temp_tts_dir,
+                )
 
-            # 4. Generate Vietnamese Edge-TTS voiceover and mix with auto-ducking BGM
-            from pipeline.tts import generate_and_overlay_narration
-            temp_tts_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Synthesizing Edge-TTS voiceover with auto-ducked original audio...")
+                if not narrated_video or not output_final.exists() or output_final.stat().st_size == 0:
+                    raise RuntimeError(f"TTS narration overlay failed to generate voiceover video for job {job_id}")
 
-            narrated_video = generate_and_overlay_narration(
-                video_path=joined_video,
-                timeline=timeline,
-                output_path=output_final,
-                voice="vi-VN-HoaiMyNeural",
-                gain_db=1.5,
-                duck_gain_db=-12.0,
-                temp_dir=temp_tts_dir,
-            )
+                # 5. Quality Control validation
+                val_res = validate_rendered_output(output_final)
+                if not val_res.is_valid:
+                    raise ValueError(f"Output video QC failed: {val_res.error_message}")
 
-            if not narrated_video or not output_final.exists() or output_final.stat().st_size == 0:
-                raise RuntimeError(f"TTS narration overlay failed to generate voiceover video for job {job_id}")
+                # 6. Upload to Google Drive and clean up local video buffer
+                remote_name = f"reup_{job_id}.mp4"
+                upload_ok, drive_url = self.uploader.upload_and_clean(
+                    local_path=output_final,
+                    remote_filename=remote_name,
+                    remote_folder="Video_Projects/reup_videos",
+                    clean_local=True,
+                )
 
-            # 5. Quality Control validation
-            val_res = validate_rendered_output(output_final)
-            if not val_res.is_valid:
-                raise ValueError(f"Output video QC failed: {val_res.error_message}")
-
-            # 6. Upload to Google Drive and clean up local video buffer
-            remote_name = f"reup_{job_id}.mp4"
-            upload_ok, drive_url = self.uploader.upload_and_clean(
-                local_path=output_final,
-                remote_filename=remote_name,
-                remote_folder="Video_Projects/reup_videos",
-                clean_local=True,
-            )
-
-            if upload_ok:
-                duration_val = timeline.get("actual_duration", job.get("target_duration", 180.0))
-                self.jq.update_job_status(job_id, status="COMPLETED", final_video=str(output_final), drive_url=drive_url)
-                if self.notifier.is_configured:
-                    self.notifier.send_message(
-                        f"🎉 <b>[SMART REUP HOÀN TẤT] Job: {job_id}</b>\n"
-                        f"✅ Video đã dựng khớp kịch bản, lồng tiếng Edge-TTS & BGM auto-ducking thành công!\n"
-                        f"☁️ Google Drive: <code>{drive_url}</code>\n"
-                        f"⏱ Thời lượng: {duration_val:.1f}s"
-                    )
-                return True
-            else:
-                self.jq.update_job_status(job_id, status="FAILED", error_message="Upload to Google Drive failed")
-                return False
+                if upload_ok:
+                    duration_val = timeline.get("actual_duration", job.get("target_duration", 180.0))
+                    self.jq.update_job_status(job_id, status="COMPLETED", final_video=str(output_final), drive_url=drive_url)
+                    if self.notifier.is_configured:
+                        self.notifier.send_message(
+                            f"🎉 <b>[SMART REUP HOÀN TẤT] Job: {job_id}</b>\n"
+                            f"✅ Video đã dựng khớp kịch bản, lồng tiếng Edge-TTS & BGM auto-ducking thành công!\n"
+                            f"☁️ Google Drive: <code>{drive_url}</code>\n"
+                            f"⏱ Thời lượng: {duration_val:.1f}s"
+                        )
+                    return True
+                else:
+                    self.jq.update_job_status(job_id, status="FAILED", error_message="Upload to Google Drive failed")
+                    return False
 
         except Exception as e:
             logger.error("Render failed for %s: %s", job_id, e, exc_info=True)
@@ -438,7 +438,6 @@ class AutomatedFactory:
             import shutil
             shutil.rmtree(temp_render_dir, ignore_errors=True)
             shutil.rmtree(temp_tts_dir, ignore_errors=True)
-            self.jq.release_heavy_lock(job_id)
 
     # =========================================================================
     # MODE 2: FULL AI GENESIS

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 
 from config.settings import settings
 from core.render_schemas import OutputValidationResult
@@ -8,10 +9,10 @@ from utils.json_io import atomic_write_json
 
 def validate_rendered_output(
     output_path: Path,
-    expected_duration: float,
-    expected_width: int,
-    expected_height: int,
-    expect_audio: bool,
+    expected_duration: float = 0.0,
+    expected_width: int = 0,
+    expected_height: int = 0,
+    expect_audio: Optional[bool] = None,
     duration_tolerance_seconds: float | None = None,
 ) -> OutputValidationResult:
     """
@@ -70,10 +71,10 @@ def validate_rendered_output(
         result.has_audio = True
         result.audio_codec = audio_stream.get("codec_name")
 
-    if expect_audio and not result.has_audio:
+    if expect_audio is True and not result.has_audio:
         result.valid = False
         result.errors.append("Expected audio stream but none was found in output")
-    elif not expect_audio and result.has_audio:
+    elif expect_audio is False and result.has_audio:
         result.warnings.append("Video was expected to be video-only but audio stream is present")
 
     try:

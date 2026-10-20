@@ -97,3 +97,11 @@ class OutputValidationResult(BaseModel):
     has_audio: bool = False
     video_codec: Optional[str] = None
     audio_codec: Optional[str] = None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.valid
+
+    @property
+    def error_message(self) -> str:
+        return "; ".join(self.errors) if self.errors else ""

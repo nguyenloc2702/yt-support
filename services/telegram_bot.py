@@ -139,12 +139,26 @@ class TelegramCommandBot:
             except Exception:
                 disk_str = "Không rõ"
 
+            # Active queue stats
+            try:
+                with self.jq._get_conn() as conn:
+                    rows = conn.execute("""
+                        SELECT status, COUNT(*) as cnt FROM factory_jobs
+                        WHERE status NOT IN ('COMPLETED', 'CANCELLED')
+                        GROUP BY status
+                    """).fetchall()
+                    status_counts = {r["status"]: r["cnt"] for r in rows}
+                queue_str = ", ".join(f"{k}: {v}" for k, v in status_counts.items()) if status_counts else "Trống"
+            except Exception:
+                queue_str = "Không rõ"
+
             kill_status = "🔴 ĐANG TẠM DỪNG (KILL-SWITCH)" if pool_summary["kill_switch_active"] else "🟢 HOẠT ĐỘNG BÌNH THƯỜNG"
 
             status_msg = (
                 f"📊 <b>BÁO CÁO TRẠNG THÁI HỆ THỐNG:</b>\n"
                 f"• Trạng thái: <b>{kill_status}</b>\n"
-                f"• Đĩa trống VPS: <b>{disk_str}</b>\n\n"
+                f"• Đĩa trống VPS: <b>{disk_str}</b>\n"
+                f"• Hàng đợi tác vụ: <code>{queue_str}</code>\n\n"
                 f"👤 <b>Tài khoản Gemini Pro ({pool_summary['total_accounts']}):</b>\n"
                 f"• Sẵn sàng: <b>{pool_summary['available']}</b> | Đang chờ reset: <b>{pool_summary['exhausted']}</b>\n"
                 f"• Cooldown: <b>{pool_summary['cooldown']}</b> | Lỗi xác thực: <b>{pool_summary['auth_error']}</b>"
@@ -157,7 +171,24 @@ class TelegramCommandBot:
             if len(parts) < 2:
                 self.notifier.send_message("⚠️ Vui lòng cung cấp link YouTube: <code>/reup &lt;url&gt; [duration=180]</code>")
                 return
-            url = parts[1]
+            url = parts[1].strip()
+
+            # Prevent duplicate submissions of currently active URL
+            try:
+                with self.jq._get_conn() as conn:
+                    existing = conn.execute(
+                        "SELECT id, status FROM factory_jobs WHERE url = ? AND status NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')",
+                        (url,)
+                    ).fetchone()
+                    if existing:
+                        self.notifier.send_message(
+                            f"⚠️ URL này đang được xử lý trong Job <code>{existing['id']}</code> (Trạng thái: <b>{existing['status']}</b>).\n"
+                            f"Vui lòng đợi job hoàn tất hoặc dùng <code>/status</code>."
+                        )
+                        return
+            except Exception as e:
+                logger.debug("Duplicate URL check error: %s", e)
+
             duration = 180.0
             for p in parts[2:]:
                 if p.startswith("duration="):
@@ -173,7 +204,24 @@ class TelegramCommandBot:
             if len(parts) < 2:
                 self.notifier.send_message("⚠️ Vui lòng cung cấp link YouTube: <code>/remake &lt;url&gt;</code>")
                 return
-            url = parts[1]
+            url = parts[1].strip()
+
+            # Prevent duplicate submissions of currently active URL
+            try:
+                with self.jq._get_conn() as conn:
+                    existing = conn.execute(
+                        "SELECT id, status FROM factory_jobs WHERE url = ? AND status NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')",
+                        (url,)
+                    ).fetchone()
+                    if existing:
+                        self.notifier.send_message(
+                            f"⚠️ URL này đang được xử lý trong Job <code>{existing['id']}</code> (Trạng thái: <b>{existing['status']}</b>).\n"
+                            f"Vui lòng đợi job hoàn tất hoặc dùng <code>/status</code>."
+                        )
+                        return
+            except Exception as e:
+                logger.debug("Duplicate URL check error: %s", e)
+
             if self.on_remake_handler:
                 self._executor.submit(self.on_remake_handler, url)
 

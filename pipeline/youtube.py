@@ -74,6 +74,19 @@ def validate_public_url(url: str) -> None:
             )
 
 
+def validate_youtube_url(url: str) -> None:
+    """Enforces SSRF checks and ensures URL belongs to a recognized YouTube host."""
+    validate_public_url(url)
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    allowed_hosts = {
+        "youtube.com", "www.youtube.com", "m.youtube.com",
+        "youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com"
+    }
+    if host not in allowed_hosts and not host.endswith(".youtube.com") and host != "youtu.be":
+        raise InvalidMediaError(f"URL host '{host}' is not a recognized YouTube domain.")
+
+
 def _terminate(proc: subprocess.Popen, timeout: int = 10) -> None:
     if proc.poll() is not None:
         return
@@ -108,8 +121,8 @@ def download_video(
     if not url or not re.match(r"^https?://", url.strip()):
         raise InvalidMediaError(f"Invalid URL: {url!r}")
 
-    # Enforce SSRF protection before downloading
-    validate_public_url(url.strip())
+    # Enforce SSRF protection and YouTube domain verification before downloading
+    validate_youtube_url(url.strip())
 
     if not check_ytdlp():
         raise DependencyNotFoundError(

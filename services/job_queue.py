@@ -13,6 +13,7 @@ import json
 import logging
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional
 import uuid
@@ -22,6 +23,63 @@ logger = logging.getLogger("job_queue")
 DEFAULT_DB_PATH = Path("data/factory_jobs.sqlite3")
 LOCK_NAME_HEAVY = "HEAVY_PROCESS_LOCK"
 HEAVY_LOCK_TIMEOUT_SEC = 1800.0  # 30 minutes safety auto-expire
+
+
+class HeavyLockLease:
+    """
+    Context manager that acquires the single heavy-process lock and runs
+    a background daemon thread that heartbeats the lease every `interval` seconds.
+    Ensures that long-running operations (Whisper, FFmpeg encode, TTS mix, Assembly)
+    never lose their lease to timeout while actively executing.
+    """
+    def __init__(self, job_queue: "JobQueueManager", job_id: str, interval: float = 30.0, wait_timeout: Optional[float] = None):
+        self.jq = job_queue
+        self.job_id = job_id
+        self.interval = interval
+        self.wait_timeout = wait_timeout
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lost_ownership = False
+
+    @property
+    def is_valid(self) -> bool:
+        return not self._lost_ownership
+
+    def __enter__(self):
+        start_wait = time.time()
+        while True:
+            acquired = self.jq.acquire_heavy_lock(self.job_id)
+            if acquired:
+                break
+            if self.wait_timeout is not None and (time.time() - start_wait) > self.wait_timeout:
+                raise TimeoutError(f"Timed out waiting to acquire heavy lock for job {self.job_id}")
+            time.sleep(5.0)
+
+        self._stop_event.clear()
+        self._lost_ownership = False
+        self._thread = threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+            name=f"heartbeat-{self.job_id}"
+        )
+        self._thread.start()
+        return self
+
+    def _heartbeat_loop(self):
+        while not self._stop_event.wait(self.interval):
+            success = self.jq.heartbeat_heavy_lock(self.job_id)
+            if not success:
+                logger.error("🚨 Heavy lock heartbeat failed for job %s! Lock may have been preempted.", self.job_id)
+                self._lost_ownership = True
+                break
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self.jq.release_heavy_lock(self.job_id)
+        if self._lost_ownership and exc_type is None:
+            raise RuntimeError(f"Heavy lock ownership was lost during execution of job {self.job_id}")
 
 
 class JobQueueManager:
@@ -153,6 +211,10 @@ class JobQueueManager:
         finally:
             conn.close()
 
+    def heavy_lock_lease(self, job_id: str, interval: float = 30.0, wait_timeout: Optional[float] = None) -> HeavyLockLease:
+        """Returns a context manager holding the heavy process lock with active heartbeat."""
+        return HeavyLockLease(self, job_id=job_id, interval=interval, wait_timeout=wait_timeout)
+
     # --- Jobs Management ---
 
     def create_job(self, mode: str, url: str, target_duration: float = 180.0, project_dir: Optional[str] = None) -> str:
@@ -251,12 +313,19 @@ class JobQueueManager:
         return True
 
     def retry_job(self, job_id: str) -> bool:
-        """Retries a FAILED or CANCELLED job, resetting uncompleted shots to PENDING."""
+        """Retries a FAILED, FINAL_UPLOAD_PENDING, or CANCELLED job."""
         with self._get_conn() as conn:
             row = conn.execute("SELECT status FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
-            if not row or row["status"] not in ("FAILED", "CANCELLED"):
+            if not row or row["status"] not in ("FAILED", "CANCELLED", "FINAL_UPLOAD_PENDING"):
                 return False
             now = time.time()
+            if row["status"] == "FINAL_UPLOAD_PENDING":
+                # For final upload pending, we don't reset shots: just refresh updated_at so scanner picks it up
+                conn.execute("UPDATE factory_jobs SET error_message = NULL, updated_at = ? WHERE id = ?", (now, job_id))
+                conn.commit()
+                logger.info("Retried job %s (final upload pending)", job_id)
+                return True
+
             conn.execute("UPDATE factory_jobs SET status = 'APPROVED', error_message = NULL, updated_at = ? WHERE id = ?", (now, job_id))
             conn.execute("""
             UPDATE factory_shots 

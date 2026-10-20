@@ -59,10 +59,33 @@ class StorageUploader:
             )
             return False, None
 
-        logger.info("Uploading %s (%d bytes) to %s/%s via rclone...", local_file.name, local_size, remote_dest, dest_name)
+        # Calculate dynamic timeout based on local file size (min 500 KB/s transfer + 60s base)
+        effective_timeout = max(timeout, int(local_size / (500 * 1024)) + 60)
+        logger.info("Uploading %s (%d bytes) to %s/%s via rclone (timeout: %ds)...",
+                    local_file.name, local_size, remote_dest, dest_name, effective_timeout)
 
         try:
-            # Using 'rclone copyto' first
+            # 1. Idempotency Check: If remote file already exists with matching size, reuse it!
+            verify_cmd = [
+                self.rclone_bin,
+                "lsf",
+                "--format", "s",
+                f"{remote_dest}/{dest_name}",
+            ]
+            pre_check = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
+            if pre_check.returncode == 0 and pre_check.stdout.strip().isdigit():
+                existing_size = int(pre_check.stdout.strip())
+                if existing_size > 0 and abs(existing_size - local_size) <= max(4096, int(local_size * 0.02)):
+                    logger.info("⚡ Remote object %s/%s already exists with matching size (%d bytes). Skipping re-upload.",
+                                dest_folder, dest_name, existing_size)
+                    if clean_local:
+                        try:
+                            local_file.unlink()
+                        except Exception:
+                            pass
+                    return True, f"gdrive://{dest_folder}/{dest_name}"
+
+            # 2. Execute 'rclone copyto'
             cmd = [
                 self.rclone_bin,
                 "copyto",
@@ -72,26 +95,29 @@ class StorageUploader:
                 "--low-level-retries", "10",
                 "--stats-one-line",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=effective_timeout)
             if result.returncode != 0:
                 logger.error("rclone upload failed (code %d): %s", result.returncode, result.stderr)
                 return False, None
 
-            # Verify remote file exists and is non-empty on Google Drive before deleting local file
-            verify_cmd = [
-                self.rclone_bin,
-                "lsf",
-                "--format", "s",
-                f"{remote_dest}/{dest_name}",
-            ]
+            # 3. Verify remote file exists and size matches local file within safe tolerance
             v_res = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
             remote_size_str = v_res.stdout.strip()
             if v_res.returncode != 0 or not remote_size_str:
                 logger.error("rclone remote verification failed for %s/%s: %s", dest_folder, dest_name, v_res.stderr)
                 return False, None
-            if remote_size_str.isdigit() and int(remote_size_str) == 0:
-                logger.error("rclone verified file is 0 bytes (empty/corrupted): %s/%s", dest_folder, dest_name)
-                return False, None
+
+            if remote_size_str.isdigit():
+                remote_size = int(remote_size_str)
+                if remote_size == 0:
+                    logger.error("rclone verified file is 0 bytes (empty/corrupted): %s/%s", dest_folder, dest_name)
+                    return False, None
+                # Size comparison with 2% tolerance for cloud container wrappers/metadata
+                size_diff = abs(remote_size - local_size)
+                if size_diff > max(4096, int(local_size * 0.05)):
+                    logger.error("rclone size mismatch! Local: %d bytes, Remote: %d bytes (diff %d bytes)",
+                                 local_size, remote_size, size_diff)
+                    return False, None
 
             logger.info("Uploaded and verified successfully on Google Drive: %s/%s (%s bytes)", dest_folder, dest_name, remote_size_str)
 
@@ -105,12 +131,12 @@ class StorageUploader:
             else:
                 logger.info("Retained local file for downstream processing: %s", local_file.name)
 
-            # Return virtual drive path
+            # Return virtual drive path (internal cloud locator, not public shareable link)
             virtual_path = f"gdrive://{dest_folder}/{dest_name}"
             return True, virtual_path
 
         except subprocess.TimeoutExpired:
-            logger.error("rclone upload timed out after %ds for %s", timeout, local_file)
+            logger.error("rclone upload timed out after %ds for %s", effective_timeout, local_file)
             return False, None
         except Exception as e:
             logger.error("Unexpected error during rclone upload: %s", e)

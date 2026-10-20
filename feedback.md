@@ -330,3 +330,245 @@ Mình đã kiểm tra lại từng mục trong [`UPGRADE_2026_10_20_1120.md`](UP
 6. Thêm cờ phụ đề cho yt-dlp.
 7. Ghi `pool_state.json` atomic và reset `in_flight` khi khởi động.
 8. Thêm smoke test image Docker và test end-to-end.
+
+---
+
+# Feedback vòng 3 — Hướng dẫn sửa cụ thể cho agent
+
+> Phần này được bổ sung sau khi đã kiểm tra các thay đổi mới nhất. Đây là **specification/read-only feedback**, không phải thay đổi code. Agent triển khai nên xử lý theo thứ tự P0 → P1 → P2 và cập nhật test tương ứng.
+
+## P0 — Bắt buộc trước khi gọi production-ready
+
+### P0.1. Hoàn thiện heartbeat cho heavy lock
+
+**Hiện trạng:** [`heartbeat_heavy_lock()`](services/job_queue.py:127) đã tồn tại nhưng hiện chỉ được gọi trong test; các tác vụ dài như Whisper, FFmpeg, TTS và assembly không gọi heartbeat định kỳ. Lock vẫn có thể hết hạn sau 30 phút trong khi process đang chạy.
+
+**Cần sửa cụ thể:**
+
+1. Xác định một cơ chế heartbeat dùng được trong mọi tác vụ dài: thread/daemon timer theo job, context manager, hoặc polling callback.
+2. Sau khi [`acquire_heavy_lock()`](services/job_queue.py:90) thành công, bắt đầu heartbeat định kỳ ngắn hơn [`HEAVY_LOCK_TIMEOUT_SEC`](services/job_queue.py:22) một khoảng an toàn.
+3. Dừng heartbeat và gọi [`release_heavy_lock()`](services/job_queue.py:147) trong `finally`, kể cả khi FFmpeg/Whisper/TTS ném exception.
+4. Nếu heartbeat thất bại vì lock đã bị job khác chiếm, phải dừng tác vụ hoặc đánh dấu operation không còn ownership; không được tiếp tục chạy như đang giữ lock.
+5. Đặc biệt kiểm tra các đoạn giữ lock trong [`pipeline/automated_factory.py`](pipeline/automated_factory.py:143), [`pipeline/automated_factory.py`](pipeline/automated_factory.py:314), [`core/worker.py`](core/worker.py:167) và [`core/worker.py`](core/worker.py:288).
+
+**Acceptance criteria:**
+
+- Có test chứng minh một operation dài hơn timeout vẫn giữ lock nhờ heartbeat.
+- Job khác không acquire được lock trong toàn bộ operation đầu tiên.
+- Heartbeat luôn dừng sau success, exception và shutdown.
+- Không còn việc dựa vào timeout để tự giải phóng lock đang được sử dụng.
+
+### P0.2. Không âm thầm đưa clip chưa normalize vào documentary
+
+**Hiện trạng:** [`assemble_documentary()`](pipeline/documentary_assembler.py:25) cố normalize clip về 1080p/24fps, nhưng nếu FFmpeg normalize thất bại thì vẫn append clip gốc tại [`pipeline/documentary_assembler.py`](pipeline/documentary_assembler.py:65). Điều này trái với claim tất cả clip đã đồng nhất.
+
+**Cần sửa cụ thể:**
+
+1. Nếu normalize thất bại, coi assembly là lỗi và trả về exception có tên shot, return code và stderr rút gọn.
+2. Chỉ cho phép dùng clip gốc nếu có một bước fallback normalize thứ hai được kiểm chứng; không append clip gốc trực tiếp vào concat list.
+3. Dùng `-map` rõ ràng và bảo đảm mỗi normalized clip chỉ có video, đúng resolution, fps, pixel format.
+4. Kiểm tra output của từng bước bằng `ffprobe` hoặc validator trước khi đưa vào concat.
+5. Dọn toàn bộ normalized temp files nếu bất kỳ shot nào thất bại, nhưng giữ raw shots để có thể retry.
+
+**Acceptance criteria:**
+
+- Một normalized clip lỗi làm job assembly FAILED rõ ràng, không tạo phim có stream hỗn hợp.
+- Test bằng các clip khác resolution/fps/có audio/không audio cho output đồng nhất 1920x1080, 24fps, yuv420p.
+- Test chứng minh raw shots vẫn còn sau assembly failure.
+
+### P0.3. Làm narration Mode 2 khớp timeline
+
+**Hiện trạng:** assembler nối toàn bộ text trong [`shots_plan.json`](pipeline/documentary_assembler.py:86) thành một đoạn text rồi sinh một file narration duy nhất. Cách này chưa bảo đảm voiceover khớp từng shot hoặc thời lượng video.
+
+**Cần sửa cụ thể:**
+
+1. Quyết định nguồn text chính: script narration đã rewrite hay subtitle nguyên bản. Không dùng subtitle thô nếu plan yêu cầu lời dẫn biên tập.
+2. Tạo narration theo từng shot/beat hoặc tạo audio segments có metadata `start`, `end`, `duration`.
+3. Ghép các audio segment theo timeline; phần trống phải được xử lý rõ ràng, không để audio tự chạy lệch hình.
+4. Dùng `ffprobe` để đo duration video và audio sau mix.
+5. Chọn policy rõ ràng khi duration lệch: pad audio, trim audio, hoặc kéo dài/shorten video; không để `-shortest` âm thầm quyết định và cắt nội dung.
+6. Nếu Edge-TTS lỗi, đánh job FAILED hoặc đánh dấu output không có narration; không gửi thông báo thành công có lời đọc nếu thực tế không có lời đọc.
+
+**Acceptance criteria:**
+
+- Test kiểm tra duration sau mix nằm trong sai số được quy định.
+- Test kiểm tra narration segment đầu tiên bắt đầu đúng shot đầu và không vượt quá timeline.
+- Notification/metadata phản ánh đúng việc narration có hoặc không có.
+
+### P0.4. Thiết kế lại recovery/idempotency cho final assembly và upload
+
+**Hiện trạng:** [`_assemble_and_finalize_documentary()`](core/worker.py:285) đã giữ raw shots khi upload final thất bại, nhưng vẫn đặt job FAILED chung. Upload final gọi `clean_local=True` trước khi database update COMPLETED. Nếu process crash giữa upload và update DB, remote có thể tồn tại nhưng DB không biết; retry có thể assemble/upload lại.
+
+**Cần sửa cụ thể:**
+
+1. Bổ sung trạng thái riêng, ví dụ `ASSEMBLING`, `FINAL_UPLOAD_PENDING`, `COMPLETED`, để phân biệt shot generation thất bại với final upload thất bại.
+2. Trước khi upload, ghi metadata output local: path, size, hash hoặc fingerprint, assembly version.
+3. Upload idempotent theo `job_id` + filename cố định; trước khi upload lại, kiểm tra remote object đã tồn tại và size/hash có khớp không.
+4. Chỉ xóa local final sau khi remote verify thành công **và** trạng thái DB đã được ghi thành công; hoặc giữ local final cho tới lần reconciliation kế tiếp.
+5. Khi worker khởi động, scan cả job có `done == total > 0` và job `FINAL_UPLOAD_PENDING`, không chỉ `APPROVED`/`PROCESSING`.
+6. Không dùng `batch_notified_jobs` trong memory làm nguồn sự thật duy nhất; database phải lưu assembly/final-upload state.
+
+**Acceptance criteria:**
+
+- Crash giả lập sau upload nhưng trước DB update không tạo duplicate hoặc mất khả năng recovery.
+- Retry final upload không sinh lại Veo shots đã DONE.
+- Upload failure giữ raw shots và final local đủ để retry.
+- Job sau restart tự tiếp tục assembly/upload theo state trong DB.
+
+### P0.5. Bảo đảm retry upload không cần account AI
+
+**Hiện trạng:** worker gọi [`get_available_account()`](services/account_pool.py:161) trước khi kiểm tra file local đã hợp lệ tại [`core/worker.py`](core/worker.py:145). Vì vậy retry upload/reuse vẫn bị chặn nếu tất cả account cooldown hoặc kill-switch đang bật.
+
+**Cần sửa cụ thể:**
+
+1. Kiểm tra `target_out_path` tồn tại và pass [`validate_rendered_output()`](pipeline/output_validator.py:1) trước khi reserve account.
+2. Nếu file hợp lệ, đi thẳng vào upload/retry path, không gọi provider và không cần account session.
+3. Chỉ reserve account khi thực sự cần Veo/Ken Burns.
+4. Tách rõ quota accounting: reuse local chỉ release reservation nếu đã reserve, tuyệt đối không gọi [`report_success()`](services/account_pool.py:238) cho generation không xảy ra.
+
+**Acceptance criteria:**
+
+- Khi pool không có account nhưng local shot hợp lệ, worker vẫn upload và mark DONE được.
+- Khi local file invalid, worker mới reserve account và generate lại.
+- Test xác nhận reuse không tăng `shots_today`/`total_shots`.
+
+## P1 — Cần xử lý trước staging E2E
+
+### P1.1. Chọn account đúng theo provider path
+
+**Hiện trạng:** worker reserve account cho cả cảnh phụ Ken Burns, dù cảnh này không gọi Veo. Điều này làm B-roll phụ thuộc vào session/account và kill-switch.
+
+**Cần sửa cụ thể:**
+
+1. Quyết định provider trước khi reserve account dựa trên `is_key_scene` và `attempts`.
+2. Với Ken Burns không cần Gemini session, truyền `session_file=None` hoặc loại bỏ dependency không cần thiết khỏi interface.
+3. Chỉ reserve account cho nhánh [`GeminiWebApiProvider.generate()`](services/gemini_webapi_provider.py:214).
+4. Nếu ImageKenBurnsProvider tùy chọn gọi Gemini để sinh ảnh, phải tách rõ hai chế độ: image API cần account và gradient fallback không cần account.
+
+**Acceptance criteria:**
+
+- B-roll Ken Burns chạy được khi account pool rỗng/cooldown, nếu provider không cần account.
+- Key scene vẫn bị chặn đúng khi không có account.
+- Không tăng quota cho Ken Burns-only shot.
+
+### P1.2. Hoàn thiện state machine của Mode 2
+
+**Hiện trạng:** các state `APPROVED`, `PROCESSING`, `FAILED`, `COMPLETED` đang dùng chung cho generation và final assembly. Upload shot failure đã có settle check, nhưng final upload failure vẫn trộn vào `FAILED` và khó retry đúng mục tiêu.
+
+**Cần sửa cụ thể:**
+
+1. Định nghĩa state transition hợp lệ cho Mode 2: `WAITING_APPROVAL → APPROVED → PROCESSING → ASSEMBLING → FINAL_UPLOAD_PENDING → COMPLETED`.
+2. Với shot retry hết lần: `PROCESSING → FAILED` và lưu failed shot IDs/error.
+3. Với final upload fail: chuyển `FINAL_UPLOAD_PENDING`, không reset các shot DONE.
+4. [`retry_job()`](services/job_queue.py:253) cần phân biệt retry generation và retry final assembly/upload.
+5. Mọi transition phải có guard theo state hiện tại để tránh worker cũ ghi đè trạng thái mới.
+
+**Acceptance criteria:**
+
+- `/status` phân biệt shot generation failure với final upload pending.
+- `/retry` không gọi lại Veo cho shot đã DONE nếu chỉ final upload fail.
+- Concurrent command không làm state nhảy ngược từ COMPLETED về PROCESSING.
+
+### P1.3. Làm rõ và kiểm chứng upload integrity
+
+**Hiện trạng:** [`upload_and_clean()`](services/storage_uploader.py:32) đã kiểm tra remote tồn tại và size khác 0, nhưng chưa so sánh với local size/checksum; `gdrive://...` chưa phải shareable URL.
+
+**Cần sửa cụ thể:**
+
+1. So sánh remote size với local size sau `rclone lsf --format s`; nếu backend/provider có sai số metadata thì ghi rõ tolerance.
+2. Nếu cần integrity mạnh, dùng checksum phù hợp với rclone remote và lưu checksum vào job metadata.
+3. Quy định rõ `drive_url` là virtual path nội bộ hay public/shareable URL; đổi tên field nếu không phải URL chia sẻ.
+4. Khi remote đã tồn tại cùng tên, xử lý idempotently: verify rồi reuse hoặc upload vào tên/version mới, không overwrite mù.
+5. Timeout upload nên cấu hình theo kích thước file hoặc environment, không hardcode một giá trị không phù hợp với video lớn.
+
+**Acceptance criteria:**
+
+- Test remote size bằng 0, khác local và khớp local.
+- Upload failure không mark shot/job DONE/COMPLETED.
+- Người vận hành biết chính xác giá trị `drive_url` có mở được trên Telegram hay chỉ là storage key.
+
+### P1.4. Bổ sung kiểm soát download và phụ đề
+
+**Hiện trạng:** [`download_video()`](pipeline/youtube.py:91) đã gọi [`validate_public_url()`](pipeline/youtube.py:41) và đã bật `--write-subs`/`--write-auto-subs`. Phần còn lại là kiểm chứng redirect/DNS rebinding và xử lý phụ đề thực tế.
+
+**Cần sửa cụ thể:**
+
+1. Giới hạn host theo policy nếu pipeline chỉ hỗ trợ YouTube; không chỉ kiểm tra URL public chung.
+2. Kiểm tra redirect cuối cùng và tránh DNS rebinding nếu downloader có thể bị chuyển hướng tới private IP.
+3. Sau khi đọc VTT auto-sub, luôn chạy [`deduplicate_vtt_segments()`](pipeline/automated_factory.py:34) và kiểm tra segment monotonic/start-end hợp lệ.
+4. Nếu không có subtitle hoặc subtitle lỗi, fallback Whisper dưới heavy lock; ghi rõ source transcript là `subtitle`, `auto_subtitle` hay `whisper`.
+5. Kiểm tra image/video URL từ mọi entrypoint, không chỉ Telegram.
+
+**Acceptance criteria:**
+
+- Test loopback/private/link-local/redirect bị chặn.
+- Test VTT rolling captions không tạo narration lặp.
+- Test không có subtitle chuyển đúng sang Whisper.
+
+### P1.5. Bổ sung test tích hợp có FFmpeg thật
+
+**Hiện trạng:** test hiện tại đã bao phủ một số contract và error path, nhưng chưa đủ chứng minh documentary output.
+
+**Cần sửa cụ thể:**
+
+1. Tạo fixture MP4 thật bằng FFmpeg hoặc fixture nhỏ versioned, gồm: fps khác nhau, resolution khác nhau, có audio và không audio.
+2. Test [`assemble_documentary()`](pipeline/documentary_assembler.py:25) chạy FFmpeg thật và assert bằng `ffprobe`: width, height, fps, duration, video stream, audio stream.
+3. Mock provider nhưng chạy thật worker dispatch để kiểm tra `is_key_scene → Veo/Ken Burns`.
+4. Test Telegram `/approve` cho cả Mode 1 và Mode 2, assert trạng thái và shot pending sau approve.
+5. Test upload fail giữ raw shots, retry không regenerate shot DONE.
+6. Test restart sau toàn bộ shot DONE nhưng trước final assembly.
+7. Test lock heartbeat và concurrent acquisition ở nhiều connection/process nếu có thể.
+8. Chạy test trong đúng môi trường Docker worker, không chỉ môi trường dev cài [`requirements.txt`](requirements.txt:1).
+
+**Acceptance criteria:**
+
+- Có tối thiểu một test pipeline Mode 2 từ approved → generated mock shots → assembled output → mocked upload.
+- Test không phụ thuộc mạng, tài khoản thật hoặc Telegram thật.
+- Có một staging checklist riêng cho test YouTube/Veo/rclone thật.
+
+## P2 — Nên xử lý để vận hành ổn định
+
+### P2.1. Giới hạn concurrency của Telegram
+
+[`TelegramCommandBot`](services/telegram_bot.py:30) đang submit command vào executor. Cần giới hạn số job download/analyze đồng thời, chống duplicate command, và trả trạng thái rõ nếu job cùng URL đang chạy. Không để nhiều `/reup` hoặc `/remake` cùng lúc làm đầy disk/RAM trước khi heavy lock được acquire.
+
+### P2.2. Cải thiện observability và alerting
+
+Bổ sung structured fields cho `job_id`, `shot_id`, `attempt`, `account_id`, provider, duration, upload result và error kind. `/status` nên hiển thị job đang `ASSEMBLING`/`FINAL_UPLOAD_PENDING`, disk free, queue depth, shot failure count và last error. Log không nên ghi cookie/secret.
+
+### P2.3. Kiểm tra dependency và image runtime
+
+Xác nhận [`requirements-worker.txt`](requirements-worker.txt:1) chứa đủ import runtime của [`core/worker.py`](core/worker.py:1), [`pipeline/automated_factory.py`](pipeline/automated_factory.py:1), TTS, LLM và settings. Docker smoke test hiện có cần chạy đúng image build từ [`Dockerfile`](Dockerfile:1); cân nhắc kiểm tra `ffmpeg`, `rclone`, `yt-dlp`, JavaScript runtime và quyền user non-root.
+
+### P2.4. Cập nhật tài liệu để không overclaim
+
+Các phần cũ trong file này tại các dòng 62–106, 116–176 và 229–237 mô tả trạng thái trước khi fix. Khi dùng tài liệu cho agent, phải đọc phần **Feedback vòng 3** này làm nguồn hiện trạng mới nhất. Cập nhật [`UPGRADE_2026_10_20_1120.md`](UPGRADE_2026_10_20_1120.md:1) để tách rõ:
+
+- `Implemented` — có code và unit test;
+- `Integration-tested` — đã chạy pipeline với dependency thật;
+- `Staging-verified` — đã chạy YouTube/Veo/rclone/Telegram thật;
+- `Production-ready` — có monitoring, recovery, rollback và bằng chứng vận hành.
+
+Không ghi “BGM/narration khớp timeline”, “upload verified”, “24/7 production” hoặc “100% completed” nếu chỉ có code path và mock test.
+
+## Checklist giao agent
+
+- [x] P0.1: heartbeat được gọi thật trong mọi heavy operation (HeavyLockLease daemon heartbeat trong Whisper, FFmpeg, Ken Burns, Assembly).
+- [x] P0.2: normalize failure không dùng clip gốc âm thầm (strict normalization với -map 0:v:0, ffprobe validation, raise error và giữ raw shots).
+- [x] P0.3: narration có timeline và duration policy rõ ràng (per-shot aligned Edge-TTS, silence padding / tempo scaling, duration matching không dùng -shortest).
+- [x] P0.4: final assembly/upload có state và recovery idempotent (ASSEMBLING, FINAL_UPLOAD_PENDING, COMPLETED, manifest fingerprint, raw shots retention).
+- [x] P0.5: local reuse/upload không phụ thuộc account AI (kiểm tra target_out_path trước khi reserve account).
+- [x] P1.1: reserve account đúng provider path (Ken Burns không tiêu hao account Pro).
+- [x] P1.2: state machine tách generation failure và final upload pending (scan_and_assemble_pending_jobs hỗ trợ resume upload, retry_job phân biệt nhánh).
+- [x] P1.3: upload integrity/remote path được định nghĩa đúng (size comparison <=5% tolerance, remote existence check).
+- [x] P1.4: download redirect/SSRF/subtitle pipeline được test (validate_youtube_url domain whitelist + IP SSRF guard, monotonic subtitle check).
+- [x] P1.5: thêm integration tests chạy FFmpeg thật và worker flow (test_integration_documentary.py kiểm tra real FFmpeg streams, normalization failure và heartbeat).
+- [x] P2.1: giới hạn Telegram concurrency và duplicate commands (active URL deduplication cho /reup và /remake).
+- [x] P2.2: bổ sung observability/status/alerting (/status hiển thị queue breakdown, pending final uploads, assembling jobs).
+- [x] P2.3: xác minh worker image dependencies/runtime/non-root (Dockerfile và requirements-worker.txt được kiểm tra đồng bộ).
+- [x] P2.4: cập nhật UPGRADE/plan, loại bỏ các claim overclaim (phân loại Implemented, Integration-tested, Staging-verified, Production-ready).
+
+
+## Verdict sau Feedback vòng 2
+
+Các blocker cũ về approve Mode 2, `BEGIN IMMEDIATE`, hybrid dispatch, subtitle flags, normalization cơ bản, raw-shot retention, startup scan, account state atomic và CI lint/smoke **đã có dấu hiệu được xử lý trong code hiện tại**. Tuy nhiên chúng mới nên được phân loại là **implemented / cần integration-runtime verification**, chưa phải production-proven. Các điểm agent cần ưu tiên hiện tại là heartbeat thực tế, normalize failure policy, narration timing và idempotent final upload/recovery.
