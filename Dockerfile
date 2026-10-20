@@ -1,5 +1,5 @@
-# Base image with official Playwright and headless Chromium installed
-FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+# Lightweight Python 3.11 base image (No Playwright/Chromium bloat)
+FROM python:3.11-slim
 
 # Set environment
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install python dependencies
-COPY requirements.txt .
+# Install isolated worker dependencies
+COPY requirements-worker.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements-worker.txt
 
 # Copy source code
 COPY . .

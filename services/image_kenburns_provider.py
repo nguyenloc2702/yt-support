@@ -59,15 +59,38 @@ class ImageKenBurnsProvider(VideoProvider):
                     if img_path.exists() and img_path.stat().st_size > 1000:
                         has_image = True
             except Exception as e:
-                logger.warning("Image generation via WebAPI failed (%s). Using FFmpeg color fallback.", e)
+                logger.warning("Image generation via WebAPI failed (%s). Checking DALL-E / external provider.", e)
 
-        # Fallback if image generation failed: create high-res gradient background with FFmpeg
+        # Secondary fallback: Attempt OpenAI / DALL-E if key is available
+        if not has_image:
+            try:
+                import os
+                import base64
+                from services.settings_service import get_llm_api_key
+                api_key = get_llm_api_key() or os.environ.get("OPENAI_API_KEY")
+                if api_key:
+                    from openai import OpenAI
+                    client = OpenAI(api_key=api_key)
+                    resp = client.images.generate(
+                        model="dall-e-3",
+                        prompt=f"Cinematic historical documentary scene, atmospheric 4k: {prompt[:300]}",
+                        n=1,
+                        size="1024x1024",
+                        response_format="b64_json",
+                    )
+                    if resp.data and resp.data[0].b64_json:
+                        img_path.write_bytes(base64.b64decode(resp.data[0].b64_json))
+                        has_image = True
+            except Exception as err:
+                logger.debug("DALL-E secondary image fallback skipped/failed: %s", err)
+
+        # Tertiary fallback: create high-res cinematic vignette background with FFmpeg
         if not has_image or not img_path.exists():
             try:
                 cmd_img = [
                     "ffmpeg", "-y",
                     "-f", "lavfi",
-                    "-i", "color=c=0x111625:s=1280x720:d=1",
+                    "-i", "color=c=0x0d131f:s=1280x720:d=1,vignette=PI/4",
                     "-frames:v", "1",
                     str(img_path),
                 ]

@@ -83,3 +83,31 @@ def test_account_pool_kill_switch(mock_pool_env):
     mgr.reset_kill_switch()
     assert mgr.kill_switch_active is False
     assert mgr.get_available_account() is not None
+
+
+def test_account_pool_atomic_reservation(mock_pool_env):
+    mgr = AccountPoolManager(
+        session_dir=mock_pool_env["session_dir"],
+        state_file=mock_pool_env["state_file"],
+        max_daily_shots=5,
+    )
+    # Pick acc_01 with reservation
+    acc1 = mgr.get_available_account(reserve=True)
+    assert acc1.acc_id == "acc_01"
+    assert acc1.in_flight == 1
+
+    # Next call with reserve=True should pick acc_02 (since acc_01 now has 1 in_flight)
+    acc2 = mgr.get_available_account(reserve=True)
+    assert acc2.acc_id == "acc_02"
+    assert acc2.in_flight == 1
+
+    # Report success on acc1: in_flight becomes 0, shots_today becomes 1
+    mgr.report_success(acc1.acc_id)
+    # Release reservation on acc2: in_flight becomes 0, shots_today stays 0
+    mgr.release_reservation(acc2.acc_id)
+
+    state = json.loads(mock_pool_env["state_file"].read_text())
+    assert state["accounts"]["acc_01"]["in_flight"] == 0
+    assert state["accounts"]["acc_01"]["shots_today"] == 1
+    assert state["accounts"]["acc_02"]["in_flight"] == 0
+    assert state["accounts"]["acc_02"]["shots_today"] == 0

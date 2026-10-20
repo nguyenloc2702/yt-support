@@ -41,6 +41,9 @@ exclude = ["tests*", "data*", "logs*", "projects*"]
 target-version = "py311"
 line-length = 88
 
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
 [tool.black]
 line-length = 88
 target-version = ['py311']

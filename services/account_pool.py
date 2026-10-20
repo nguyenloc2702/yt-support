@@ -35,6 +35,7 @@ class AccountInfo:
     total_shots: int = 0
     consecutive_errors: int = 0
     last_reset_date: str = ""  # YYYY-MM-DD
+    in_flight: int = 0
 
 
 class AccountPoolManager:
@@ -115,14 +116,15 @@ class AccountPoolManager:
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
             return len(data.get("accounts", {}))
 
-    def get_available_account(self) -> Optional[AccountInfo]:
+    def get_available_account(self, reserve: bool = False) -> Optional[AccountInfo]:
         """
         Picks the best available account for the next shot:
         - Fails immediately if kill-switch is active.
         - Restores expired cooldowns.
         - Restores EXHAUSTED if day has rolled over.
         - Checks 70% daily quota threshold.
-        - Returns AccountInfo with least shots today.
+        - Returns AccountInfo with least (shots_today + in_flight).
+        - If reserve=True, atomically increments in_flight inside the lock.
         """
         with FileLock(str(self.lock_file), timeout=10):
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -139,6 +141,7 @@ class AccountPoolManager:
                 # Check day rollover
                 if acc.get("last_reset_date") != today:
                     acc["shots_today"] = 0
+                    acc["in_flight"] = 0
                     acc["last_reset_date"] = today
                     if acc["status"] == "EXHAUSTED":
                         acc["status"] = "AVAILABLE"
@@ -153,24 +156,29 @@ class AccountPoolManager:
                     except Exception:
                         acc["status"] = "AVAILABLE"
 
-                # Check daily quota cap
-                if acc["status"] == "AVAILABLE" and acc.get("shots_today", 0) >= self.max_daily_shots:
+                # Check daily quota cap (including active in_flight reservations)
+                total_budget_used = acc.get("shots_today", 0) + acc.get("in_flight", 0)
+                if acc["status"] == "AVAILABLE" and total_budget_used >= self.max_daily_shots:
                     acc["status"] = "EXHAUSTED"
-                    logger.info("Account %s reached daily safe budget (%d/%d shots).", acc["acc_id"], acc["shots_today"], self.max_daily_shots)
+                    logger.info("Account %s reached daily safe budget (%d/%d shots).", acc["acc_id"], total_budget_used, self.max_daily_shots)
 
                 if acc["status"] == "AVAILABLE":
                     # Verify session file still exists
                     if Path(acc["session_file"]).exists():
                         candidates.append(acc)
 
-            self._save_state_unlocked(state)
-
             if not candidates:
+                self._save_state_unlocked(state)
                 return None
 
-            # Pick candidate with least shots today, then least errors
-            candidates.sort(key=lambda x: (x.get("shots_today", 0), x.get("consecutive_errors", 0)))
+            # Pick candidate with least (shots_today + in_flight), then least errors
+            candidates.sort(key=lambda x: (x.get("shots_today", 0) + x.get("in_flight", 0), x.get("consecutive_errors", 0)))
             chosen = candidates[0]
+            if reserve:
+                chosen["in_flight"] = chosen.get("in_flight", 0) + 1
+
+            self._save_state_unlocked(state)
+
             return AccountInfo(
                 acc_id=chosen["acc_id"],
                 session_file=chosen["session_file"],
@@ -180,6 +188,7 @@ class AccountPoolManager:
                 total_shots=chosen.get("total_shots", 0),
                 consecutive_errors=chosen.get("consecutive_errors", 0),
                 last_reset_date=chosen.get("last_reset_date", today),
+                in_flight=chosen.get("in_flight", 0),
             )
 
     def report_success(self, acc_id: str):
@@ -187,6 +196,7 @@ class AccountPoolManager:
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
             if acc_id in state["accounts"]:
                 acc = state["accounts"][acc_id]
+                acc["in_flight"] = max(0, acc.get("in_flight", 0) - 1)
                 acc["shots_today"] = acc.get("shots_today", 0) + 1
                 acc["total_shots"] = acc.get("total_shots", 0) + 1
                 acc["consecutive_errors"] = 0
@@ -199,6 +209,7 @@ class AccountPoolManager:
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
             if acc_id in state["accounts"]:
                 acc = state["accounts"][acc_id]
+                acc["in_flight"] = max(0, acc.get("in_flight", 0) - 1)
                 acc["status"] = "COOLDOWN"
                 cd_time = datetime.now() + timedelta(seconds=cooldown_seconds)
                 acc["cooldown_until"] = cd_time.isoformat()
@@ -211,8 +222,18 @@ class AccountPoolManager:
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
             if acc_id in state["accounts"]:
                 acc = state["accounts"][acc_id]
+                acc["in_flight"] = max(0, acc.get("in_flight", 0) - 1)
                 acc["status"] = "EXHAUSTED"
                 logger.warning("Account %s marked as EXHAUSTED.", acc_id)
+                self._save_state_unlocked(state)
+
+    def release_reservation(self, acc_id: str):
+        """Releases an in-flight reservation slot if shot processing terminated without recording success/cooldown."""
+        with FileLock(str(self.lock_file), timeout=10):
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            if acc_id in state.get("accounts", {}):
+                acc = state["accounts"][acc_id]
+                acc["in_flight"] = max(0, acc.get("in_flight", 0) - 1)
                 self._save_state_unlocked(state)
 
     def trigger_kill_switch(self, acc_id: str, reason: str):
@@ -227,6 +248,7 @@ class AccountPoolManager:
             state["kill_switch_active"] = True
             state["kill_switch_reason"] = self.kill_switch_reason
             if acc_id in state["accounts"]:
+                state["accounts"][acc_id]["in_flight"] = 0
                 state["accounts"][acc_id]["status"] = "AUTH_ERROR"
             self._save_state_unlocked(state)
             logger.critical("🚨 KILL-SWITCH ACTIVATED! %s", self.kill_switch_reason)

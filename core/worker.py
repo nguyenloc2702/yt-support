@@ -120,8 +120,8 @@ class VideoAutomationWorker:
             prompt = shot["prompt"]
             attempts = shot.get("attempts", 0)
 
-            # Pick an available account
-            account = self.account_pool.get_available_account()
+            # Pick an available account with atomic in-flight reservation
+            account = self.account_pool.get_available_account(reserve=True)
             if not account:
                 logger.warning("Không có tài khoản Pro nào khả dụng (tất cả đang Cooldown hoặc hết Quota). Chờ 60s...")
                 time.sleep(60)
@@ -215,6 +215,8 @@ class VideoAutomationWorker:
                             f"Tài khoản <code>{acc_id}</code> gặp lỗi xác thực: {res.error_message}\n"
                             f"Dây chuyền Mode 2 đã tạm dừng để bảo vệ an toàn. Hãy cập nhật cookie và gõ <code>/resume</code>."
                         )
+                else:
+                    self.account_pool.release_reservation(acc_id)
 
                 is_final_failure = self.jq.mark_shot_failed(shot_id, res.error_message or "Unknown error")
                 summary = self.jq.get_job_summary(job_id)

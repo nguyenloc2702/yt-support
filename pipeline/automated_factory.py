@@ -339,7 +339,8 @@ class AutomatedFactory:
 
             # Concatenate cut clips into joined video
             concat_list = temp_render_dir / "concat.txt"
-            concat_list.write_text("\n".join(f"file '{str(cf.resolve()).replace('\\', '/')}'" for cf in clip_files), encoding="utf-8")
+            concat_lines = [f"file '{cf.resolve().as_posix()}'" for cf in clip_files]
+            concat_list.write_text("\n".join(concat_lines), encoding="utf-8")
             joined_video = temp_render_dir / "joined.mp4"
 
             cmd_join = [

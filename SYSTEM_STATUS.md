@@ -8,7 +8,7 @@
 
 | Thông số | Trạng thái hiện tại | Ghi chú |
 | :--- | :---: | :--- |
-| **Mã nguồn & Pipeline** | ✅ **100% Hoàn thành** | 353/353 test tự động (`pytest`) đạt 100% (xanh lá). |
+| **Mã nguồn & Pipeline** | ✅ **100% Hoàn thành** | 360/360 test tự động (`pytest`) + `ruff` linter đạt 100% (xanh lá). |
 | **Hạ tầng CI/CD GitHub** | ✅ **100% Hoàn thành** | GitHub Actions tự động test, build GHCR và SSH deploy. |
 | **Container VPS** | 🟢 **Đang chạy (`Up / Running`)** | Container `support-video-worker` chạy ngầm trên VPS `talk.gacdero.vn`. |
 | **Google Drive (rclone)** | 🟢 **Đã liên kết (5 TiB)** | Đã cấp quyền OAuth2, kết nối trực tiếp kho lưu trữ 5 TiB Google Drive. |
