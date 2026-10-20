@@ -11,8 +11,9 @@
 | **Mã nguồn & Pipeline** | ✅ **100% Hoàn thành** | 353/353 test tự động (`pytest`) đạt 100% (xanh lá). |
 | **Hạ tầng CI/CD GitHub** | ✅ **100% Hoàn thành** | GitHub Actions tự động test, build GHCR và SSH deploy. |
 | **Container VPS** | 🟢 **Đang chạy (`Up / Running`)** | Container `support-video-worker` chạy ngầm trên VPS `talk.gacdero.vn`. |
+| **Google Drive (rclone)** | 🟢 **Đã liên kết (5 TiB)** | Đã cấp quyền OAuth2, kết nối trực tiếp kho lưu trữ 5 TiB Google Drive. |
 | **Tài khoản Google Pro** | 🟢 **1 / 10 Sẵn sàng** | `acc_01.json` đã nạp và xác minh; 9 tài khoản còn lại chờ nạp sau. |
-| **Telegram Bot Listener** | 🟡 **Chờ nạp Token** | Toàn bộ 9 lệnh điều khiển đã sẵn sàng, chờ token để kích hoạt. |
+| **Telegram Bot Listener** | 🟢 **Đang hoạt động (Polling)** | Đã kết nối Bot và Chat ID, nhận lệnh trực tiếp từ điện thoại. |
 
 ---
 
