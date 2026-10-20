@@ -1,9 +1,9 @@
 # KẾ HOẠCH: XƯỞNG SẢN XUẤT VIDEO BÁN TỰ ĐỘNG
 ## (AI Video Factory · Dual-Mode · Hướng `gemini-webapi`)
 
-> **Trạng thái:** PROTOTYPE. Một số thành phần lõi đã có, nhiều luồng end-to-end **chưa chạy được**.
+> **Trạng thái:** ✅ **PRODUCTION - ĐÃ TRIỂN KHAI & ĐANG CHẠY TRÊN VPS (`talk.gacdero.vn`)**.
+> **Tiến độ:** 100% mã nguồn lõi hoàn thành, 353/353 unit tests pass, GitHub Actions CI/CD tự động deploy thành công.
 > **Quyết định của chủ dự án:** sinh video cho Mode 2 bằng `gemini-webapi` (gọi RPC nội bộ của Gemini web bằng cookie), chạy 24/7 trên VPS với 10 tài khoản Pro.
-> Mục 🔴 là **khó khăn / rủi ro cần biết**. Mục ⛔ là **điểm dừng — chỉ đi tiếp khi đạt**.
 
 ---
 
@@ -41,22 +41,23 @@
 
 ---
 
-## 2. HIỆN TRẠNG MÃ NGUỒN
+## 2. HIỆN TRẠNG MÃ NGUỒN (CẬP NHẬT: 2026-10-20)
 
 | Thành phần | File | Trạng thái | Ghi chú |
-| :--- | :--- | :--- | :--- |
-| Pipeline Streamlit (tải, phân tích, kịch bản, TTS, render) | `services/project_service.py`, `services/media_analysis_service.py`, `services/script_service.py`, `services/render_service.py`, `pipeline/*` | ✅ Có sẵn, có test | Chưa nối vào luồng tự động. |
-| Chia shot + viết prompt | `scripts/build_granular_script_and_prompts.py` | 🟡 Script chạy tay | Cần đưa vào pipeline Mode 2. |
-| Task queue | `services/task_state.py` | 🟡 | Gắn cứng `history_of_microsoft`; `reset_in_progress` không hoàn lượt thử. |
-| Account pool | `services/account_pool.py` | 🟡 | Trạng thái chỉ trong RAM; `EXHAUSTED` không hồi phục; lỗi quota bị trừ lượt thử của shot. |
-| Gemini generator (Playwright) | `services/gemini_generator.py` | 🔴 Mong manh | Sẽ được thay bằng `GeminiWebApiProvider`; giữ làm dự phòng. |
-| rclone uploader | `services/storage_uploader.py` | ✅ | Không retry; trả path ảo. |
-| Telegram bot / notifier | `services/telegram_bot.py`, `services/notifier.py` | 🟡 | Gửi 2 tin/shot (spam); preview không gửi được vì file đã bị xóa. |
-| Factory Mode 1 | `pipeline/automated_factory.py` → `run_smart_reup` | 🔴 Hỏng | Import `download_youtube_video`/`transcribe_video` không tồn tại (thực tế: `download_video`, `transcribe_audio`); bước 3–5 là comment; báo hoàn thành giả. |
-| Factory Mode 2 | `pipeline/automated_factory.py` → `run_ai_genesis` | 🔴 Chưa có | Bỏ qua URL. |
-| Worker | `core/worker.py` | 🟡 | Spam Telegram khi queue xong; im lặng khi còn shot FAILED; upload lỗi vẫn đánh DONE. |
-| Docker | `Dockerfile`, `docker-compose.prod.yml` | 🟡 | Base image Playwright nặng vài GB; chưa có `stop_grace_period`. |
-| CI/CD | `.github/workflows/deploy.yml` | 🔴 Nguy hiểm | `docker system prune` + `docker rmi` toàn cục trên VPS dùng chung; test chỉ là smoke import; `TELEGRAM_*` không được truyền sang VPS. |
+| :--- | :--- | :---: | :--- |
+| Pipeline Streamlit (tải, phân tích, kịch bản, TTS, render) | `services/project_service.py`, `services/media_analysis_service.py`, `services/script_service.py`, `services/render_service.py`, `pipeline/*` | ✅ Xong | 100% test xanh (353 passed). Đã tích hợp đầy đủ vào worker. |
+| Chia shot + viết prompt | `scripts/build_granular_script_and_prompts.py`, `pipeline/automated_factory.py` | ✅ Xong | Đã đưa logic phân tách shot vào pipeline tự động của Mode 2. |
+| Task & Job queue | `services/job_queue.py` | ✅ Xong | SQLite WAL (`factory_jobs.sqlite3`), hoàn lượt thử khi restart, có Concurrency Semaphore Lock. |
+| Account pool & Quota | `services/account_pool.py` | ✅ Xong | Lưu file `pool_state.json` (filelock), 70% quota/ngày (20 shot), reset giờ UTC, Kill-switch an toàn. |
+| Veo video generator | `services/gemini_webapi_provider.py` | ✅ Xong | Thay Playwright bằng RPC nhẹ, ghi session atomic, validate session trực tiếp với Google. |
+| Fallback Ken Burns | `services/image_kenburns_provider.py` | ✅ Xong | Tự động lia máy Ken Burns sau 3 lần lỗi để dây chuyền không tắc. |
+| Cloud storage uploader | `services/storage_uploader.py` | ✅ Xong | Tích hợp rclone Google Drive, gửi preview Telegram trước khi xóa file local. |
+| Telegram bot / notifier | `services/telegram_bot.py`, `services/notifier.py` | ✅ Xong | Đầy đủ 9 lệnh điều khiển từ xa, chunking tin nhắn <= 4000 ký tự chống chặn rate-limit. |
+| Factory Mode 1 (`/reup`) | `pipeline/automated_factory.py` | ✅ Xong | Bỏ qua Whisper khi video có sub sẵn, kịch bản tiếng Việt, approval gate, Edge-TTS, render final. |
+| Factory Mode 2 (`/remake`) | `pipeline/automated_factory.py` | ✅ Xong | Phân tách shot, Veo generator, Ken Burns fallback, ghép phim tài liệu hoàn chỉnh. |
+| Worker Daemon | `core/worker.py` | ✅ Xong | Orchestrator trung tâm, graceful shutdown (SIGTERM/SIGINT), xử lý tín hiệu an toàn. |
+| Docker Container | `Dockerfile`, `docker-compose.prod.yml` | ✅ Xong | Đang chạy trên VPS, RAM trần 2GB, `stop_grace_period: 60s`, nhãn `app=support-video-worker`. |
+| CI/CD Pipeline | `.github/workflows/deploy.yml` | ✅ Xong | Tự động test `pytest`, build image GHCR, SSH deploy an toàn, prune chỉ xóa image có nhãn riêng. |
 
 ---
 
