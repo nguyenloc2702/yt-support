@@ -1,6 +1,6 @@
 services:
   video-worker:
-    image: ${WORKER_IMAGE:-ghcr.io/nguyenloc2702/support-video-edit/worker:latest}
+    image: ${WORKER_IMAGE:-ghcr.io/nguyenloc2702/yt-support/worker:latest}
     container_name: support-video-worker
     restart: unless-stopped
     stop_grace_period: 60s
