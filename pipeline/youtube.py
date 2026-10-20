@@ -74,8 +74,20 @@ def validate_public_url(url: str) -> None:
             )
 
 
+def extract_youtube_video_id(url: str) -> Optional[str]:
+    """Extracts YouTube video ID or returns None if missing."""
+    url_str = (url or "").strip()
+    m = re.search(r"[?&]v=([0-9A-Za-z_-]+)", url_str)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?:\/(?:shorts|embed|v|live)\/|\.be\/)([0-9A-Za-z_-]+)", url_str)
+    if m:
+        return m.group(1)
+    return None
+
+
 def validate_youtube_url(url: str) -> None:
-    """Enforces SSRF checks and ensures URL belongs to a recognized YouTube host."""
+    """Enforces SSRF checks, ensures host is allowed, and verifies URL contains a video ID."""
     validate_public_url(url)
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -85,6 +97,12 @@ def validate_youtube_url(url: str) -> None:
     }
     if host not in allowed_hosts and not host.endswith(".youtube.com") and host != "youtu.be":
         raise InvalidMediaError(f"URL host '{host}' is not a recognized YouTube domain.")
+
+    if not extract_youtube_video_id(url):
+        raise InvalidMediaError(
+            f"Link YouTube '{url}' không hợp lệ hoặc thiếu mã video (ví dụ thiếu tham số 'v=...'). "
+            "Vui lòng kiểm tra lại đường link từ nút Share trên YouTube."
+        )
 
 
 def _terminate(proc: subprocess.Popen, timeout: int = 10) -> None:

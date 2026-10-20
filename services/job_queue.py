@@ -41,11 +41,16 @@ JOB_TRANSITIONS = {
 
 
 def extract_youtube_id(url: str) -> str:
-    """Extracts YouTube 11-char video ID or returns stripped URL if not found."""
+    """Extracts YouTube video ID or returns stripped URL if not found."""
     import re
     url_str = (url or "").strip()
-    m = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})(?:[&?]|$)", url_str)
-    return m.group(1) if m else url_str
+    m = re.search(r"[?&]v=([0-9A-Za-z_-]+)", url_str)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?:\/(?:shorts|embed|v|live)\/|\.be\/)([0-9A-Za-z_-]+)", url_str)
+    if m:
+        return m.group(1)
+    return url_str
 
 
 class HeavyLockLease:

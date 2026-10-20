@@ -136,3 +136,29 @@ def test_pause_and_resume(mock_bot: TelegramCommandBot):
 
     mock_bot._handle_command("/resume")
     assert mock_bot.pool.kill_switch_active is False
+
+
+def test_raw_youtube_url_prompts_user(mock_bot: TelegramCommandBot):
+    mock_bot._handle_command("https://youtu.be/9bZkp7q19f0")
+    mock_bot.notifier.send_message.assert_called_once()
+    msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "Nhận diện link YouTube" in msg
+    assert "/reup" in msg and "/remake" in msg
+
+
+def test_raw_broken_youtube_url_warns_missing_video_id(mock_bot: TelegramCommandBot):
+    mock_bot._handle_command("https://m.youtube.com/watch?si=em77NKhPbEULJaUg")
+    mock_bot.notifier.send_message.assert_called_once()
+    msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "thiếu mã video" in msg
+
+
+def test_reup_missing_video_id_rejected(mock_bot: TelegramCommandBot):
+    mock_bot._handle_command("/reup https://m.youtube.com/watch?si=em77NKhPbEULJaUg")
+    mock_bot.notifier.send_message.assert_called_once()
+    msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "thiếu mã video" in msg
+    # Verify no job was created in DB
+    with mock_bot.jq._get_conn() as conn:
+        cnt = conn.execute("SELECT COUNT(*) FROM factory_jobs").fetchone()[0]
+        assert cnt == 0

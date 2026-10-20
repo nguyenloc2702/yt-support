@@ -108,7 +108,30 @@ class TelegramCommandBot:
 
     def _handle_command(self, text: str):
         parts = text.split()
+        if not parts:
+            return
         cmd = parts[0].lower()
+
+        # Handle raw YouTube URLs sent without a command
+        if not cmd.startswith("/"):
+            url_candidate = parts[0].strip()
+            if "youtube.com" in url_candidate or "youtu.be" in url_candidate:
+                from pipeline.youtube import extract_youtube_video_id
+                vid = extract_youtube_video_id(url_candidate)
+                if vid:
+                    self.notifier.send_message(
+                        f"💡 <b>Nhận diện link YouTube:</b>\n<code>{url_candidate}</code>\n\n"
+                        f"Vui lòng chọn lệnh để xử lý:\n"
+                        f"• <code>/reup {url_candidate}</code> ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc</i>\n"
+                        f"• <code>/remake {url_candidate}</code> ➔ <i>Mode 2: Sinh 100% video AI mới (Veo/Ken Burns)</i>"
+                    )
+                else:
+                    self.notifier.send_message(
+                        f"⚠️ <b>Link YouTube không hợp lệ hoặc thiếu mã video:</b>\n<code>{url_candidate}</code>\n\n"
+                        "Link bạn gửi chỉ có mã theo dõi (<code>si=...</code>) mà thiếu mã video (<code>v=...</code>).\n"
+                        "Vui lòng mở video trên YouTube và bấm <b>Chia sẻ</b> ➔ <b>Sao chép liên kết</b> để lấy link đầy đủ (dạng <code>https://youtu.be/...</code> hoặc <code>https://www.youtube.com/watch?v=...</code>)."
+                    )
+            return
 
         if cmd in ["/start", "/help"]:
             help_msg = (
@@ -181,6 +204,14 @@ class TelegramCommandBot:
                 self.notifier.send_message("⚠️ Vui lòng cung cấp link YouTube: <code>/reup &lt;url&gt; [duration=180]</code>")
                 return
             url = parts[1].strip()
+            from pipeline.youtube import extract_youtube_video_id
+            if not extract_youtube_video_id(url):
+                self.notifier.send_message(
+                    f"⚠️ <b>Link YouTube không hợp lệ hoặc thiếu mã video:</b>\n<code>{url}</code>\n\n"
+                    "Link bạn gửi chỉ có mã theo dõi (<code>si=...</code>) mà thiếu mã video (<code>v=...</code>).\n"
+                    "Vui lòng lấy lại link đầy đủ từ nút <b>Chia sẻ</b> trên YouTube."
+                )
+                return
 
             duration = 180.0
             for p in parts[2:]:
@@ -214,6 +245,14 @@ class TelegramCommandBot:
                 self.notifier.send_message("⚠️ Vui lòng cung cấp link YouTube: <code>/remake &lt;url&gt;</code>")
                 return
             url = parts[1].strip()
+            from pipeline.youtube import extract_youtube_video_id
+            if not extract_youtube_video_id(url):
+                self.notifier.send_message(
+                    f"⚠️ <b>Link YouTube không hợp lệ hoặc thiếu mã video:</b>\n<code>{url}</code>\n\n"
+                    "Link bạn gửi chỉ có mã theo dõi (<code>si=...</code>) mà thiếu mã video (<code>v=...</code>).\n"
+                    "Vui lòng lấy lại link đầy đủ từ nút <b>Chia sẻ</b> trên YouTube."
+                )
+                return
 
             # Atomic creation and duplicate check (P1.9)
             job_id = self.jq.create_job_if_no_active("remake", url)
