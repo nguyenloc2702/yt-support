@@ -21,16 +21,24 @@ def _js_runtime_args() -> List[str]:
     """
     Build arguments for a JavaScript runtime.
 
-    YouTube extraction requires a JS runtime to solve the player signature.
-    Without one, yt-dlp falls back to clients whose formats frequently
-    respond with HTTP 403. Prefer deno, then node; if neither exists, steer
-    yt-dlp toward clients that do not need JS.
+    YouTube extraction requires a JS runtime (Deno, Node, QuickJS) to solve the player signature.
+    Also enables remote components (ejs:github) to fetch player challenges automatically.
     """
-    if shutil.which("deno"):
-        return ["--js-runtimes", "deno"]
-    if shutil.which("node"):
-        return ["--js-runtimes", "node"]
-    return ["--extractor-args", "youtube:player_client=android,ios"]
+    args = ["--remote-components", "ejs:github"]
+
+    deno = shutil.which("deno")
+    if deno:
+        args.extend(["--js-runtimes", "deno"])
+
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node:
+        args.extend(["--js-runtimes", f"node:{node}"])
+
+    quickjs = shutil.which("quickjs") or shutil.which("qjs")
+    if quickjs:
+        args.extend(["--js-runtimes", "quickjs"])
+
+    return args
 
 
 def check_ytdlp() -> bool:

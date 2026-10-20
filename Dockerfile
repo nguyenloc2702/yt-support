@@ -8,14 +8,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 LABEL app="support-video-worker"
 
-# Install system utilities: ffmpeg, rclone, curl, nodejs (for yt-dlp JS challenges)
+# Copy official static Deno binary for yt-dlp JavaScript challenges (highest priority in yt-dlp)
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+
+# Install system utilities: ffmpeg, rclone, curl, nodejs (secondary JS runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     rclone \
     curl \
     nodejs \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && (which node || ln -sf $(which nodejs) /usr/local/bin/node)
 
 WORKDIR /app
 
