@@ -91,38 +91,24 @@ class JobQueueManager:
         """
         Attempts to acquire the single heavy-process lock (Whisper STT or FFmpeg render).
         Protects the VPS RAM from running two memory-intensive operations simultaneously.
-        Atomic check-and-set using SQLite BEGIN IMMEDIATE transaction.
         """
         now = time.time()
-        conn = self._get_conn()
-        try:
-            conn.isolation_level = None
-            conn.execute("BEGIN IMMEDIATE")
+        with self._get_conn() as conn:
             row = conn.execute("SELECT * FROM factory_locks WHERE lock_name = ?", (LOCK_NAME_HEAVY,)).fetchone()
             if row:
                 acquired_at = row["acquired_at"]
                 if now - acquired_at < HEAVY_LOCK_TIMEOUT_SEC:
                     # Currently held by active job
                     if row["job_id"] == job_id:
-                        conn.execute("COMMIT")
                         return True
-                    conn.execute("COMMIT")
                     return False
                 else:
                     logger.warning("Heavy lock timed out (held by %s for >30m). Forcing release.", row["job_id"])
 
             conn.execute("INSERT OR REPLACE INTO factory_locks (lock_name, job_id, acquired_at) VALUES (?, ?, ?)",
                          (LOCK_NAME_HEAVY, job_id, now))
-            conn.execute("COMMIT")
+            conn.commit()
             return True
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
-        finally:
-            conn.close()
 
     def release_heavy_lock(self, job_id: str):
         with self._get_conn() as conn:
