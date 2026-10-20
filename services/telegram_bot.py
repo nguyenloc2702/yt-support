@@ -112,22 +112,26 @@ class TelegramCommandBot:
             return
         cmd = parts[0].lower()
 
-        # Handle raw YouTube URLs sent without a command
+        # Search for any YouTube URL anywhere in the message text
+        import re
+        yt_match = re.search(r"https?://(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/[^\s]+", text)
+        found_url = yt_match.group(0) if yt_match else None
+
+        # Handle raw YouTube URLs (or mobile share messages) sent without a slash command
         if not cmd.startswith("/"):
-            url_candidate = parts[0].strip()
-            if "youtube.com" in url_candidate or "youtu.be" in url_candidate:
+            if found_url:
                 from pipeline.youtube import extract_youtube_video_id
-                vid = extract_youtube_video_id(url_candidate)
+                vid = extract_youtube_video_id(found_url)
                 if vid:
                     self.notifier.send_message(
-                        f"💡 <b>Nhận diện link YouTube:</b>\n<code>{url_candidate}</code>\n\n"
-                        f"Vui lòng chọn lệnh để xử lý:\n"
-                        f"• <code>/reup {url_candidate}</code> ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc</i>\n"
-                        f"• <code>/remake {url_candidate}</code> ➔ <i>Mode 2: Sinh 100% video AI mới (Veo/Ken Burns)</i>"
+                        f"💡 <b>Nhận diện link YouTube:</b>\n<code>{found_url}</code>\n\n"
+                        f"Vui lòng chọn chế độ sản xuất:\n"
+                        f"• <code>/reup {found_url}</code> ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc</i>\n"
+                        f"• <code>/remake {found_url}</code> ➔ <i>Mode 2: Sinh 100% video AI mới (Veo/Ken Burns)</i>"
                     )
                 else:
                     self.notifier.send_message(
-                        f"⚠️ <b>Link YouTube không hợp lệ hoặc thiếu mã video:</b>\n<code>{url_candidate}</code>\n\n"
+                        f"⚠️ <b>Link YouTube không hợp lệ hoặc thiếu mã video:</b>\n<code>{found_url}</code>\n\n"
                         "Link bạn gửi chỉ có mã theo dõi (<code>si=...</code>) mà thiếu mã video (<code>v=...</code>).\n"
                         "Vui lòng mở video trên YouTube và bấm <b>Chia sẻ</b> ➔ <b>Sao chép liên kết</b> để lấy link đầy đủ (dạng <code>https://youtu.be/...</code> hoặc <code>https://www.youtube.com/watch?v=...</code>)."
                     )
@@ -200,10 +204,10 @@ class TelegramCommandBot:
             self.notifier.send_message(status_msg)
 
         elif cmd == "/reup":
-            if len(parts) < 2:
+            url = found_url or (parts[1].strip() if len(parts) > 1 else "")
+            if not url:
                 self.notifier.send_message("⚠️ Vui lòng cung cấp link YouTube: <code>/reup &lt;url&gt; [duration=180]</code>")
                 return
-            url = parts[1].strip()
             from pipeline.youtube import extract_youtube_video_id
             if not extract_youtube_video_id(url):
                 self.notifier.send_message(
@@ -214,7 +218,7 @@ class TelegramCommandBot:
                 return
 
             duration = 180.0
-            for p in parts[2:]:
+            for p in parts[1:]:
                 if p.startswith("duration="):
                     try:
                         duration = float(p.split("=")[1])
@@ -241,10 +245,10 @@ class TelegramCommandBot:
                     self._executor.submit(self.on_reup_handler, url, duration)
 
         elif cmd == "/remake":
-            if len(parts) < 2:
+            url = found_url or (parts[1].strip() if len(parts) > 1 else "")
+            if not url:
                 self.notifier.send_message("⚠️ Vui lòng cung cấp link YouTube: <code>/remake &lt;url&gt;</code>")
                 return
-            url = parts[1].strip()
             from pipeline.youtube import extract_youtube_video_id
             if not extract_youtube_video_id(url):
                 self.notifier.send_message(

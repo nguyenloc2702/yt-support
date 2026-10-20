@@ -162,3 +162,24 @@ def test_reup_missing_video_id_rejected(mock_bot: TelegramCommandBot):
     with mock_bot.jq._get_conn() as conn:
         cnt = conn.execute("SELECT COUNT(*) FROM factory_jobs").fetchone()[0]
         assert cnt == 0
+
+
+def test_remake_with_mobile_share_title(mock_bot: TelegramCommandBot):
+    handler = MagicMock()
+    mock_bot.on_remake_handler = handler
+    raw_share = "/remake The ENTIRE History of Costco in 19 Minutes https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn"
+    mock_bot._handle_command(raw_share)
+    import time
+    time.sleep(0.1)
+    handler.assert_called_once()
+    called_url = handler.call_args[0][0]
+    assert called_url == "https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn"
+
+
+def test_raw_mobile_share_message_prompts_mode(mock_bot: TelegramCommandBot):
+    raw_share = "The ENTIRE History of Costco in 19 Minutes https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn"
+    mock_bot._handle_command(raw_share)
+    mock_bot.notifier.send_message.assert_called_once()
+    msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "Nhận diện link YouTube" in msg
+    assert "https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn" in msg
