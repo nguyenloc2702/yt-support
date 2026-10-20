@@ -53,6 +53,20 @@ def test_storage_uploader_success_verified(tmp_path: Path, monkeypatch):
     assert ok2 is True
     assert dummy_file2.exists()
 
+    # 3. Test 0-byte remote failure
+    def mock_subprocess_run_zero_byte(cmd, *args, **kwargs):
+        class MockResult:
+            returncode = 0
+            stdout = "0\n"  # 0 bytes
+            stderr = ""
+        return MockResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run_zero_byte)
+    ok3, path3 = uploader.upload_and_clean(dummy_file2, clean_local=True)
+    assert ok3 is False
+    assert path3 is None
+    assert dummy_file2.exists()  # local file preserved on failure
+
 
 def test_documentary_assembler_missing_dir(tmp_path: Path):
     with pytest.raises(FileNotFoundError):

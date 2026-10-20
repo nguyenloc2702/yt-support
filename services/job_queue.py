@@ -91,16 +91,24 @@ class JobQueueManager:
         """
         Attempts to acquire the single heavy-process lock (Whisper STT or FFmpeg render).
         Protects the VPS RAM from running two memory-intensive operations simultaneously.
+        Uses SQLite BEGIN IMMEDIATE transaction for atomic compare-and-set across processes.
         """
         now = time.time()
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM factory_locks WHERE lock_name = ?", (LOCK_NAME_HEAVY,)).fetchone()
             if row:
                 acquired_at = row["acquired_at"]
+                if row["job_id"] == job_id:
+                    # Refresh lease timestamp for the holding job
+                    conn.execute("UPDATE factory_locks SET acquired_at = ? WHERE lock_name = ? AND job_id = ?", (now, LOCK_NAME_HEAVY, job_id))
+                    conn.commit()
+                    return True
+
                 if now - acquired_at < HEAVY_LOCK_TIMEOUT_SEC:
-                    # Currently held by active job
-                    if row["job_id"] == job_id:
-                        return True
+                    # Currently held by another active job
+                    conn.rollback()
                     return False
                 else:
                     logger.warning("Heavy lock timed out (held by %s for >30m). Forcing release.", row["job_id"])
@@ -109,11 +117,41 @@ class JobQueueManager:
                          (LOCK_NAME_HEAVY, job_id, now))
             conn.commit()
             return True
+        except sqlite3.OperationalError as e:
+            # Another process is holding an IMMEDIATE transaction
+            logger.debug("Failed to acquire heavy lock (database locked: %s)", e)
+            return False
+        finally:
+            conn.close()
+
+    def heartbeat_heavy_lock(self, job_id: str) -> bool:
+        """Refreshes the lock timestamp while a long operation is still executing."""
+        now = time.time()
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE factory_locks SET acquired_at = ? WHERE lock_name = ? AND job_id = ?",
+                (now, LOCK_NAME_HEAVY, job_id)
+            )
+            updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+        except Exception as e:
+            logger.debug("Heartbeat heavy lock error: %s", e)
+            return False
+        finally:
+            conn.close()
 
     def release_heavy_lock(self, job_id: str):
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM factory_locks WHERE lock_name = ? AND job_id = ?", (LOCK_NAME_HEAVY, job_id))
             conn.commit()
+        finally:
+            conn.close()
 
     # --- Jobs Management ---
 

@@ -237,3 +237,96 @@ Plan hiện **tốt ở phần kiến trúc, rủi ro và định hướng safet
 7. Status vận hành hiện chỉ có 1/10 account và Telegram chưa active, mâu thuẫn với nhãn production 10-account 24/7.
 
 **Verdict:** Codebase đã có nền tảng đáng kể và nhiều safety primitive đúng hướng, nhưng plan nên được hạ từ **“100% production completed”** xuống **“core infrastructure implemented; end-to-end production validation and several functional integrations remain incomplete.”**
+
+
+
+**************feedback 2********************
+# Feedback vòng 2 (chỉ đọc, không sửa code)
+
+Mình đã kiểm tra lại từng mục trong [`UPGRADE_2026_10_20_1120.md`](UPGRADE_2026_10_20_1120.md) với code hiện tại. Phần lớn các lỗi ở vòng 1 đã được sửa thật. Tuy vậy vẫn còn **một lỗi chặn đứng Mode 2**, và báo cáo UPGRADE có **vài tuyên bố code chưa làm**. Mình không chạy lại test, nên con số 359 passed là theo báo cáo, chưa được kiểm chứng.
+
+## ✅ Các mục đã sửa đúng
+- **Uploader:** khi thiếu rclone thì trả về `False`, có kiểm tra lại bằng `lsf`, có tham số `clean_local`.
+- **Dockerfile:** đã chuyển sang `python:3.11-slim` và dùng `requirements-worker.txt`.
+- **Chặn SSRF:** [`validate_public_url()`](pipeline/youtube.py:41) đã được gọi khi tải video.
+- **Mode 1:** đã nối đủ rewrite → planner → cắt/ghép → TTS → kiểm tra → upload.
+- **Mode 2:** số shot đã động (6–24) và đã có [`assemble_documentary()`](pipeline/documentary_assembler.py:20).
+- **Account pool:** có giữ chỗ tài khoản (`in_flight`) bên trong filelock. Ken Burns đã chạy dưới heavy lock.
+- **Trạng thái job:** khi shot sinh video lỗi hẳn, job đã chuyển sang FAILED.
+
+## 🔴 Nghiêm trọng (cần sửa trước khi chạy production)
+1. **`/approve` một job Mode 2 làm job đó FAILED.**
+   - Ở [`core/worker.py:59`](core/worker.py:59), `on_approve_handler` luôn gọi [`execute_approved_reup()`](pipeline/automated_factory.py:274), hàm này không kiểm tra mode.
+   - Với job Mode 2, nó chuyển sang RENDERING, không tìm thấy `script.json`, rồi đánh FAILED. Các shot sau đó không bao giờ chạy vì [`get_next_pending_shot()`](services/job_queue.py:254) chỉ lấy job ở trạng thái APPROVED/PROCESSING.
+   - Hậu quả: Mode 2 không chạy được qua Telegram.
+   - Cách sửa: phân nhánh theo mode. Mode 2 chỉ cần gọi `approve_job`.
+2. **`BEGIN IMMEDIATE` thực ra chưa có.**
+   - [`acquire_heavy_lock()`](services/job_queue.py:90) vẫn là SELECT rồi `INSERT OR REPLACE` ([dòng 108](services/job_queue.py:108)), nên vẫn có race. Báo cáo UPGRADE ghi sai chỗ này.
+   - Ngoài ra, timeout 30 phút có thể tự nhả lock trong khi một job render/ráp dài vẫn đang chạy.
+3. **Hybrid Veo/Ken Burns chưa được triển khai.**
+   - Worker không đọc `is_key_scene`, nên shot nào cũng gọi Veo trước. Quota Veo bị dùng cho cả cảnh phụ.
+   - Thêm vào đó, logic đánh dấu cảnh chính `idx % 2 != 0` khiến việc dò từ khóa gần như không có tác dụng.
+4. **Ráp phim Mode 2 chưa đồng nhất các clip.**
+   - Clip Veo (có thể có audio, fps khác) và clip Ken Burns (25fps, không audio) được nối thẳng qua concat demuxer, không có bước `scale`/`fps`/`-map`.
+   - Báo cáo ghi "24fps 1080p" nhưng code không chuẩn hóa như vậy.
+   - Bước ráp tìm file `narration.*`/`audio.*` mà không có chỗ nào tạo ra, nên phim ra **không có lời đọc và không có BGM**.
+5. **Có thể mất dữ liệu ở bước ráp cuối.**
+   - [`shutil.rmtree(shots)`](core/worker.py:277) chạy cả khi upload phim cuối thất bại.
+   - `batch_notified_jobs` chỉ là một set trong bộ nhớ, nên nếu worker khởi động lại sau khi xong hết shot thì job đó không bao giờ được ráp.
+6. **Không có cờ phụ đề cho yt-dlp.**
+   - Không truyền `--write-subs`/`--write-auto-subs`, nên [`try_extract_subtitles()`](pipeline/automated_factory.py:34) không bao giờ tìm thấy phụ đề, và tối ưu "bỏ qua Whisper" không bao giờ được kích hoạt.
+   - Nếu bật auto-subs, file VTT có các dòng lặp cuốn chiếu, cần lọc trùng.
+
+## 🟠 Nên sửa
+- **Dùng lại file local:**
+  - Chỉ kiểm tra file lớn hơn 1KB, không validate nội dung.
+  - Vẫn gọi `report_success`, nên quota bị tính dù không sinh video.
+- **Lỗi upload shot:** nhánh này không kiểm tra để chốt job, nên job có thể kẹt ở PROCESSING.
+- **Mode 1:**
+  - TTS lỗi thì vẫn copy `joined.mp4` và báo "lồng tiếng thành công".
+  - Kịch bản fallback bị gán `status: approved` trước khi người dùng duyệt.
+  - Các segment giả bắt đầu cố định ở 0/30/90s, có thể vượt quá độ dài video.
+  - `execute_approved_reup` nên kiểm tra mode/trạng thái chặt hơn.
+- **Account pool:**
+  - Ghi `pool_state.json` không atomic. File hỏng thì state bị reset im lặng, mất luôn kill-switch.
+  - `in_flight` không được reset khi khởi động, nên rò rỉ sau mỗi lần crash.
+  - Thời gian cooldown dùng giờ local, chỗ khác dùng UTC.
+  - Worker đọc `kill_switch_active` từ bộ nhớ của tiến trình, nên không thấy thay đổi từ tiến trình khác (CLI/bot).
+- **Upload:**
+  - Timeout 180s có thể không đủ cho phim cuối dung lượng lớn.
+  - `lsf` chỉ kiểm tra file tồn tại, không kiểm tra size/checksum.
+  - `gdrive://` không phải link chia sẻ được.
+- **Telegram:**
+  - Số thread xử lý không giới hạn.
+  - Bước download không nằm dưới lock nào, nên nhiều lệnh `/reup` cùng lúc có thể làm đầy đĩa/RAM.
+- **Docker/CI:**
+  - CI cài `requirements.txt` chứ không phải bộ dependency của image worker. Nên thêm smoke test kiểu `docker run <image> python -c "import core.worker"`.
+  - Image không có deno/node, nên yt-dlp dễ bị 403.
+  - rclone cài từ apt có thể là bản cũ.
+  - Container chạy bằng root.
+  - CI vẫn chưa chạy ruff.
+- **Test còn mỏng:** chưa có test render Mode 1, test vòng lặp worker, test ráp thật với clip lẫn lộn, hay test luồng `/approve` cho Mode 2. Nếu có test này thì lỗi số 1 đã bị bắt.
+
+## 📄 Tuyên bố trong UPGRADE không khớp với code
+| Tuyên bố | Code thực tế |
+|---|---|
+| `BEGIN IMMEDIATE` | Chưa có |
+| Mode 1 có BGM ducking | Chỉ duck âm thanh gốc, không có file BGM |
+| Mode 2 chuẩn hóa "24fps 1080p" + nhạc/lời đọc | Không chuẩn hóa, không có lời đọc |
+| Hybrid key scene | Worker không dùng `is_key_scene` |
+
+## ⚠️ Chưa kiểm tra được
+- `requirements-worker.txt` có đủ cho `script_rewrite`/`llm_client`/`tts`/`settings` hay không.
+- Phần bên trong `rewrite_script` và `generate_and_overlay_narration`.
+- [`scripts/sync_rclone.py`](scripts/sync_rclone.py) và [`tests/test_account_pool.py`](tests/test_account_pool.py).
+- Về vận hành: hiện mới có 1/10 tài khoản và Telegram chưa hoạt động, nên chưa có lần chạy end-to-end thật nào.
+
+## Thứ tự nên sửa
+1. Phân nhánh `/approve` theo mode.
+2. Làm lock atomic thật bằng `BEGIN IMMEDIATE`.
+3. Không xóa shot khi upload phim cuối lỗi, và thêm bước quét lại job đã xong shot nhưng chưa ráp khi worker khởi động.
+4. Chuẩn hóa clip trong assembler.
+5. Dùng `is_key_scene` trong worker.
+6. Thêm cờ phụ đề cho yt-dlp.
+7. Ghi `pool_state.json` atomic và reset `in_flight` khi khởi động.
+8. Thêm smoke test image Docker và test end-to-end.

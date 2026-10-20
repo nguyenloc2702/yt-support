@@ -11,6 +11,7 @@ Allows controlling the pipeline directly from a smartphone via Telegram:
 - /help                               -> Show command reference
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 from pathlib import Path
@@ -37,6 +38,7 @@ class TelegramCommandBot:
         on_approve_handler: Optional[Callable] = None,
         job_queue: Optional[JobQueueManager] = None,
         account_pool: Optional[AccountPoolManager] = None,
+        max_workers: int = 2,
     ):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
         self.allowed_chat_id = str(chat_id or os.environ.get("TELEGRAM_CHAT_ID", ""))
@@ -48,6 +50,7 @@ class TelegramCommandBot:
         self.pool = account_pool or AccountPoolManager()
         self.running = False
         self.last_update_id = 0
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tg_worker")
 
     @property
     def is_configured(self) -> bool:
@@ -164,7 +167,7 @@ class TelegramCommandBot:
                         pass
 
             if self.on_reup_handler:
-                threading.Thread(target=self.on_reup_handler, args=(url, duration), daemon=True).start()
+                self._executor.submit(self.on_reup_handler, url, duration)
 
         elif cmd == "/remake":
             if len(parts) < 2:
@@ -172,20 +175,32 @@ class TelegramCommandBot:
                 return
             url = parts[1]
             if self.on_remake_handler:
-                threading.Thread(target=self.on_remake_handler, args=(url,), daemon=True).start()
+                self._executor.submit(self.on_remake_handler, url)
 
         elif cmd == "/approve":
             if len(parts) < 2:
                 self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/approve &lt;job_id&gt;</code>")
                 return
             job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job or job.get("status") != "WAITING_APPROVAL":
+                self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code> (Job không ở trạng thái CHỜ DUYỆT hoặc không tồn tại).")
+                return
+
             ok = self.jq.approve_job(job_id)
             if ok:
-                self.notifier.send_message(f"✅ <b>Đã duyệt Job: {job_id}!</b>\n🚀 Đang kích hoạt dây chuyền sản xuất video...")
-                if self.on_approve_handler:
-                    threading.Thread(target=self.on_approve_handler, args=(job_id,), daemon=True).start()
+                mode = str(job.get("mode", "")).upper()
+                if mode in ("SMART_REUP", "REUP"):
+                    self.notifier.send_message(f"✅ <b>Đã duyệt Job Reup: {job_id}!</b>\n🚀 Đang kích hoạt render video hoàn chỉnh...")
+                    if self.on_approve_handler:
+                        self._executor.submit(self.on_approve_handler, job_id)
+                else:
+                    self.notifier.send_message(
+                        f"✅ <b>Đã duyệt Job Mode 2: {job_id}!</b>\n"
+                        f"🚀 Dây chuyền worker đang tiến hành sinh và ráp các cảnh tự động..."
+                    )
             else:
-                self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code> (Job không ở trạng thái CHỜ DUYỆT hoặc không tồn tại).")
+                self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code>.")
 
         elif cmd == "/reject":
             if len(parts) < 2:

@@ -8,11 +8,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 LABEL app="support-video-worker"
 
-# Install system utilities: ffmpeg, rclone, curl
+# Install system utilities: ffmpeg, rclone, curl, nodejs (for yt-dlp JS challenges)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     rclone \
     curl \
+    nodejs \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

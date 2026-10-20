@@ -68,6 +68,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build and load Worker Image for Smoke Testing
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: worker:smoke
+          cache-from: type=gha
+
+      - name: Smoke test worker container imports
+        run: |
+          docker run --rm worker:smoke python -c "import core.worker; import services.job_queue; import pipeline.automated_factory; import pipeline.documentary_assembler; print('Worker container smoke test PASSED!')"
+
       - name: Build and push Worker Image
         uses: docker/build-push-action@v5
         with:

@@ -92,11 +92,38 @@ def try_extract_subtitles(project_dir: Path) -> Optional[List[Dict[str, Any]]]:
                 "end": current_end,
                 "text": " ".join(current_text),
             })
+
+        segments = deduplicate_vtt_segments(segments)
+
     except Exception as e:
         logger.warning("Failed to parse subtitle file %s: %s", sub_file, e)
         return None
 
     return segments if segments else None
+
+
+def deduplicate_vtt_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicates rolling-window subtitles common in YouTube auto-generated VTT."""
+    deduped = []
+    prev_clean = ""
+    for seg in segments:
+        txt = re.sub(r"\s+", " ", seg.get("text", "")).strip()
+        if not txt:
+            continue
+        clean_lower = txt.lower()
+        if clean_lower == prev_clean:
+            continue
+        if prev_clean and prev_clean in clean_lower and len(clean_lower) > len(prev_clean):
+            if deduped:
+                deduped[-1]["end"] = seg["end"]
+                deduped[-1]["text"] = txt
+                prev_clean = clean_lower
+                continue
+        if prev_clean and clean_lower in prev_clean:
+            continue
+        deduped.append({"start": seg["start"], "end": seg["end"], "text": txt})
+        prev_clean = clean_lower
+    return deduped
 
 
 class AutomatedFactory:
@@ -167,10 +194,11 @@ class AutomatedFactory:
 
             if not segments:
                 # Fallback synthetic segments if video is completely silent
+                seg_dur = target_duration / 3.0
                 segments = [
-                    {"id": 1, "start": 0.0, "end": min(30.0, target_duration / 3), "text": "Đoạn mở đầu video"},
-                    {"id": 2, "start": 30.0, "end": min(90.0, target_duration * 2 / 3), "text": "Diễn biến trung tâm"},
-                    {"id": 3, "start": 90.0, "end": target_duration, "text": "Phần cao trào kết thúc"},
+                    {"id": 1, "start": 0.0, "end": seg_dur, "text": "Đoạn mở đầu video"},
+                    {"id": 2, "start": seg_dur, "end": seg_dur * 2, "text": "Diễn biến trung tâm"},
+                    {"id": 3, "start": seg_dur * 2, "end": target_duration, "text": "Phần cao trào kết thúc"},
                 ]
 
             transcript_file = project_dir / "transcript.json"
@@ -215,7 +243,7 @@ class AutomatedFactory:
                     "title": f"Review Video {job_id}",
                     "tone": "bựa bựa, hài hước, review cuốn",
                     "beats": beats,
-                    "status": "approved",
+                    "status": "pending_approval",
                     "target_duration_seconds": target_duration,
                     "duration_tolerance_seconds": 2.0,
                 }
@@ -274,8 +302,9 @@ class AutomatedFactory:
     def execute_approved_reup(self, job_id: str):
         """Executes the rendering phase for an approved Mode 1 job."""
         job = self.jq.get_job(job_id)
-        if not job or job["status"] != "APPROVED":
-            return
+        if not job or job.get("status") != "APPROVED" or str(job.get("mode", "")).upper() not in ("SMART_REUP", "REUP"):
+            logger.info("Job %s is not an APPROVED Smart Reup job. Skipping reup execution.", job_id)
+            return False
 
         self.jq.update_job_status(job_id, status="RENDERING")
         project_dir = Path(job["project_dir"] or (self.output_dir / job_id))
@@ -368,9 +397,7 @@ class AutomatedFactory:
             )
 
             if not narrated_video or not output_final.exists() or output_final.stat().st_size == 0:
-                logger.warning("TTS overlay did not produce output; copying joined video directly.")
-                import shutil
-                shutil.copy2(joined_video, output_final)
+                raise RuntimeError(f"TTS narration overlay failed to generate voiceover video for job {job_id}")
 
             # 5. Quality Control validation
             val_res = validate_rendered_output(output_final)
@@ -396,14 +423,17 @@ class AutomatedFactory:
                         f"☁️ Google Drive: <code>{drive_url}</code>\n"
                         f"⏱ Thời lượng: {duration_val:.1f}s"
                     )
+                return True
             else:
                 self.jq.update_job_status(job_id, status="FAILED", error_message="Upload to Google Drive failed")
+                return False
 
         except Exception as e:
             logger.error("Render failed for %s: %s", job_id, e, exc_info=True)
             self.jq.update_job_status(job_id, status="FAILED", error_message=str(e))
             if self.notifier.is_configured:
                 self.notifier.send_message(f"❌ <b>[LỖI RENDER - {job_id}]:</b> <code>{str(e)[:300]}</code>")
+            return False
         finally:
             import shutil
             shutil.rmtree(temp_render_dir, ignore_errors=True)
@@ -466,10 +496,13 @@ class AutomatedFactory:
                 seg_text = sub_segments[seg_idx].get("text", "") if (seg_idx is not None and seg_idx < len(sub_segments)) else f"Historical milestone scene {idx}"
                 clean_seg_text = seg_text.replace("\n", " ").strip()
 
-                is_key = any(cue in clean_seg_text.lower() for cue in dramatic_cues) or (idx % 2 != 0)
+                # Key scene detection: dramatic keywords, milestone opening, or climax ending
+                has_dramatic_cue = any(cue in clean_seg_text.lower() for cue in dramatic_cues)
+                is_key = has_dramatic_cue or (idx == 1) or (idx == target_shots)
 
                 shots.append({
                     "index": idx,
+                    "text": clean_seg_text,
                     "prompt": (
                         f"Cinematic 4K, professional documentary cinematography. Visual representation of: "
                         f"{clean_seg_text[:140]}. 35mm master lens, photorealistic atmospheric depth, "

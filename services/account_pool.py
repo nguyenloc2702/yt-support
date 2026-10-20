@@ -50,9 +50,39 @@ class AccountPoolManager:
         self.lock_file = self.state_file.with_suffix(".lock")
         self.max_daily_shots = max_daily_shots
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        self.kill_switch_active = False
-        self.kill_switch_reason = ""
+        self._kill_switch_active = False
+        self._kill_switch_reason = ""
         self._load_or_init_state()
+
+    @property
+    def kill_switch_active(self) -> bool:
+        try:
+            with FileLock(str(self.lock_file), timeout=5):
+                if self.state_file.exists():
+                    state = json.loads(self.state_file.read_text(encoding="utf-8"))
+                    return bool(state.get("kill_switch_active", False))
+        except Exception:
+            pass
+        return self._kill_switch_active
+
+    @kill_switch_active.setter
+    def kill_switch_active(self, val: bool):
+        self._kill_switch_active = bool(val)
+
+    @property
+    def kill_switch_reason(self) -> str:
+        try:
+            with FileLock(str(self.lock_file), timeout=5):
+                if self.state_file.exists():
+                    state = json.loads(self.state_file.read_text(encoding="utf-8"))
+                    return str(state.get("kill_switch_reason", ""))
+        except Exception:
+            pass
+        return self._kill_switch_reason
+
+    @kill_switch_reason.setter
+    def kill_switch_reason(self, val: str):
+        self._kill_switch_reason = str(val)
 
     def _today_str(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -64,10 +94,16 @@ class AccountPoolManager:
             if self.state_file.exists():
                 try:
                     state = json.loads(self.state_file.read_text(encoding="utf-8"))
-                    self.kill_switch_active = state.get("kill_switch_active", False)
-                    self.kill_switch_reason = state.get("kill_switch_reason", "")
+                    self._kill_switch_active = state.get("kill_switch_active", False)
+                    self._kill_switch_reason = state.get("kill_switch_reason", "")
                 except Exception as e:
                     logger.error("Failed to load pool state file: %s", e)
+                    corrupt_backup = self.state_file.with_suffix(f".corrupt.{int(time.time())}")
+                    try:
+                        self.state_file.rename(corrupt_backup)
+                        logger.warning("Corrupted pool state backed up to %s", corrupt_backup)
+                    except Exception:
+                        pass
 
             # Discover all json files in sessions/
             discovered = sorted(list(self.session_dir.glob("acc_*.json")))
@@ -90,10 +126,13 @@ class AccountPoolManager:
                         "total_shots": 0,
                         "consecutive_errors": 0,
                         "last_reset_date": today,
+                        "in_flight": 0,
                     }
                 else:
                     # Update session_file path
                     accounts_data[acc_id]["session_file"] = str(f)
+                    # Reset in_flight counter on worker startup to prevent leakage from crashes
+                    accounts_data[acc_id]["in_flight"] = 0
                     # Reset daily counter if day changed
                     if accounts_data[acc_id].get("last_reset_date") != today:
                         accounts_data[acc_id]["shots_today"] = 0
@@ -102,12 +141,15 @@ class AccountPoolManager:
                             accounts_data[acc_id]["status"] = "AVAILABLE"
 
             state["accounts"] = accounts_data
-            state["kill_switch_active"] = self.kill_switch_active
-            state["kill_switch_reason"] = self.kill_switch_reason
+            state["kill_switch_active"] = self._kill_switch_active
+            state["kill_switch_reason"] = self._kill_switch_reason
             self._save_state_unlocked(state)
 
     def _save_state_unlocked(self, state: dict):
-        self.state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        """Atomic write: write to temp file then replace to prevent state corruption."""
+        tmp_file = self.state_file.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_file.replace(self.state_file)
 
     def reload_accounts(self) -> int:
         """Refreshes accounts from disk."""
@@ -132,7 +174,7 @@ class AccountPoolManager:
                 logger.error("⛔ Kill-switch is ACTIVE. Mode 2 paused. Reason: %s", state.get("kill_switch_reason"))
                 return None
 
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             today = self._today_str()
             accounts = state.get("accounts", {})
 
@@ -150,6 +192,8 @@ class AccountPoolManager:
                 if acc["status"] == "COOLDOWN" and acc.get("cooldown_until"):
                     try:
                         cd_time = datetime.fromisoformat(acc["cooldown_until"])
+                        if cd_time.tzinfo is None:
+                            cd_time = cd_time.replace(tzinfo=timezone.utc)
                         if now >= cd_time:
                             acc["status"] = "AVAILABLE"
                             acc["cooldown_until"] = None
@@ -211,7 +255,7 @@ class AccountPoolManager:
                 acc = state["accounts"][acc_id]
                 acc["in_flight"] = max(0, acc.get("in_flight", 0) - 1)
                 acc["status"] = "COOLDOWN"
-                cd_time = datetime.now() + timedelta(seconds=cooldown_seconds)
+                cd_time = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
                 acc["cooldown_until"] = cd_time.isoformat()
                 acc["consecutive_errors"] = acc.get("consecutive_errors", 0) + 1
                 logger.warning("Account %s in COOLDOWN for %ds.", acc_id, cooldown_seconds)

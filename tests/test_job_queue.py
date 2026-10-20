@@ -116,3 +116,14 @@ def test_cancel_and_retry_job(temp_jq: JobQueueManager):
     assert shot is not None
     assert shot["index_num"] == 1
 
+
+def test_heavy_lock_heartbeat(temp_jq: JobQueueManager):
+    job_id = "test_long_render_job"
+    assert temp_jq.acquire_heavy_lock(job_id) is True
+    # Heartbeat refreshes lock
+    assert temp_jq.heartbeat_heavy_lock(job_id) is True
+    # Different job cannot heartbeat foreign lock
+    assert temp_jq.heartbeat_heavy_lock("another_job") is False
+    temp_jq.release_heavy_lock(job_id)
+
+

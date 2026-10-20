@@ -52,3 +52,31 @@ def test_factory_mode2_dynamic_shots(test_factory: AutomatedFactory, monkeypatch
     assert len(shots_data) == summary["total"]
     # Check that dramatic keyword correctly triggers is_key_scene
     assert any(s["is_key_scene"] for s in shots_data)
+
+
+def test_deduplicate_vtt_segments():
+    from pipeline.automated_factory import deduplicate_vtt_segments
+
+    rolling_cues = [
+        {"start": 0.0, "end": 2.0, "text": "Xin chào các bạn"},
+        {"start": 1.0, "end": 3.0, "text": "Xin chào các bạn đã quay trở lại"},
+        {"start": 3.0, "end": 5.0, "text": "với kênh video hôm nay"},
+        {"start": 4.0, "end": 6.0, "text": "với kênh video hôm nay chúng ta sẽ tìm hiểu"},
+    ]
+    deduped = deduplicate_vtt_segments(rolling_cues)
+    assert len(deduped) == 2
+    assert deduped[0]["text"] == "Xin chào các bạn đã quay trở lại"
+    assert deduped[1]["text"] == "với kênh video hôm nay chúng ta sẽ tìm hiểu"
+
+
+def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory):
+    # If execute_approved_reup is called on a remake job, it must return False safely without corrupting DB
+    job_id = test_factory.jq.create_job(mode="remake", url="https://youtube.com/watch?v=mode2_test")
+    test_factory.jq.update_job_status(job_id, "APPROVED")
+
+    success = test_factory.execute_approved_reup(job_id)
+    assert success is False
+    job = test_factory.jq.get_job(job_id)
+    # Status should remain APPROVED for background worker
+    assert job["status"] == "APPROVED"
+

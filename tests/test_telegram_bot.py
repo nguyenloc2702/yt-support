@@ -94,6 +94,25 @@ def test_approve_and_reject_flow(mock_bot: TelegramCommandBot):
     assert job2["status"] == "CANCELLED"
 
 
+def test_approve_mode2_does_not_trigger_reup_handler(mock_bot: TelegramCommandBot):
+    # Mode 2 (remake / ai_genesis)
+    job_id = mock_bot.jq.create_job("remake", "https://youtube.com/watch?v=123")
+    mock_bot.jq.update_job_status(job_id, "WAITING_APPROVAL")
+
+    approve_handler = MagicMock()
+    mock_bot.on_approve_handler = approve_handler
+
+    mock_bot._handle_command(f"/approve {job_id}")
+    import time
+    time.sleep(0.1)
+
+    # Status must be APPROVED for background worker to pick up shots
+    job = mock_bot.jq.get_job(job_id)
+    assert job["status"] == "APPROVED"
+    # Mode 1 reup handler must NOT be called for Mode 2
+    approve_handler.assert_not_called()
+
+
 def test_cancel_and_retry_flow(mock_bot: TelegramCommandBot):
     job_id = mock_bot.jq.create_job("remake", "https://youtube.com/watch?v=123")
     mock_bot.jq.update_job_status(job_id, "PROCESSING")

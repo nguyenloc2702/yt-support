@@ -35,6 +35,7 @@ class StorageUploader:
         remote_filename: Optional[str] = None,
         remote_folder: Optional[str] = None,
         clean_local: bool = True,
+        timeout: int = 300,
     ) -> Tuple[bool, Optional[str]]:
         """
         Uploads local video file to Google Drive via rclone.
@@ -46,6 +47,7 @@ class StorageUploader:
             logger.error("Local file not found: %s", local_file)
             return False, None
 
+        local_size = local_file.stat().st_size
         dest_name = remote_filename or local_file.name
         dest_folder = remote_folder or self.remote_folder
         remote_dest = f"{self.remote_name}:{dest_folder}"
@@ -57,7 +59,7 @@ class StorageUploader:
             )
             return False, None
 
-        logger.info("Uploading %s to %s/%s via rclone...", local_file.name, remote_dest, dest_name)
+        logger.info("Uploading %s (%d bytes) to %s/%s via rclone...", local_file.name, local_size, remote_dest, dest_name)
 
         try:
             # Using 'rclone copyto' first
@@ -70,23 +72,28 @@ class StorageUploader:
                 "--low-level-retries", "10",
                 "--stats-one-line",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
                 logger.error("rclone upload failed (code %d): %s", result.returncode, result.stderr)
                 return False, None
 
-            # Verify remote file exists on Google Drive before deleting local file
+            # Verify remote file exists and is non-empty on Google Drive before deleting local file
             verify_cmd = [
                 self.rclone_bin,
                 "lsf",
+                "--format", "s",
                 f"{remote_dest}/{dest_name}",
             ]
             v_res = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
-            if v_res.returncode != 0 or not v_res.stdout.strip():
+            remote_size_str = v_res.stdout.strip()
+            if v_res.returncode != 0 or not remote_size_str:
                 logger.error("rclone remote verification failed for %s/%s: %s", dest_folder, dest_name, v_res.stderr)
                 return False, None
+            if remote_size_str.isdigit() and int(remote_size_str) == 0:
+                logger.error("rclone verified file is 0 bytes (empty/corrupted): %s/%s", dest_folder, dest_name)
+                return False, None
 
-            logger.info("Uploaded and verified successfully on Google Drive: %s/%s", dest_folder, dest_name)
+            logger.info("Uploaded and verified successfully on Google Drive: %s/%s (%s bytes)", dest_folder, dest_name, remote_size_str)
 
             # Delete local file only if requested
             if clean_local:
@@ -103,7 +110,7 @@ class StorageUploader:
             return True, virtual_path
 
         except subprocess.TimeoutExpired:
-            logger.error("rclone upload timed out after 180s for %s", local_file)
+            logger.error("rclone upload timed out after %ds for %s", timeout, local_file)
             return False, None
         except Exception as e:
             logger.error("Unexpected error during rclone upload: %s", e)
