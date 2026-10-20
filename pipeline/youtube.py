@@ -165,11 +165,12 @@ def download_video(
     )
     cmd = [
         _ytdlp_path(),
+        "--ignore-errors",
         "-f", fmt,
         "--merge-output-format", "mp4",
         "--write-subs",
         "--write-auto-subs",
-        "--sub-langs", "vi,en,vi.*,en.*",
+        "--sub-langs", "en,vi,en.*,vi.*",
         "--sub-format", "vtt/srt/best",
         "--newline",
         "--no-color",
