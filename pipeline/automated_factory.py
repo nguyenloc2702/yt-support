@@ -142,16 +142,17 @@ class AutomatedFactory:
     # MODE 1: SMART REUP & SUMMARY
     # =========================================================================
 
-    def run_smart_reup(self, youtube_url: str, target_duration: float = 180.0) -> str:
+    def run_smart_reup(self, youtube_url: str, target_duration: float = 180.0, job_id: Optional[str] = None) -> str:
         """
         Executes Mode 1: Smart Reup & Summary.
         Clones YouTube video, extracts highlights, writes Vietnamese review script (LLM),
         prepares beat timeline, requests Telegram approval, and prepares for TTS + BGM render.
         """
-        job_id = self.jq.create_job(mode="reup", url=youtube_url, target_duration=target_duration)
+        if not job_id:
+            job_id = self.jq.create_job(mode="reup", url=youtube_url, target_duration=target_duration)
         project_dir = self.output_dir / job_id
         project_dir.mkdir(parents=True, exist_ok=True)
-        self.jq.update_job_status(job_id, status="ANALYZING")
+        self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
 
         logger.info("=== STARTING SMART REUP PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
@@ -443,16 +444,17 @@ class AutomatedFactory:
     # MODE 2: FULL AI GENESIS
     # =========================================================================
 
-    def run_ai_genesis(self, youtube_url: str) -> str:
+    def run_ai_genesis(self, youtube_url: str, job_id: Optional[str] = None) -> str:
         """
         Executes Mode 2: Full AI Genesis.
         Extracts narrative structure, decomposes into dynamic granular 10-15s shots,
         identifies dramatic key scenes, and requests approval for autonomous multi-account rendering.
         """
-        job_id = self.jq.create_job(mode="remake", url=youtube_url)
+        if not job_id:
+            job_id = self.jq.create_job(mode="remake", url=youtube_url)
         project_dir = self.output_dir / job_id
         project_dir.mkdir(parents=True, exist_ok=True)
-        self.jq.update_job_status(job_id, status="ANALYZING")
+        self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
 
         logger.info("=== STARTING FULL AI GENESIS PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
@@ -466,17 +468,13 @@ class AutomatedFactory:
             # 1. Download YouTube video
             raw_video = download_video(youtube_url, project_dir, max_height=1080)
 
-            # 2. Extract Transcript (Subtitles first, then Whisper)
+            # 2. Extract Transcript (Subtitles first, then Whisper under heavy lock lease)
             sub_segments = try_extract_subtitles(project_dir)
             if not sub_segments:
-                while not self.jq.acquire_heavy_lock(job_id):
-                    time.sleep(15)
-                try:
+                with self.jq.heavy_lock_lease(job_id, interval=15.0):
                     from pipeline.transcribe import transcribe_audio
                     stt_res = transcribe_audio(raw_video, model_size="small", compute_type="int8")
                     sub_segments = stt_res.get("segments", [])
-                finally:
-                    self.jq.release_heavy_lock(job_id)
 
             # 3. Dynamic Narrative Decomposition (Granular shots across documentary storyline)
             total_dur = max((float(s.get("end", 0)) for s in (sub_segments or [])), default=180.0)
@@ -494,6 +492,11 @@ class AutomatedFactory:
                 seg_idx = min((idx - 1) * step, len(sub_segments) - 1) if sub_segments else None
                 seg_text = sub_segments[seg_idx].get("text", "") if (seg_idx is not None and seg_idx < len(sub_segments)) else f"Historical milestone scene {idx}"
                 clean_seg_text = seg_text.replace("\n", " ").strip()
+
+                # Narrative length constraint (P1.2): ~2.5 - 2.8 words/sec for 10s shot to ensure TTS fits comfortably
+                words = clean_seg_text.split()
+                if len(words) > 28:
+                    clean_seg_text = " ".join(words[:28]) + "..."
 
                 # Key scene detection: dramatic keywords, milestone opening, or climax ending
                 has_dramatic_cue = any(cue in clean_seg_text.lower() for cue in dramatic_cues)
@@ -519,9 +522,9 @@ class AutomatedFactory:
             self.jq.add_shots_for_job(job_id, shots)
             key_count = sum(1 for s in shots if s["is_key_scene"])
             broll_count = len(shots) - key_count
-            self.jq.update_job_status(
+            self.jq.transition_job(
                 job_id,
-                status="WAITING_APPROVAL",
+                to_state="WAITING_APPROVAL",
                 script_summary=f"Tạo {len(shots)} cảnh AI (10s/cảnh: {key_count} Veo Key Scenes + {broll_count} B-roll) tái hiện toàn bộ câu chuyện.",
                 script_file=str(shots_file),
             )
@@ -543,8 +546,8 @@ class AutomatedFactory:
 
         except Exception as e:
             logger.error("AI Genesis pipeline failed for %s: %s", job_id, e, exc_info=True)
-            self.jq.update_job_status(job_id, status="FAILED", error_message=str(e))
-            self.jq.release_heavy_lock(job_id)
+            self.jq.transition_job(job_id, to_state="FAILED", error_message=str(e))
             if self.notifier.is_configured:
                 self.notifier.send_message(f"❌ <b>[LỖI AI GENESIS - {job_id}]:</b> <code>{str(e)[:300]}</code>")
             return job_id
+

@@ -16,9 +16,11 @@ from pathlib import Path
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
+import uuid
 
 from pipeline.automated_factory import AutomatedFactory
 from services.account_pool import AccountPoolManager
@@ -43,6 +45,7 @@ logger = logging.getLogger("worker")
 class VideoAutomationWorker:
     def __init__(self):
         self.running = True
+        self.worker_id = f"{socket.gethostname()}_{os.getpid()}_{uuid.uuid4().hex[:6]}"
 
         # Components
         self.jq = JobQueueManager()
@@ -74,11 +77,11 @@ class VideoAutomationWorker:
 
     def run(self):
         logger.info("==================================================")
-        logger.info("🚀 KHỞI ĐỘNG VIDEO AUTOMATION WORKER")
+        logger.info("🚀 KHỞI ĐỘNG VIDEO AUTOMATION WORKER (ID: %s)", self.worker_id)
         logger.info("==================================================")
 
         # 1. Reset any interrupted shots on startup (refund attempt counts)
-        self.jq.reset_interrupted_shots()
+        self.jq.reset_interrupted_shots(worker_id=self.worker_id)
 
         # 2. Check accounts status
         num_accounts = self.account_pool.reload_accounts()
@@ -89,6 +92,7 @@ class VideoAutomationWorker:
         if self.notifier.is_configured:
             self.notifier.send_message(
                 f"🤖 <b>Video Worker Đã Khởi Động Thành Công</b>\n"
+                f"👤 Worker ID: <code>{self.worker_id}</code>\n"
                 f"👤 Tài khoản Pro sẵn sàng: {pool_status['available']}/{num_accounts}\n"
                 f"☁️ Google Drive Remote: <code>{self.uploader.remote_name}</code>\n"
                 f"📱 Bạn có thể gửi lệnh qua Telegram: <code>/reup &lt;url&gt;</code> hoặc <code>/remake &lt;url&gt;</code>"
@@ -98,10 +102,8 @@ class VideoAutomationWorker:
         if self.bot.is_configured:
             self.bot.start_polling()
 
-        # 4. Main processing loop
-        batch_notified_jobs = set()
-        # Scan on startup in case worker was restarted after all shots finished
-        self._scan_and_assemble_pending_jobs(batch_notified_jobs)
+        # 4. Main processing loop (Dedup based strictly on DB state, no in-memory sets)
+        self._scan_and_assemble_pending_jobs()
 
         while self.running:
             # Check if kill switch is active
@@ -110,11 +112,48 @@ class VideoAutomationWorker:
                 time.sleep(30)
                 continue
 
-            # Fetch next pending shot across all approved/processing jobs
+            # Step 4a: Process pending uploads first (P0.2: decouple upload from generation)
+            upload_shot = self.jq.get_next_upload_pending_shot()
+            if upload_shot:
+                u_job_id = upload_shot["job_id"]
+                u_shot_id = upload_shot["id"]
+                u_shot_idx = upload_shot["index_num"]
+                u_vid_path = Path(upload_shot["video_path"]) if upload_shot.get("video_path") else None
+                out_filename = f"shot_{u_shot_idx:03d}.mp4"
+
+                if u_vid_path and u_vid_path.exists():
+                    logger.info("☁️ Uploading shot %s (video: %s)...", u_shot_id, u_vid_path.name)
+                    upload_ok, gdrive_url = self.uploader.upload_and_clean(
+                        local_path=u_vid_path,
+                        remote_filename=out_filename,
+                        remote_folder=f"Video_Projects/{u_job_id}/raw_shots",
+                        clean_local=False,
+                    )
+                    if upload_ok:
+                        self.jq.mark_shot_done(
+                            shot_id=u_shot_id,
+                            account_id=upload_shot.get("account_id") or "local",
+                            video_path=str(u_vid_path),
+                            drive_url=gdrive_url,
+                        )
+                        logger.info("✔ Shot %s upload thành công: %s", u_shot_id, gdrive_url)
+                        # Check if all shots finished and trigger assembly
+                        summ = self.jq.get_job_summary(u_job_id)
+                        if summ["total"] > 0 and summ["done"] >= summ["total"]:
+                            self._assemble_and_finalize_documentary(u_job_id, summ)
+                    else:
+                        is_final = self.jq.mark_shot_upload_failed(u_shot_id, "Upload to Google Drive failed")
+                        logger.error("Upload shot %s thất bại (is_final=%s)", u_shot_id, is_final)
+                else:
+                    self.jq.mark_shot_upload_failed(u_shot_id, f"Local file not found: {u_vid_path}")
+
+                time.sleep(2)
+                continue
+
+            # Step 4b: Fetch next pending shot for generation across approved/processing jobs
             shot = self.jq.get_next_pending_shot()
             if not shot:
-                # Check if there are any jobs that finished all shots while waiting
-                self._scan_and_assemble_pending_jobs(batch_notified_jobs)
+                self._scan_and_assemble_pending_jobs()
                 time.sleep(15)
                 continue
 
@@ -125,65 +164,67 @@ class VideoAutomationWorker:
             attempts = shot.get("attempts", 0)
             is_key_scene = bool(shot.get("is_key_scene", 0))
 
+            # Guarded transition from APPROVED -> PROCESSING upon starting shot (P0.4)
+            self.jq.transition_job(job_id, to_state="PROCESSING", from_states=("APPROVED",))
+
             out_filename = f"shot_{shot_idx:03d}.mp4"
             target_out_dir = Path("data/automated_runs") / job_id / "shots"
             target_out_dir.mkdir(parents=True, exist_ok=True)
             target_out_path = target_out_dir / out_filename
 
             # 1. Quota Optimization (P0.5): Check if valid local video exists from previous attempt
-            # before reserving any account or calling AI provider!
-            reused_local = False
             if target_out_path.exists() and target_out_path.stat().st_size > 5000:
                 from pipeline.output_validator import validate_rendered_output
                 val_res = validate_rendered_output(target_out_path)
                 if val_res.is_valid:
-                    logger.info("⚡ File video cục bộ đã tồn tại và hợp lệ (%s). Bỏ qua sinh AI và không cần reserve account!", target_out_path.name)
-                    res = ProviderResult(ok=True, video_path=target_out_path)
-                    duration = 0.5
-                    reused_local = True
-                    acc_id = "cached_local"
-                    needs_veo = False
+                    logger.info("⚡ File video cục bộ đã tồn tại và hợp lệ (%s). Đưa vào UPLOAD_PENDING không cần gọi provider!", target_out_path.name)
+                    self.jq.mark_shot_generated(shot_id, str(target_out_path))
+                    continue
 
-            if not reused_local:
-                needs_veo = is_key_scene and attempts < 2
+            # 2. Generation dispatch
+            needs_veo = is_key_scene and attempts < 2
+            if needs_veo:
+                account = self.account_pool.get_available_account(reserve=True)
+                if not account:
+                    logger.warning("Không có tài khoản Pro nào khả dụng cho Key Scene %s. Chờ 60s...", shot_id)
+                    time.sleep(60)
+                    continue
 
-                if needs_veo:
-                    # Pick an available account with atomic in-flight reservation for Veo
-                    account = self.account_pool.get_available_account(reserve=True)
-                    if not account:
-                        logger.warning("Không có tài khoản Pro nào khả dụng cho Key Scene %s. Chờ 60s...", shot_id)
-                        time.sleep(60)
-                        continue
+                acc_id = account.acc_id
+                session_file = Path(account.session_file)
+                logger.info("▶ Bắt đầu xử lý %s (Cảnh %d, lần %d, Key Scene) bằng Veo AI qua tài khoản %s",
+                            shot_id, shot_idx, attempts + 1, acc_id)
+                marked = self.jq.mark_shot_in_progress(shot_id, acc_id, worker_id=self.worker_id)
+                if not marked:
+                    self.account_pool.release_reservation(acc_id)
+                    continue
 
-                    acc_id = account.acc_id
-                    session_file = Path(account.session_file)
-                    logger.info("▶ Bắt đầu xử lý %s (Cảnh %d, lần %d, Key Scene) bằng Veo AI qua tài khoản %s",
-                                shot_id, shot_idx, attempts + 1, acc_id)
-                    self.jq.mark_shot_in_progress(shot_id, acc_id)
-
-                    start_time = time.time()
-                    res = self.primary_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
-                    duration = time.time() - start_time
+                start_time = time.time()
+                res = self.primary_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
+                duration = time.time() - start_time
+            else:
+                acc_id = "ken_burns_local"
+                if not is_key_scene:
+                    logger.info("Shot %s là cảnh phụ B-roll. Điều phối trực tiếp sang ImageKenBurnsProvider (tiết kiệm quota Veo).", shot_id)
                 else:
-                    # Ken Burns secondary B-roll / graceful fallback: runs without consuming Pro daily budget
-                    acc_id = "ken_burns_local"
-                    if not is_key_scene:
-                        logger.info("Shot %s là cảnh phụ B-roll. Điều phối trực tiếp sang ImageKenBurnsProvider (tiết kiệm quota Veo).", shot_id)
-                    else:
-                        logger.warning("Shot %s đã thất bại 2 lần. Kích hoạt Ken Burns graceful fallback!", shot_id)
+                    logger.warning("Shot %s đã thất bại 2 lần. Kích hoạt Ken Burns graceful fallback!", shot_id)
 
-                    self.jq.mark_shot_in_progress(shot_id, acc_id)
-                    start_time = time.time()
-                    with self.jq.heavy_lock_lease(job_id, interval=15.0):
-                        res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=None)
-                    duration = time.time() - start_time
+                marked = self.jq.mark_shot_in_progress(shot_id, acc_id, worker_id=self.worker_id)
+                if not marked:
+                    continue
 
+                start_time = time.time()
+                with self.jq.heavy_lock_lease(job_id, interval=15.0):
+                    res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=None)
+                duration = time.time() - start_time
+
+            # 3. Handle generation result
             if res.ok and res.video_path and res.video_path.exists():
                 logger.info("✅ Shot %s sinh thành công sau %.1fs", shot_id, duration)
-                if not reused_local and needs_veo:
+                if needs_veo:
                     self.account_pool.report_success(acc_id)
 
-                # 1. Send Telegram preview before cloud archival
+                # Send Telegram preview before cloud archival
                 summary = self.jq.get_job_summary(job_id)
                 if self.notifier.is_configured:
                     self.notifier.notify_shot_completed(
@@ -196,42 +237,13 @@ class VideoAutomationWorker:
                         video_path=str(res.video_path),
                     )
 
-                # 2. Upload to Google Drive (retain local buffer for documentary assembly)
-                upload_ok, gdrive_url = self.uploader.upload_and_clean(
-                    local_path=res.video_path,
-                    remote_filename=out_filename,
-                    remote_folder=f"Video_Projects/{job_id}/raw_shots",
-                    clean_local=False,
-                )
-
-                if upload_ok:
-                    self.jq.mark_shot_done(shot_id, acc_id, str(res.video_path), gdrive_url)
-                    logger.info("✔ Shot %s đã đánh dấu DONE và lưu Drive: %s", shot_id, gdrive_url)
-                else:
-                    is_final = self.jq.mark_shot_failed(shot_id, "Upload to Google Drive failed")
-                    logger.error("Upload shot %s lên Google Drive thất bại.", shot_id)
-                    # Check if all shots for this job have settled, don't leave job stuck in PROCESSING
-                    settled_summary = self.jq.get_job_summary(job_id)
-                    if settled_summary["pending"] == 0 and settled_summary["in_progress"] == 0 and settled_summary["failed"] > 0:
-                        self.jq.update_job_status(
-                            job_id,
-                            status="FAILED",
-                            error_message=f"{settled_summary['failed']} / {settled_summary['total']} cảnh thất bại (lỗi upload/quota)."
-                        )
-
-                # Check if job is now completely done (all shots finished)
-                updated_summary = self.jq.get_job_summary(job_id)
-                if updated_summary["done"] >= updated_summary["total"] and updated_summary["total"] > 0:
-                    if job_id not in batch_notified_jobs:
-                        batch_notified_jobs.add(job_id)
-                        logger.info("🎉 Tất cả %d cảnh của Job %s đã hoàn thành! Bắt đầu ráp documentary hoàn chỉnh...", updated_summary["total"], job_id)
-                        self._assemble_and_finalize_documentary(job_id, updated_summary)
+                # Transition to UPLOAD_PENDING (P0.2)
+                self.jq.mark_shot_generated(shot_id, str(res.video_path))
 
             else:
                 logger.error("❌ Shot %s thất bại: %s (%s)", shot_id, res.error_message, res.error_kind)
 
-                # Route error to AccountPool only if an account was reserved for Veo
-                if not reused_local and needs_veo:
+                if needs_veo:
                     if res.error_kind == ErrorKind.RATE_LIMIT:
                         self.account_pool.report_rate_limit(acc_id, cooldown_seconds=3600)
                     elif res.error_kind == ErrorKind.QUOTA:
@@ -258,14 +270,14 @@ class VideoAutomationWorker:
                         error_msg=res.error_message or "Max retries exceeded",
                     )
 
-                # Check if all shots for this job have settled (no pending, no in_progress)
+                # Check if all shots for this job have settled
                 settled_summary = self.jq.get_job_summary(job_id)
-                if settled_summary["pending"] == 0 and settled_summary["in_progress"] == 0:
+                if settled_summary["pending"] == 0 and settled_summary["in_progress"] == 0 and settled_summary["upload_pending"] == 0:
                     if settled_summary["failed"] > 0:
                         logger.error("Job %s kết thúc với %d cảnh thất bại vĩnh viễn.", job_id, settled_summary["failed"])
-                        self.jq.update_job_status(
+                        self.jq.transition_job(
                             job_id,
-                            status="FAILED",
+                            to_state="FAILED",
                             error_message=f"{settled_summary['failed']} / {settled_summary['total']} cảnh thất bại sau 3 lần retry."
                         )
                         if self.notifier.is_configured:
@@ -288,15 +300,32 @@ class VideoAutomationWorker:
         final_video = project_dir / f"documentary_final_{job_id}.mp4"
 
         job = self.jq.get_job(job_id)
-        current_status = job.get("status") if job else ""
-        if current_status == "COMPLETED":
-            logger.info("Job %s is already COMPLETED. Skipping assembly.", job_id)
+        if not job:
+            return
+        current_status = job.get("status")
+        if current_status in ("COMPLETED", "CANCELLED"):
             return
 
+        # P0.1 & P0.3: Atomically claim job by conditional transition
+        if current_status != "FINAL_UPLOAD_PENDING":
+            claimed = self.jq.transition_job(
+                job_id,
+                to_state="ASSEMBLING",
+                from_states=("APPROVED", "PROCESSING", "ASSEMBLY_FAILED"),
+            )
+            if not claimed:
+                logger.info("Job %s could not be claimed for ASSEMBLING (status: %s).", job_id, current_status)
+                return
+
         try:
-            # 1. Assembly Phase: Only assemble if not already assembled locally
-            if current_status != "FINAL_UPLOAD_PENDING" or not final_video.exists():
-                self.jq.update_job_status(job_id, status="ASSEMBLING")
+            # 1. Assembly Phase: Only assemble if final video doesn't exist
+            if not final_video.exists():
+                # Check cancellation checkpoint before heavy assembly
+                fresh_job = self.jq.get_job(job_id)
+                if fresh_job and fresh_job.get("status") == "CANCELLED":
+                    logger.info("Job %s cancelled before assembly. Aborting.", job_id)
+                    return
+
                 with self.jq.heavy_lock_lease(job_id, interval=15.0):
                     from pipeline.documentary_assembler import assemble_documentary
                     logger.info("Assembling full documentary for Job %s...", job_id)
@@ -310,7 +339,18 @@ class VideoAutomationWorker:
                     "assembled_at": time.time(),
                 }
                 (project_dir / "assembly_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-                self.jq.update_job_status(job_id, status="FINAL_UPLOAD_PENDING", final_video=str(final_video))
+                self.jq.transition_job(
+                    job_id,
+                    to_state="FINAL_UPLOAD_PENDING",
+                    from_states=("ASSEMBLING",),
+                    final_video=str(final_video),
+                )
+
+            # Check cancellation checkpoint after assembly
+            fresh_job = self.jq.get_job(job_id)
+            if fresh_job and fresh_job.get("status") == "CANCELLED":
+                logger.info("Job %s cancelled after assembly. Aborting final upload.", job_id)
+                return
 
             # 2. Upload Phase: Idempotently upload final documentary to Google Drive
             logger.info("Uploading final assembled documentary for Job %s...", job_id)
@@ -324,7 +364,13 @@ class VideoAutomationWorker:
 
             if upload_ok:
                 # Update DB state FIRST before cleaning any local buffers!
-                self.jq.update_job_status(job_id, status="COMPLETED", final_video=str(final_video), drive_url=drive_url)
+                self.jq.transition_job(
+                    job_id,
+                    to_state="COMPLETED",
+                    from_states=("FINAL_UPLOAD_PENDING", "ASSEMBLING"),
+                    final_video=str(final_video),
+                    drive_url=drive_url,
+                )
                 # Safe to clean local shots only after DB state is committed
                 shutil.rmtree(project_dir / "shots", ignore_errors=True)
                 final_video.unlink(missing_ok=True)
@@ -337,32 +383,75 @@ class VideoAutomationWorker:
                         f"✨ Video phim tài liệu hoàn chỉnh đã được kiểm định QC và tải lên Google Drive!"
                     )
             else:
-                # Keep FINAL_UPLOAD_PENDING for clean recovery and retry
-                self.jq.update_job_status(job_id, status="FINAL_UPLOAD_PENDING", error_message="Upload final documentary to Google Drive failed")
-                logger.error("Upload phim cuối thất bại cho Job %s. Trạng thái giữ FINAL_UPLOAD_PENDING, giữ nguyên raw shots để retry.", job_id)
+                # Calculate backoff for FINAL_UPLOAD_PENDING (P0.1)
+                fresh_job = self.jq.get_job(job_id) or {}
+                attempts = (fresh_job.get("upload_attempts") or 0) + 1
+                backoff = min(3600.0, 60.0 * (2 ** (attempts - 1)))
+                next_retry = time.time() + backoff
+                self.jq.transition_job(
+                    job_id,
+                    to_state="FINAL_UPLOAD_PENDING",
+                    from_states=("FINAL_UPLOAD_PENDING", "ASSEMBLING"),
+                    upload_attempts=attempts,
+                    next_retry_at=next_retry,
+                    error_message=f"Final upload failed (attempt {attempts})",
+                )
+                logger.error("Upload phim cuối thất bại cho Job %s (attempt %d). Next retry in %.0fs.", job_id, attempts, backoff)
+                if attempts == 10 and self.notifier.is_configured:
+                    self.notifier.send_message(
+                        f"⚠️ <b>[CẢNH BÁO UPLOAD] Job {job_id}</b>\n"
+                        f"Tải file phim tài liệu lên Google Drive đã thất bại 10 lần liên tiếp. Hệ thống vẫn tiếp tục retry ngầm."
+                    )
         except Exception as e:
             logger.error("Failed to assemble documentary for %s: %s", job_id, e, exc_info=True)
-            self.jq.update_job_status(job_id, status="FAILED", error_message=f"Documentary assembly failed: {e}")
+            # P0.3: Mark ASSEMBLY_FAILED instead of FAILED so retry doesn't re-generate shots!
+            self.jq.transition_job(
+                job_id,
+                to_state="ASSEMBLY_FAILED",
+                from_states=("ASSEMBLING", "FINAL_UPLOAD_PENDING"),
+                error_message=f"Documentary assembly failed: {e}",
+            )
             if self.notifier.is_configured:
                 self.notifier.send_message(f"❌ <b>[LỖI RÁP PHIM TÀI LIỆU - {job_id}]:</b> <code>{str(e)[:300]}</code>")
 
-    def _scan_and_assemble_pending_jobs(self, batch_notified_jobs: set):
+    def _scan_and_assemble_pending_jobs(self):
         """Scans for any completed Mode 2 jobs that haven't been assembled yet or have pending final uploads."""
+        now = time.time()
         try:
             with self.jq._get_conn() as conn:
                 rows = conn.execute(
-                    "SELECT id, mode, status FROM factory_jobs WHERE status IN ('APPROVED', 'PROCESSING', 'ASSEMBLING', 'FINAL_UPLOAD_PENDING')"
+                    "SELECT id, mode, status, upload_attempts, next_retry_at, updated_at FROM factory_jobs "
+                    "WHERE status IN ('APPROVED', 'PROCESSING', 'ASSEMBLING', 'ASSEMBLY_FAILED', 'FINAL_UPLOAD_PENDING')"
                 ).fetchall()
                 for r in rows:
                     j_id = r["id"]
                     j_mode = str(r["mode"]).upper()
                     j_status = str(r["status"]).upper()
-                    if j_mode in ("REMAKE", "AI_GENESIS") and j_id not in batch_notified_jobs:
-                        summ = self.jq.get_job_summary(j_id)
-                        if j_status == "FINAL_UPLOAD_PENDING" or (summ["total"] > 0 and summ["done"] >= summ["total"]):
-                            batch_notified_jobs.add(j_id)
-                            logger.info("Found completed/pending assembly Job %s (status=%s). Triggering assembly/upload...", j_id, j_status)
+                    if j_mode not in ("REMAKE", "AI_GENESIS"):
+                        continue
+
+                    # Case 1: FINAL_UPLOAD_PENDING with backoff elapsed
+                    if j_status == "FINAL_UPLOAD_PENDING":
+                        next_retry = r["next_retry_at"]
+                        if next_retry is None or next_retry <= now:
+                            summ = self.jq.get_job_summary(j_id)
+                            logger.info("Retrying final upload for Job %s...", j_id)
                             self._assemble_and_finalize_documentary(j_id, summ)
+                        continue
+
+                    # Case 2: Stale ASSEMBLING job (crashed > 1h ago)
+                    if j_status == "ASSEMBLING":
+                        if r["updated_at"] and (now - r["updated_at"]) > 3600:
+                            summ = self.jq.get_job_summary(j_id)
+                            logger.warning("Recovering stale ASSEMBLING job %s...", j_id)
+                            self._assemble_and_finalize_documentary(j_id, summ)
+                        continue
+
+                    # Case 3: All shots done in APPROVED / PROCESSING / ASSEMBLY_FAILED
+                    summ = self.jq.get_job_summary(j_id)
+                    if summ["total"] > 0 and summ["done"] >= summ["total"]:
+                        logger.info("Triggering assembly for Job %s (all %d shots done)...", j_id, summ["total"])
+                        self._assemble_and_finalize_documentary(j_id, summ)
         except Exception as e:
             logger.debug("Error during un-assembled jobs scan: %s", e)
 
@@ -370,3 +459,4 @@ class VideoAutomationWorker:
 if __name__ == "__main__":
     worker = VideoAutomationWorker()
     worker.run()
+

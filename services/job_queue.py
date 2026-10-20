@@ -22,7 +22,30 @@ logger = logging.getLogger("job_queue")
 
 DEFAULT_DB_PATH = Path("data/factory_jobs.sqlite3")
 LOCK_NAME_HEAVY = "HEAVY_PROCESS_LOCK"
-HEAVY_LOCK_TIMEOUT_SEC = 1800.0  # 30 minutes safety auto-expire
+HEAVY_LOCK_TIMEOUT_SEC = 600.0  # 10 minutes safety auto-expire (managed with active heartbeats)
+
+JOB_TRANSITIONS = {
+    "QUEUED": {"ANALYZING", "WAITING_APPROVAL", "APPROVED", "CANCELLED", "FAILED"},
+    "ANALYZING": {"WAITING_APPROVAL", "APPROVED", "FAILED", "CANCELLED"},
+    "WAITING_APPROVAL": {"APPROVED", "CANCELLED", "FAILED"},
+    "APPROVED": {"PROCESSING", "ASSEMBLING", "RENDERING", "CANCELLED", "FAILED"},
+    "PROCESSING": {"ASSEMBLING", "RENDERING", "COMPLETED", "FAILED", "CANCELLED"},
+    "RENDERING": {"COMPLETED", "FAILED", "CANCELLED"},
+    "ASSEMBLING": {"FINAL_UPLOAD_PENDING", "ASSEMBLY_FAILED", "COMPLETED", "CANCELLED", "FAILED"},
+    "ASSEMBLY_FAILED": {"ASSEMBLING", "APPROVED", "CANCELLED"},
+    "FINAL_UPLOAD_PENDING": {"COMPLETED", "FINAL_UPLOAD_PENDING", "CANCELLED", "ASSEMBLING"},
+    "FAILED": {"APPROVED", "CANCELLED"},
+    "CANCELLED": {"APPROVED"},
+    "COMPLETED": set(),
+}
+
+
+def extract_youtube_id(url: str) -> str:
+    """Extracts YouTube 11-char video ID or returns stripped URL if not found."""
+    import re
+    url_str = (url or "").strip()
+    m = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})(?:[&?]|$)", url_str)
+    return m.group(1) if m else url_str
 
 
 class HeavyLockLease:
@@ -44,6 +67,19 @@ class HeavyLockLease:
     @property
     def is_valid(self) -> bool:
         return not self._lost_ownership
+
+    @property
+    def should_abort(self) -> bool:
+        """Indicates if current operation must abort due to lost lock ownership or job cancellation."""
+        if self._lost_ownership:
+            return True
+        try:
+            job = self.jq.get_job(self.job_id)
+            if job and job.get("status") == "CANCELLED":
+                return True
+        except Exception:
+            pass
+        return False
 
     def __enter__(self):
         start_wait = time.time()
@@ -141,7 +177,44 @@ class JobQueueManager:
                 acquired_at REAL
             );
             """)
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS factory_kv (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at REAL
+            );
+            """)
             conn.commit()
+
+            # Dynamic migration for optional / added columns
+            self._ensure_column(conn, "factory_jobs", "next_retry_at", "REAL")
+            self._ensure_column(conn, "factory_jobs", "upload_attempts", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "factory_shots", "upload_attempts", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "factory_shots", "next_retry_at", "REAL")
+            self._ensure_column(conn, "factory_shots", "worker_id", "TEXT")
+            self._ensure_column(conn, "factory_shots", "started_at", "REAL")
+            conn.commit()
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, col_type: str):
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        cols = [r["name"] for r in cur.fetchall()]
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type};")
+
+    # --- Key-Value Store ---
+
+    def set_kv(self, key: str, value: str):
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO factory_kv (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, str(value), time.time()),
+            )
+            conn.commit()
+
+    def get_kv(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT value FROM factory_kv WHERE key = ?", (key,)).fetchone()
+            return str(row["value"]) if row else default
 
     # --- Concurrency Semaphore ---
 
@@ -169,38 +242,41 @@ class JobQueueManager:
                     conn.rollback()
                     return False
                 else:
-                    logger.warning("Heavy lock timed out (held by %s for >30m). Forcing release.", row["job_id"])
+                    logger.warning("Heavy lock timed out (held by %s for >%ds). Forcing release.", row["job_id"], int(HEAVY_LOCK_TIMEOUT_SEC))
 
             conn.execute("INSERT OR REPLACE INTO factory_locks (lock_name, job_id, acquired_at) VALUES (?, ?, ?)",
                          (LOCK_NAME_HEAVY, job_id, now))
             conn.commit()
             return True
         except sqlite3.OperationalError as e:
-            # Another process is holding an IMMEDIATE transaction
             logger.debug("Failed to acquire heavy lock (database locked: %s)", e)
             return False
         finally:
             conn.close()
 
     def heartbeat_heavy_lock(self, job_id: str) -> bool:
-        """Refreshes the lock timestamp while a long operation is still executing."""
-        now = time.time()
-        conn = self._get_conn()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE factory_locks SET acquired_at = ? WHERE lock_name = ? AND job_id = ?",
-                (now, LOCK_NAME_HEAVY, job_id)
-            )
-            updated = cur.rowcount > 0
-            conn.commit()
-            return updated
-        except Exception as e:
-            logger.debug("Heartbeat heavy lock error: %s", e)
-            return False
-        finally:
-            conn.close()
+        """Refreshes the lock timestamp while a long operation is still executing. Retries on temporary DB lock."""
+        for attempt in range(3):
+            now = time.time()
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE factory_locks SET acquired_at = ? WHERE lock_name = ? AND job_id = ?",
+                    (now, LOCK_NAME_HEAVY, job_id)
+                )
+                updated = cur.rowcount > 0
+                conn.commit()
+                return updated
+            except sqlite3.OperationalError:
+                time.sleep(0.2)
+            except Exception as e:
+                logger.debug("Heartbeat heavy lock error: %s", e)
+                return False
+            finally:
+                conn.close()
+        return False
 
     def release_heavy_lock(self, job_id: str):
         conn = self._get_conn()
@@ -229,10 +305,120 @@ class JobQueueManager:
         logger.info("Created job %s (mode: %s, url: %s)", job_id, mode, url)
         return job_id
 
+    def create_job_if_no_active(self, mode: str, url: str, target_duration: float = 180.0, project_dir: Optional[str] = None) -> Optional[str]:
+        """
+        Atomically creates a job only if no active (non-completed, non-failed, non-cancelled) job
+        already exists for the given YouTube video URL.
+        """
+        video_id = extract_youtube_id(url)
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id, url FROM factory_jobs WHERE status NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')"
+            ).fetchall()
+            for r in rows:
+                if extract_youtube_id(r["url"]) == video_id:
+                    logger.info("Active job %s already exists for YouTube video %s. Rejecting duplicate.", r["id"], video_id)
+                    conn.rollback()
+                    return None
+
+            job_id = f"{mode}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            now = time.time()
+            conn.execute("""
+            INSERT INTO factory_jobs (id, mode, url, status, target_duration, project_dir, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?)
+            """, (job_id, mode, url, target_duration, project_dir, now, now))
+            conn.commit()
+            logger.info("Created unique job %s (mode: %s, url: %s)", job_id, mode, url)
+            return job_id
+        except Exception as e:
+            logger.error("Error in create_job_if_no_active: %s", e)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            conn.close()
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._get_conn() as conn:
             row = conn.execute("SELECT * FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
             return dict(row) if row else None
+
+    def transition_job(
+        self,
+        job_id: str,
+        to_state: str,
+        from_states: Optional[Any] = None,
+        **fields
+    ) -> bool:
+        """
+        Guarded compare-and-set state transition.
+        Ensures race-free transitions according to JOB_TRANSITIONS without overwriting cancelled/completed jobs.
+        """
+        now = time.time()
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not row:
+                conn.rollback()
+                return False
+            cur_status = row["status"]
+
+            # If already in the target state, treat as idempotent success (unless FINAL_UPLOAD_PENDING updating backoff)
+            if cur_status == to_state and to_state != "FINAL_UPLOAD_PENDING":
+                conn.rollback()
+                return True
+
+            allowed_targets = JOB_TRANSITIONS.get(cur_status, set())
+            if to_state not in allowed_targets:
+                logger.warning(
+                    "Rejected state transition for job %s: %s -> %s (allowed: %s)",
+                    job_id, cur_status, to_state, allowed_targets
+                )
+                conn.rollback()
+                return False
+
+            if from_states:
+                valid_from = (from_states,) if isinstance(from_states, str) else tuple(from_states)
+                if cur_status not in valid_from:
+                    logger.warning(
+                        "Job %s current status %s not in specified from_states %s",
+                        job_id, cur_status, valid_from
+                    )
+                    conn.rollback()
+                    return False
+
+            update_clauses = ["status = ?", "updated_at = ?"]
+            values = [to_state, now]
+            for k, v in fields.items():
+                if v is not None:
+                    update_clauses.append(f"{k} = ?")
+                    values.append(v)
+
+            values.extend([job_id, cur_status])
+            cur = conn.cursor()
+            cur.execute(
+                f"UPDATE factory_jobs SET {', '.join(update_clauses)} WHERE id = ? AND status = ?",
+                values
+            )
+            success = cur.rowcount > 0
+            conn.commit()
+            if success:
+                logger.info("Job %s state updated: %s -> %s", job_id, cur_status, to_state)
+            return success
+        except Exception as e:
+            logger.error("Error transitioning job %s to %s: %s", job_id, to_state, e)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            conn.close()
 
     def update_job_status(
         self,
@@ -244,31 +430,16 @@ class JobQueueManager:
         drive_url: Optional[str] = None,
         error_message: Optional[str] = None,
     ):
-        now = time.time()
-        with self._get_conn() as conn:
-            fields = ["status = ?", "updated_at = ?"]
-            values = [status, now]
-
-            if script_summary is not None:
-                fields.append("script_summary = ?")
-                values.append(script_summary)
-            if script_file is not None:
-                fields.append("script_file = ?")
-                values.append(script_file)
-            if final_video is not None:
-                fields.append("final_video = ?")
-                values.append(final_video)
-            if drive_url is not None:
-                fields.append("drive_url = ?")
-                values.append(drive_url)
-            if error_message is not None:
-                fields.append("error_message = ?")
-                values.append(error_message)
-
-            values.append(job_id)
-            query = f"UPDATE factory_jobs SET {', '.join(fields)} WHERE id = ?"
-            conn.execute(query, values)
-            conn.commit()
+        """Backwards compatible wrapper around transition_job."""
+        self.transition_job(
+            job_id=job_id,
+            to_state=status,
+            script_summary=script_summary,
+            script_file=script_file,
+            final_video=final_video,
+            drive_url=drive_url,
+            error_message=error_message,
+        )
 
     def get_next_runnable_job(self) -> Optional[Dict[str, Any]]:
         """Returns the next job ready for processing (QUEUED, APPROVED, or PROCESSING)."""
@@ -281,22 +452,15 @@ class JobQueueManager:
             return dict(row) if row else None
 
     def approve_job(self, job_id: str) -> bool:
-        with self._get_conn() as conn:
-            row = conn.execute("SELECT status FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
-            if not row or row["status"] != "WAITING_APPROVAL":
-                return False
-            conn.execute("UPDATE factory_jobs SET status = 'APPROVED', updated_at = ? WHERE id = ?", (time.time(), job_id))
-            conn.commit()
-            return True
+        return self.transition_job(job_id, to_state="APPROVED", from_states=("WAITING_APPROVAL",))
 
     def reject_job(self, job_id: str, reason: str = "Rejected by user") -> bool:
-        with self._get_conn() as conn:
-            row = conn.execute("SELECT status FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
-            if not row or row["status"] != "WAITING_APPROVAL":
-                return False
-            conn.execute("UPDATE factory_jobs SET status = 'CANCELLED', error_message = ?, updated_at = ? WHERE id = ?", (reason, time.time(), job_id))
-            conn.commit()
-            return True
+        return self.transition_job(
+            job_id,
+            to_state="CANCELLED",
+            from_states=("WAITING_APPROVAL",),
+            error_message=reason,
+        )
 
     def cancel_job(self, job_id: str, reason: str = "Cancelled by user") -> bool:
         """Cancels an active or pending job and marks uncompleted shots CANCELLED."""
@@ -306,30 +470,50 @@ class JobQueueManager:
                 return False
             now = time.time()
             conn.execute("UPDATE factory_jobs SET status = 'CANCELLED', error_message = ?, updated_at = ? WHERE id = ?", (reason, now, job_id))
-            conn.execute("UPDATE factory_shots SET status = 'CANCELLED' WHERE job_id = ? AND status IN ('PENDING', 'IN_PROGRESS')", (job_id,))
+            conn.execute("""
+            UPDATE factory_shots 
+            SET status = 'CANCELLED' 
+            WHERE job_id = ? AND status IN ('PENDING', 'IN_PROGRESS', 'UPLOAD_PENDING')
+            """, (job_id,))
             conn.commit()
-        self.release_heavy_lock(job_id)
+        # NOTE: Do NOT release heavy lock here! The running lease will release it upon exit.
         logger.info("Cancelled job %s: %s", job_id, reason)
         return True
 
     def retry_job(self, job_id: str) -> bool:
-        """Retries a FAILED, FINAL_UPLOAD_PENDING, or CANCELLED job."""
+        """Retries a FAILED, ASSEMBLY_FAILED, FINAL_UPLOAD_PENDING, or CANCELLED job."""
         with self._get_conn() as conn:
             row = conn.execute("SELECT status FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
-            if not row or row["status"] not in ("FAILED", "CANCELLED", "FINAL_UPLOAD_PENDING"):
+            if not row or row["status"] not in ("FAILED", "CANCELLED", "FINAL_UPLOAD_PENDING", "ASSEMBLY_FAILED"):
                 return False
             now = time.time()
-            if row["status"] == "FINAL_UPLOAD_PENDING":
-                # For final upload pending, we don't reset shots: just refresh updated_at so scanner picks it up
-                conn.execute("UPDATE factory_jobs SET error_message = NULL, updated_at = ? WHERE id = ?", (now, job_id))
+            cur_status = row["status"]
+
+            if cur_status == "FINAL_UPLOAD_PENDING":
+                # Reset upload attempts and backoff timer so scanner picks it up immediately
+                conn.execute(
+                    "UPDATE factory_jobs SET error_message = NULL, upload_attempts = 0, next_retry_at = NULL, updated_at = ? WHERE id = ?",
+                    (now, job_id)
+                )
                 conn.commit()
-                logger.info("Retried job %s (final upload pending)", job_id)
+                logger.info("Retried job %s (final upload pending backoff reset)", job_id)
                 return True
 
+            if cur_status == "ASSEMBLY_FAILED":
+                # For assembly failure, keep all completed shots intact, transition to APPROVED so scanner re-assembles
+                conn.execute(
+                    "UPDATE factory_jobs SET status = 'APPROVED', error_message = NULL, updated_at = ? WHERE id = ?",
+                    (now, job_id)
+                )
+                conn.commit()
+                logger.info("Retried job %s (assembly failed reset to APPROVED, shots preserved)", job_id)
+                return True
+
+            # General retry from FAILED or CANCELLED
             conn.execute("UPDATE factory_jobs SET status = 'APPROVED', error_message = NULL, updated_at = ? WHERE id = ?", (now, job_id))
             conn.execute("""
             UPDATE factory_shots 
-            SET status = 'PENDING', attempts = 0, last_error = NULL
+            SET status = 'PENDING', attempts = 0, upload_attempts = 0, next_retry_at = NULL, last_error = NULL
             WHERE job_id = ? AND status IN ('FAILED', 'CANCELLED')
             """, (job_id,))
             conn.commit()
@@ -375,24 +559,63 @@ class JobQueueManager:
                 """).fetchone()
             return dict(row) if row else None
 
-    def mark_shot_in_progress(self, shot_id: str, account_id: str):
-        with self._get_conn() as conn:
-            conn.execute("""
-            UPDATE factory_shots 
-            SET status = 'IN_PROGRESS', account_id = ?, attempts = attempts + 1
-            WHERE id = ?
-            """, (account_id, shot_id))
-            conn.commit()
-
-    def mark_shot_done(self, shot_id: str, account_id: str, video_path: str, drive_url: Optional[str]):
+    def get_next_upload_pending_shot(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Returns next shot ready to be uploaded (UPLOAD_PENDING and backoff expired)."""
         now = time.time()
         with self._get_conn() as conn:
-            conn.execute("""
+            if job_id:
+                row = conn.execute("""
+                SELECT * FROM factory_shots 
+                WHERE job_id = ? AND status = 'UPLOAD_PENDING' AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                ORDER BY index_num ASC LIMIT 1
+                """, (job_id, now)).fetchone()
+            else:
+                row = conn.execute("""
+                SELECT s.* FROM factory_shots s
+                JOIN factory_jobs j ON s.job_id = j.id
+                WHERE s.status = 'UPLOAD_PENDING' AND (s.next_retry_at IS NULL OR s.next_retry_at <= ?)
+                  AND j.status IN ('APPROVED', 'PROCESSING')
+                ORDER BY s.created_at ASC, s.index_num ASC LIMIT 1
+                """, (now,)).fetchone()
+            return dict(row) if row else None
+
+    def mark_shot_in_progress(self, shot_id: str, account_id: str, worker_id: Optional[str] = None) -> bool:
+        """Guarded transition to IN_PROGRESS from PENDING."""
+        now = time.time()
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            UPDATE factory_shots 
+            SET status = 'IN_PROGRESS', account_id = ?, worker_id = ?, started_at = ?, attempts = attempts + 1
+            WHERE id = ? AND status = 'PENDING'
+            """, (account_id, worker_id, now, shot_id))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def mark_shot_generated(self, shot_id: str, video_path: str) -> bool:
+        """Marks shot video generated locally and moves to UPLOAD_PENDING."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            UPDATE factory_shots 
+            SET status = 'UPLOAD_PENDING', video_path = ?, upload_attempts = 0, next_retry_at = NULL
+            WHERE id = ? AND status IN ('IN_PROGRESS', 'PENDING')
+            """, (str(video_path), shot_id))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def mark_shot_done(self, shot_id: str, account_id: str, video_path: str, drive_url: Optional[str]) -> bool:
+        """Guarded transition to DONE from IN_PROGRESS or UPLOAD_PENDING."""
+        now = time.time()
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
             UPDATE factory_shots 
             SET status = 'DONE', account_id = ?, video_path = ?, drive_url = ?, completed_at = ?
-            WHERE id = ?
-            """, (account_id, video_path, drive_url, now, shot_id))
+            WHERE id = ? AND status IN ('IN_PROGRESS', 'UPLOAD_PENDING')
+            """, (account_id, str(video_path), drive_url, now, shot_id))
             conn.commit()
+            return cur.rowcount > 0
 
     def mark_shot_failed(self, shot_id: str, error_message: str, max_retries: int = 3) -> bool:
         """Resets to PENDING if attempts < max_retries, otherwise marks FAILED."""
@@ -402,15 +625,45 @@ class JobQueueManager:
                 return False
             attempts = row["attempts"]
             new_status = "PENDING" if attempts < max_retries else "FAILED"
-            conn.execute("""
+            cur = conn.cursor()
+            cur.execute("""
             UPDATE factory_shots 
             SET status = ?, last_error = ?
-            WHERE id = ?
+            WHERE id = ? AND status = 'IN_PROGRESS'
             """, (new_status, error_message, shot_id))
             conn.commit()
             return new_status == "FAILED"
 
-    def reset_interrupted_shots(self):
+    def mark_shot_upload_failed(self, shot_id: str, error_message: str, max_retries: int = 5) -> bool:
+        """
+        Handles upload-only failures with exponential backoff without depleting AI generation attempts.
+        """
+        now = time.time()
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT upload_attempts FROM factory_shots WHERE id = ?", (shot_id,)).fetchone()
+            if not row:
+                return False
+            attempts = (row["upload_attempts"] or 0) + 1
+            if attempts < max_retries:
+                backoff = min(3600.0, 30.0 * (2 ** (attempts - 1)))
+                next_retry = now + backoff
+                conn.execute("""
+                UPDATE factory_shots 
+                SET status = 'UPLOAD_PENDING', upload_attempts = ?, next_retry_at = ?, last_error = ?
+                WHERE id = ? AND status = 'UPLOAD_PENDING'
+                """, (attempts, next_retry, error_message, shot_id))
+                conn.commit()
+                return False
+            else:
+                conn.execute("""
+                UPDATE factory_shots 
+                SET status = 'FAILED', upload_attempts = ?, last_error = ?
+                WHERE id = ? AND status = 'UPLOAD_PENDING'
+                """, (attempts, f"Upload failed after {attempts} attempts: {error_message}", shot_id))
+                conn.commit()
+                return True
+
+    def reset_interrupted_shots(self, worker_id: Optional[str] = None):
         """Refunds attempts for shots interrupted mid-flight when worker restarts."""
         with self._get_conn() as conn:
             conn.execute("""
@@ -425,6 +678,7 @@ class JobQueueManager:
             total = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE job_id = ?", (job_id,)).fetchone()[0]
             done = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE job_id = ? AND status = 'DONE'", (job_id,)).fetchone()[0]
             in_progress = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE job_id = ? AND status = 'IN_PROGRESS'", (job_id,)).fetchone()[0]
+            upload_pending = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE job_id = ? AND status = 'UPLOAD_PENDING'", (job_id,)).fetchone()[0]
             failed = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE job_id = ? AND status = 'FAILED'", (job_id,)).fetchone()[0]
             pending = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE job_id = ? AND status = 'PENDING'", (job_id,)).fetchone()[0]
 
@@ -433,7 +687,9 @@ class JobQueueManager:
                 "total": total,
                 "done": done,
                 "in_progress": in_progress,
+                "upload_pending": upload_pending,
                 "failed": failed,
                 "pending": pending,
                 "percent": percent,
             }
+

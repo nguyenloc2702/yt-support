@@ -49,7 +49,8 @@ class TelegramCommandBot:
         self.jq = job_queue or JobQueueManager()
         self.pool = account_pool or AccountPoolManager()
         self.running = False
-        self.last_update_id = 0
+        stored_offset = self.jq.get_kv("telegram_last_update_id") if self.jq else None
+        self.last_update_id = int(stored_offset) if (stored_offset and stored_offset.isdigit()) else 0
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tg_worker")
 
     @property
@@ -63,7 +64,7 @@ class TelegramCommandBot:
             return
 
         self.running = True
-        logger.info("Starting Telegram Bot long-polling...")
+        logger.info("Starting Telegram Bot long-polling (offset: %d)...", self.last_update_id)
         thread = threading.Thread(target=self._poll_loop, daemon=True)
         thread.start()
 
@@ -83,6 +84,11 @@ class TelegramCommandBot:
                 data = resp.json()
                 for update in data.get("result", []):
                     self.last_update_id = update["update_id"]
+                    try:
+                        self.jq.set_kv("telegram_last_update_id", str(self.last_update_id))
+                    except Exception:
+                        pass
+
                     msg = update.get("message", {})
                     chat = msg.get("chat", {})
                     sender_id = str(chat.get("id", ""))
@@ -148,6 +154,9 @@ class TelegramCommandBot:
                         GROUP BY status
                     """).fetchall()
                     status_counts = {r["status"]: r["cnt"] for r in rows}
+                    up_shots = conn.execute("SELECT COUNT(*) FROM factory_shots WHERE status = 'UPLOAD_PENDING'").fetchone()[0]
+                    if up_shots > 0:
+                        status_counts["SHOTS_UPLOAD_PENDING"] = up_shots
                 queue_str = ", ".join(f"{k}: {v}" for k, v in status_counts.items()) if status_counts else "Trống"
             except Exception:
                 queue_str = "Không rõ"
@@ -173,22 +182,6 @@ class TelegramCommandBot:
                 return
             url = parts[1].strip()
 
-            # Prevent duplicate submissions of currently active URL
-            try:
-                with self.jq._get_conn() as conn:
-                    existing = conn.execute(
-                        "SELECT id, status FROM factory_jobs WHERE url = ? AND status NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')",
-                        (url,)
-                    ).fetchone()
-                    if existing:
-                        self.notifier.send_message(
-                            f"⚠️ URL này đang được xử lý trong Job <code>{existing['id']}</code> (Trạng thái: <b>{existing['status']}</b>).\n"
-                            f"Vui lòng đợi job hoàn tất hoặc dùng <code>/status</code>."
-                        )
-                        return
-            except Exception as e:
-                logger.debug("Duplicate URL check error: %s", e)
-
             duration = 180.0
             for p in parts[2:]:
                 if p.startswith("duration="):
@@ -197,8 +190,24 @@ class TelegramCommandBot:
                     except ValueError:
                         pass
 
+            # Atomic creation and duplicate check (P1.9)
+            job_id = self.jq.create_job_if_no_active("reup", url, target_duration=duration)
+            if not job_id:
+                self.notifier.send_message(
+                    "⚠️ URL này đang được xử lý trong một Job khác. Vui lòng đợi hoàn tất hoặc dùng <code>/status</code>."
+                )
+                return
+
             if self.on_reup_handler:
-                self._executor.submit(self.on_reup_handler, url, duration)
+                try:
+                    import inspect
+                    sig = inspect.signature(self.on_reup_handler)
+                    if "job_id" in sig.parameters:
+                        self._executor.submit(self.on_reup_handler, url, duration, job_id=job_id)
+                    else:
+                        self._executor.submit(self.on_reup_handler, url, duration)
+                except Exception:
+                    self._executor.submit(self.on_reup_handler, url, duration)
 
         elif cmd == "/remake":
             if len(parts) < 2:
@@ -206,24 +215,25 @@ class TelegramCommandBot:
                 return
             url = parts[1].strip()
 
-            # Prevent duplicate submissions of currently active URL
-            try:
-                with self.jq._get_conn() as conn:
-                    existing = conn.execute(
-                        "SELECT id, status FROM factory_jobs WHERE url = ? AND status NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')",
-                        (url,)
-                    ).fetchone()
-                    if existing:
-                        self.notifier.send_message(
-                            f"⚠️ URL này đang được xử lý trong Job <code>{existing['id']}</code> (Trạng thái: <b>{existing['status']}</b>).\n"
-                            f"Vui lòng đợi job hoàn tất hoặc dùng <code>/status</code>."
-                        )
-                        return
-            except Exception as e:
-                logger.debug("Duplicate URL check error: %s", e)
+            # Atomic creation and duplicate check (P1.9)
+            job_id = self.jq.create_job_if_no_active("remake", url)
+            if not job_id:
+                self.notifier.send_message(
+                    "⚠️ URL này đang được xử lý trong một Job khác. Vui lòng đợi hoàn tất hoặc dùng <code>/status</code>."
+                )
+                return
 
             if self.on_remake_handler:
-                self._executor.submit(self.on_remake_handler, url)
+                try:
+                    import inspect
+                    sig = inspect.signature(self.on_remake_handler)
+                    if "job_id" in sig.parameters:
+                        self._executor.submit(self.on_remake_handler, url, job_id=job_id)
+                    else:
+                        self._executor.submit(self.on_remake_handler, url)
+                except Exception:
+                    self._executor.submit(self.on_remake_handler, url)
+
 
         elif cmd == "/approve":
             if len(parts) < 2:

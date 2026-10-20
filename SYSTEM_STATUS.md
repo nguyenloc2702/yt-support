@@ -8,12 +8,12 @@
 
 | Thông số | Trạng thái hiện tại | Ghi chú |
 | :--- | :---: | :--- |
-| **Mã nguồn & Pipeline** | ✅ **100% Hoàn thành** | 360/360 test tự động (`pytest`) + `ruff` linter đạt 100% (xanh lá). |
+| **Mã nguồn & Pipeline** | ✅ **Integration-tested** | 371/371 test tự động (`pytest -q`) + `ruff check` 100% sạch lỗi. |
 | **Hạ tầng CI/CD GitHub** | ✅ **100% Hoàn thành** | GitHub Actions tự động test, build GHCR và SSH deploy. |
-| **Container VPS** | 🟢 **Đang chạy (`Up / Running`)** | Container `support-video-worker` chạy ngầm trên VPS `talk.gacdero.vn`. |
-| **Google Drive (rclone)** | 🟢 **Đã liên kết (5 TiB)** | Đã cấp quyền OAuth2, kết nối trực tiếp kho lưu trữ 5 TiB Google Drive. |
+| **Container VPS** | 🟢 **Đang chạy (`Up / Running`)** | Container `support-video-worker` (single worker, `replicas: 1`) trên VPS `talk.gacdero.vn`. |
+| **Google Drive (rclone)** | 🟢 **Đã liên kết (5 TiB)** | Đã cấp quyền OAuth2, verify MD5 + size exact, kết nối 5 TiB Google Drive. |
 | **Tài khoản Google Pro** | 🟢 **1 / 10 Sẵn sàng** | `acc_01.json` đã nạp và xác minh; 9 tài khoản còn lại chờ nạp sau. |
-| **Telegram Bot Listener** | 🟢 **Đang hoạt động (Polling)** | Đã kết nối Bot và Chat ID, nhận lệnh trực tiếp từ điện thoại. |
+| **Telegram Bot Listener** | 🟢 **Đang hoạt động (Polling)** | Đã kết nối Bot, lệnh điều khiển xử lý inline, deduplication atomic. |
 
 ---
 

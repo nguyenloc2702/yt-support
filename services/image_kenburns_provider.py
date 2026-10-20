@@ -37,8 +37,10 @@ class ImageKenBurnsProvider(VideoProvider):
         img_path = out_path.with_suffix(".jpg")
 
         # Step 1: Generate or obtain high-res image
-        # Attempt to generate image via gemini_webapi if session provided
         has_image = False
+        is_placeholder = False
+
+        # Attempt to generate image via gemini_webapi if session provided
         if session_file and session_file.exists():
             try:
                 import asyncio
@@ -55,22 +57,21 @@ class ImageKenBurnsProvider(VideoProvider):
                             await out.images[0].save(path=str(img_path.parent), filename=img_path.name)
                         await c.close()
 
-                    asyncio.run(_gen_img())
+                    asyncio.run(asyncio.wait_for(_gen_img(), timeout=120.0))
                     if img_path.exists() and img_path.stat().st_size > 1000:
                         has_image = True
             except Exception as e:
                 logger.warning("Image generation via WebAPI failed (%s). Checking DALL-E / external provider.", e)
 
-        # Secondary fallback: Attempt OpenAI / DALL-E if key is available
+        # Secondary fallback: Attempt OpenAI / DALL-E if explicit OPENAI_API_KEY is available (P1.8)
         if not has_image:
-            try:
-                import os
-                import base64
-                from services.settings_service import get_llm_api_key
-                api_key = get_llm_api_key() or os.environ.get("OPENAI_API_KEY")
-                if api_key:
+            import os
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if openai_key:
+                try:
+                    import base64
                     from openai import OpenAI
-                    client = OpenAI(api_key=api_key)
+                    client = OpenAI(api_key=openai_key, timeout=60.0)
                     resp = client.images.generate(
                         model="dall-e-3",
                         prompt=f"Cinematic historical documentary scene, atmospheric 4k: {prompt[:300]}",
@@ -81,29 +82,43 @@ class ImageKenBurnsProvider(VideoProvider):
                     if resp.data and resp.data[0].b64_json:
                         img_path.write_bytes(base64.b64decode(resp.data[0].b64_json))
                         has_image = True
-            except Exception as err:
-                logger.debug("DALL-E secondary image fallback skipped/failed: %s", err)
+                except Exception as err:
+                    logger.warning("DALL-E image generation fallback failed: %s", err)
 
-        # Tertiary fallback: create high-res cinematic vignette background with FFmpeg
+        # Tertiary fallback: create cinematic vignette card with PIL / FFmpeg
         if not has_image or not img_path.exists():
+            is_placeholder = True
+            logger.warning("Ken Burns using generated cinematic placeholder card for shot: %s", prompt[:60])
             try:
+                # Use PIL to render dark vignette card with prompt text snippet
+                from PIL import Image, ImageDraw, ImageFont
+                img = Image.new("RGB", (1280, 720), color=(15, 23, 42))
+                draw = ImageDraw.Draw(img)
+                # Subtle border and scene prompt caption
+                draw.rectangle([(20, 20), (1260, 700)], outline=(30, 41, 59), width=2)
+                caption = prompt[:80] + ("..." if len(prompt) > 80 else "")
+                draw.text((640, 360), caption, fill=(148, 163, 184), anchor="mm")
+                img.save(img_path, "JPEG", quality=95)
+            except Exception:
+                # Fallback to FFmpeg color if PIL fails
                 cmd_img = [
                     "ffmpeg", "-y",
                     "-f", "lavfi",
-                    "-i", "color=c=0x0d131f:s=1280x720:d=1,vignette=PI/4",
+                    "-i", "color=c=0x0f172a:s=1280x720:d=1,vignette=PI/4",
                     "-frames:v", "1",
                     str(img_path),
                 ]
-                subprocess.run(cmd_img, check=True, capture_output=True)
-            except Exception as e:
-                return ProviderResult(
-                    ok=False,
-                    error_kind=ErrorKind.FATAL,
-                    error_message=f"Failed to generate base image: {e}",
-                    duration_sec=time.time() - start_time,
-                )
+                try:
+                    subprocess.run(cmd_img, check=True, capture_output=True, timeout=30)
+                except Exception as e:
+                    return ProviderResult(
+                        ok=False,
+                        error_kind=ErrorKind.FATAL,
+                        error_message=f"Failed to generate base image: {e}",
+                        duration_sec=time.time() - start_time,
+                    )
 
-        # Step 2: Apply Ken Burns Zoom/Pan animation (10 seconds, 25fps = 250 frames, 1280x720)
+        # Step 2: Apply Ken Burns Zoom/Pan animation (10 seconds, 25fps = 250 frames, 1280x720) with timeout (P1.6)
         try:
             # Subtle zoom from 1.0 to 1.15 centered
             cmd_kb = [
@@ -116,7 +131,7 @@ class ImageKenBurnsProvider(VideoProvider):
                 "-pix_fmt", "yuv420p",
                 str(out_path),
             ]
-            subprocess.run(cmd_kb, check=True, capture_output=True)
+            subprocess.run(cmd_kb, check=True, capture_output=True, timeout=180)
 
             if out_path.exists() and out_path.stat().st_size > 5000:
                 return ProviderResult(
@@ -124,6 +139,7 @@ class ImageKenBurnsProvider(VideoProvider):
                     video_path=out_path,
                     thumbnail_path=img_path,
                     duration_sec=time.time() - start_time,
+                    extra={"placeholder": is_placeholder},
                 )
             else:
                 return ProviderResult(
@@ -132,6 +148,13 @@ class ImageKenBurnsProvider(VideoProvider):
                     error_message="Ken Burns render output file too small",
                     duration_sec=time.time() - start_time,
                 )
+        except subprocess.TimeoutExpired as e:
+            return ProviderResult(
+                ok=False,
+                error_kind=ErrorKind.FATAL,
+                error_message=f"Ken Burns animation timed out after 180s: {e}",
+                duration_sec=time.time() - start_time,
+            )
         except Exception as e:
             return ProviderResult(
                 ok=False,
@@ -139,3 +162,4 @@ class ImageKenBurnsProvider(VideoProvider):
                 error_message=f"Ken Burns animation error: {e}",
                 duration_sec=time.time() - start_time,
             )
+

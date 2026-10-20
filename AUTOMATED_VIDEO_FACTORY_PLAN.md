@@ -1,9 +1,9 @@
 # KẾ HOẠCH: XƯỞNG SẢN XUẤT VIDEO BÁN TỰ ĐỘNG
 ## (AI Video Factory · Dual-Mode · Hướng `gemini-webapi`)
 
-> **Trạng thái:** ✅ **PRODUCTION - ĐÃ TRIỂN KHAI & ĐANG CHẠY TRÊN VPS (`talk.gacdero.vn`)**.
-> **Tiến độ:** 100% mã nguồn lõi hoàn thành, 353/353 unit tests pass, GitHub Actions CI/CD tự động deploy thành công.
-> **Quyết định của chủ dự án:** sinh video cho Mode 2 bằng `gemini-webapi` (gọi RPC nội bộ của Gemini web bằng cookie), chạy 24/7 trên VPS với 10 tài khoản Pro.
+> **Trạng thái:** 🟡 **INTEGRATION-TESTED - ĐÃ HARDENING VÒNG 4 (P0, P1, P2)**.
+> **Tiến độ:** 100% mã nguồn lõi hoàn thành, 371/371 unit tests pass (`pytest -q`), `ruff check .` 100% pass, Single Worker (`replicas: 1`).
+> **Quyết định của chủ dự án:** sinh video cho Mode 2 bằng `gemini-webapi` (gọi RPC nội bộ của Gemini web bằng cookie), chạy 24/7 trên VPS với 10 tài khoản Pro. Sẵn sàng cho bước nghiệm thu staging VPS.
 
 ---
 
