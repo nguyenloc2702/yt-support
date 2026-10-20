@@ -108,6 +108,9 @@ def download_video(
     if not url or not re.match(r"^https?://", url.strip()):
         raise InvalidMediaError(f"Invalid URL: {url!r}")
 
+    # Enforce SSRF protection before downloading
+    validate_public_url(url.strip())
+
     if not check_ytdlp():
         raise DependencyNotFoundError(
             f"yt-dlp not found at {_ytdlp_path()!r}. Install it with: pip install yt-dlp"

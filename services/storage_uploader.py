@@ -34,10 +34,11 @@ class StorageUploader:
         local_path: Path,
         remote_filename: Optional[str] = None,
         remote_folder: Optional[str] = None,
+        clean_local: bool = True,
     ) -> Tuple[bool, Optional[str]]:
         """
         Uploads local video file to Google Drive via rclone.
-        Upon successful upload, immediately deletes the local file to save VPS disk.
+        Upon verified upload, deletes the local file if clean_local=True.
         Returns (success: bool, url_or_path: Optional[str]).
         """
         local_file = Path(local_path)
@@ -50,16 +51,16 @@ class StorageUploader:
         remote_dest = f"{self.remote_name}:{dest_folder}"
 
         if not self.is_rclone_available:
-            logger.warning(
-                "rclone is not installed or not in PATH. Skipping cloud upload. Keeping local file: %s",
+            logger.error(
+                "rclone is not installed or not in PATH. Cannot upload to cloud: %s",
                 local_file,
             )
-            return True, str(local_file)
+            return False, None
 
         logger.info("Uploading %s to %s/%s via rclone...", local_file.name, remote_dest, dest_name)
 
         try:
-            # Using 'rclone copy' first, then verifying and removing local file
+            # Using 'rclone copyto' first
             cmd = [
                 self.rclone_bin,
                 "copyto",
@@ -74,14 +75,28 @@ class StorageUploader:
                 logger.error("rclone upload failed (code %d): %s", result.returncode, result.stderr)
                 return False, None
 
-            logger.info("Uploaded successfully to Google Drive: %s/%s", dest_folder, dest_name)
+            # Verify remote file exists on Google Drive before deleting local file
+            verify_cmd = [
+                self.rclone_bin,
+                "lsf",
+                f"{remote_dest}/{dest_name}",
+            ]
+            v_res = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
+            if v_res.returncode != 0 or not v_res.stdout.strip():
+                logger.error("rclone remote verification failed for %s/%s: %s", dest_folder, dest_name, v_res.stderr)
+                return False, None
 
-            # Delete local file after verified upload
-            try:
-                local_file.unlink()
-                logger.info("Cleaned local temporary file to free disk space: %s", local_file.name)
-            except Exception as e:
-                logger.warning("Could not delete temporary file %s: %s", local_file, e)
+            logger.info("Uploaded and verified successfully on Google Drive: %s/%s", dest_folder, dest_name)
+
+            # Delete local file only if requested
+            if clean_local:
+                try:
+                    local_file.unlink()
+                    logger.info("Cleaned local temporary file to free disk space: %s", local_file.name)
+                except Exception as e:
+                    logger.warning("Could not delete temporary file %s: %s", local_file, e)
+            else:
+                logger.info("Retained local file for downstream processing: %s", local_file.name)
 
             # Return virtual drive path
             virtual_path = f"gdrive://{dest_folder}/{dest_name}"

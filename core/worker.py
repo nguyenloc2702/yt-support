@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 import random
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from services.job_queue import JobQueueManager
 from services.notifier import TelegramNotifier
 from services.storage_uploader import StorageUploader
 from services.telegram_bot import TelegramCommandBot
-from services.video_provider import ErrorKind
+from services.video_provider import ErrorKind, ProviderResult
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,21 +137,34 @@ class VideoAutomationWorker:
             logger.info("▶ Bắt đầu xử lý %s (Cảnh %d, lần %d) bằng tài khoản %s", shot_id, shot_idx, attempts + 1, acc_id)
             self.jq.mark_shot_in_progress(shot_id, acc_id)
 
-            # Generate: use primary provider (Gemini Veo), or fallback to Ken Burns if attempt >= 3
-            start_time = time.time()
-            if attempts >= 2:
-                logger.warning("Shot %s đã thất bại 2 lần. Kích hoạt Ken Burns graceful fallback!", shot_id)
-                res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
+            # Quota Optimization: If local video exists from previous attempt where only upload failed, reuse it!
+            if target_out_path.exists() and target_out_path.stat().st_size > 1024:
+                logger.info("⚡ File video cục bộ đã tồn tại (%s). Bỏ qua sinh AI để tiết kiệm quota tài khoản!", target_out_path.name)
+                res = ProviderResult(ok=True, video_path=target_out_path)
+                duration = 0.5
             else:
-                res = self.primary_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
+                # Generate: use primary provider (Gemini Veo), or fallback to Ken Burns if attempt >= 2
+                start_time = time.time()
+                if attempts >= 2:
+                    logger.warning("Shot %s đã thất bại 2 lần. Kích hoạt Ken Burns graceful fallback!", shot_id)
+                    # Protect VPS RAM & CPU from concurrent FFmpeg zoompan rendering
+                    while not self.jq.acquire_heavy_lock(job_id):
+                        logger.info("Ken Burns fallback đang chờ heavy lock 10s...")
+                        time.sleep(10)
+                    try:
+                        res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
+                    finally:
+                        self.jq.release_heavy_lock(job_id)
+                else:
+                    res = self.primary_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
 
-            duration = time.time() - start_time
+                duration = time.time() - start_time
 
             if res.ok and res.video_path and res.video_path.exists():
                 logger.info("✅ Shot %s sinh thành công sau %.1fs", shot_id, duration)
                 self.account_pool.report_success(acc_id)
 
-                # 1. Send Telegram preview before deletion
+                # 1. Send Telegram preview before cloud archival
                 summary = self.jq.get_job_summary(job_id)
                 if self.notifier.is_configured:
                     self.notifier.notify_shot_completed(
@@ -163,11 +177,12 @@ class VideoAutomationWorker:
                         video_path=str(res.video_path),
                     )
 
-                # 2. Upload to Google Drive and delete local buffer
+                # 2. Upload to Google Drive (retain local buffer for documentary assembly)
                 upload_ok, gdrive_url = self.uploader.upload_and_clean(
                     local_path=res.video_path,
                     remote_filename=out_filename,
                     remote_folder=f"Video_Projects/{job_id}/raw_shots",
+                    clean_local=False,
                 )
 
                 if upload_ok:
@@ -176,17 +191,13 @@ class VideoAutomationWorker:
                 else:
                     self.jq.mark_shot_failed(shot_id, "Upload to Google Drive failed")
 
-                # Check if job is now completely done
+                # Check if job is now completely done (all shots finished)
                 updated_summary = self.jq.get_job_summary(job_id)
                 if updated_summary["done"] >= updated_summary["total"] and updated_summary["total"] > 0:
                     if job_id not in batch_notified_jobs:
-                        logger.info("🎉 Tất cả %d cảnh của Job %s đã hoàn thành!", updated_summary["total"], job_id)
                         batch_notified_jobs.add(job_id)
-                        self.jq.update_job_status(job_id, status="COMPLETED")
-                        if self.notifier.is_configured:
-                            self.notifier.notify_batch_completed(
-                                updated_summary["done"], updated_summary["total"], f"Video_Projects/{job_id}"
-                            )
+                        logger.info("🎉 Tất cả %d cảnh của Job %s đã hoàn thành! Bắt đầu ráp documentary hoàn chỉnh...", updated_summary["total"], job_id)
+                        self._assemble_and_finalize_documentary(job_id, updated_summary)
 
             else:
                 logger.error("❌ Shot %s thất bại: %s (%s)", shot_id, res.error_message, res.error_kind)
@@ -206,6 +217,7 @@ class VideoAutomationWorker:
                         )
 
                 is_final_failure = self.jq.mark_shot_failed(shot_id, res.error_message or "Unknown error")
+                summary = self.jq.get_job_summary(job_id)
                 if is_final_failure and self.notifier.is_configured:
                     self.notifier.notify_shot_failed(
                         shot_idx=shot_idx,
@@ -215,12 +227,72 @@ class VideoAutomationWorker:
                         error_msg=res.error_message or "Max retries exceeded",
                     )
 
+                # Check if all shots for this job have settled (no pending, no in_progress)
+                settled_summary = self.jq.get_job_summary(job_id)
+                if settled_summary["pending"] == 0 and settled_summary["in_progress"] == 0:
+                    if settled_summary["failed"] > 0:
+                        logger.error("Job %s kết thúc với %d cảnh thất bại vĩnh viễn.", job_id, settled_summary["failed"])
+                        self.jq.update_job_status(
+                            job_id,
+                            status="FAILED",
+                            error_message=f"{settled_summary['failed']} / {settled_summary['total']} cảnh thất bại sau 3 lần retry."
+                        )
+                        if self.notifier.is_configured:
+                            self.notifier.send_message(
+                                f"❌ <b>[JOB {job_id} THẤT BẠI]</b>\n"
+                                f"Có {settled_summary['failed']}/{settled_summary['total']} cảnh không thể sinh video sau 3 lần retry.\n"
+                                f"Dùng lệnh <code>/retry {job_id}</code> để thử lại hoặc cập nhật cookie tài khoản."
+                            )
+
             # Jitter delay between requests (15s to 30s)
             delay = random.uniform(15.0, 30.0)
             logger.info("Tạm nghỉ jitter %.1fs trước khi xử lý cảnh tiếp theo...", delay)
             time.sleep(delay)
 
         logger.info("Worker dừng an toàn (Graceful Shutdown completed).")
+
+    def _assemble_and_finalize_documentary(self, job_id: str, summary: dict):
+        """Assembles all generated shots into a final documentary video and uploads to Google Drive."""
+        project_dir = Path("data/automated_runs") / job_id
+        while not self.jq.acquire_heavy_lock(job_id):
+            time.sleep(15)
+
+        try:
+            from pipeline.documentary_assembler import assemble_documentary
+            logger.info("Assembling full documentary for Job %s...", job_id)
+            final_video = assemble_documentary(job_id=job_id, project_dir=project_dir)
+
+            # Upload final assembled documentary to Google Drive
+            remote_name = f"documentary_final_{job_id}.mp4"
+            upload_ok, drive_url = self.uploader.upload_and_clean(
+                local_path=final_video,
+                remote_filename=remote_name,
+                remote_folder=f"Video_Projects/{job_id}",
+                clean_local=True,
+            )
+
+            # Clean up local raw shots buffer to free disk space
+            shutil.rmtree(project_dir / "shots", ignore_errors=True)
+
+            if upload_ok:
+                self.jq.update_job_status(job_id, status="COMPLETED", final_video=str(final_video), drive_url=drive_url)
+                if self.notifier.is_configured:
+                    self.notifier.send_message(
+                        f"🎉 <b>[MODE 2 HOÀN TẤT] PHIM TÀI LIỆU ĐÃ RÁP XONG!</b>\n\n"
+                        f"🆔 Job: <code>{job_id}</code>\n"
+                        f"🎞 Tổng số cảnh: <b>{summary['done']} / {summary['total']} cảnh</b>\n"
+                        f"☁️ Google Drive: <code>{drive_url}</code>\n"
+                        f"✨ Video phim tài liệu hoàn chỉnh đã được kiểm định QC và tải lên Google Drive!"
+                    )
+            else:
+                self.jq.update_job_status(job_id, status="FAILED", error_message="Upload final documentary to Google Drive failed")
+        except Exception as e:
+            logger.error("Failed to assemble documentary for %s: %s", job_id, e, exc_info=True)
+            self.jq.update_job_status(job_id, status="FAILED", error_message=f"Documentary assembly failed: {e}")
+            if self.notifier.is_configured:
+                self.notifier.send_message(f"❌ <b>[LỖI RÁP PHIM TÀI LIỆU - {job_id}]:</b> <code>{str(e)[:300]}</code>")
+        finally:
+            self.jq.release_heavy_lock(job_id)
 
 
 if __name__ == "__main__":
