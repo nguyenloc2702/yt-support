@@ -249,7 +249,7 @@ class AccountPoolManager:
                     acc["status"] = "EXHAUSTED"
                 self._save_state_unlocked(state)
 
-    def report_rate_limit(self, acc_id: str, cooldown_seconds: int = 3600):
+    def report_rate_limit(self, acc_id: str, cooldown_seconds: int = 120):
         with FileLock(str(self.lock_file), timeout=10):
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
             if acc_id in state["accounts"]:

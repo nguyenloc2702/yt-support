@@ -250,7 +250,7 @@ class VideoAutomationWorker:
 
                 if needs_veo:
                     if res.error_kind == ErrorKind.RATE_LIMIT:
-                        self.account_pool.report_rate_limit(acc_id, cooldown_seconds=3600)
+                        self.account_pool.report_rate_limit(acc_id, cooldown_seconds=120)
                         self.jq.mark_shot_retry_later(shot_id, res.error_message or "Rate limited")
                         continue
                     elif res.error_kind == ErrorKind.QUOTA:

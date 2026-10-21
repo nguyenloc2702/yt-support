@@ -27,6 +27,7 @@ from services.job_queue import JobQueueManager
 from services.notifier import TelegramNotifier
 from pipeline.output_validator import validate_rendered_output
 from services.storage_uploader import StorageUploader
+from services.prompt_sanitizer import clean_narration_for_tts, sanitize_veo_prompt
 
 logger = get_logger("automated_factory")
 
@@ -491,7 +492,7 @@ class AutomatedFactory:
             for idx in range(1, target_shots + 1):
                 seg_idx = min((idx - 1) * step, len(sub_segments) - 1) if sub_segments else None
                 seg_text = sub_segments[seg_idx].get("text", "") if (seg_idx is not None and seg_idx < len(sub_segments)) else f"Historical milestone scene {idx}"
-                clean_seg_text = seg_text.replace("\n", " ").strip()
+                clean_seg_text = clean_narration_for_tts(seg_text.replace("\n", " ").strip())
 
                 # Narrative length constraint (P1.2): ~2.5 - 2.8 words/sec for 10s shot to ensure TTS fits comfortably
                 words = clean_seg_text.split()
@@ -501,14 +502,12 @@ class AutomatedFactory:
                 # Mode 2: All scenes default to Veo AI generation (is_key_scene = True)
                 is_key = True
 
+                prompt = sanitize_veo_prompt(clean_seg_text, scene_idx=idx, total_scenes=target_shots)
+
                 shots.append({
                     "index": idx,
                     "text": clean_seg_text,
-                    "prompt": (
-                        f"Generate a video: Cinematic 4K, professional documentary cinematography. Visual representation of: "
-                        f"{clean_seg_text[:140]}. 35mm master lens, photorealistic atmospheric depth, "
-                        f"dramatic cinematic lighting, silent, no audio."
-                    ),
+                    "prompt": prompt,
                     "duration": 10.0,
                     "is_key_scene": is_key,
                 })

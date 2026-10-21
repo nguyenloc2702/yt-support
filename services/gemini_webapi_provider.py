@@ -18,6 +18,7 @@ import time
 from typing import Optional, Tuple
 
 from services.video_provider import ErrorKind, ProviderResult, SessionValidationResult, VideoProvider
+from services.prompt_sanitizer import sanitize_veo_prompt
 
 try:
     from gemini_webapi import GeminiClient
@@ -271,11 +272,7 @@ class GeminiWebApiProvider(VideoProvider):
                         duration_sec=time.time() - start_time,
                     )
 
-            veo_prompt = prompt.strip()
-            if not any(kw in veo_prompt.lower() for kw in ("video", "motion", "cinematography", "footage")):
-                veo_prompt = f"Generate a video: {veo_prompt}"
-            elif not veo_prompt.lower().startswith("generate a video") and not veo_prompt.lower().startswith("video of"):
-                veo_prompt = f"Generate a video: {veo_prompt}"
+            veo_prompt = sanitize_veo_prompt(prompt)
 
             logger.info("Submitting Veo prompt: '%s'...", veo_prompt[:80])
             response = await client.generate_content(prompt=veo_prompt)

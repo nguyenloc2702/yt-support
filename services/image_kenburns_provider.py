@@ -15,6 +15,7 @@ from typing import Optional
 
 from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.video_provider import ErrorKind, ProviderResult, SessionValidationResult, VideoProvider
+from services.prompt_sanitizer import sanitize_veo_prompt
 
 logger = logging.getLogger("image_kenburns_provider")
 
@@ -33,6 +34,7 @@ class ImageKenBurnsProvider(VideoProvider):
         session_file: Optional[Path] = None,
     ) -> ProviderResult:
         start_time = time.time()
+        safe_prompt = sanitize_veo_prompt(prompt)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         img_path = out_path.with_suffix(".jpg")
 
@@ -52,7 +54,7 @@ class ImageKenBurnsProvider(VideoProvider):
                     async def _gen_img():
                         c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
                         await c.init(timeout=60, auto_refresh=True, verbose=False)
-                        out = await c.generate_content(f"High-quality 4k photorealistic image for documentary: {prompt}")
+                        out = await c.generate_content(f"High-quality 4k photorealistic image for documentary: {safe_prompt}")
                         if out.images:
                             await out.images[0].save(path=str(img_path.parent), filename=img_path.name)
                         await c.close()
