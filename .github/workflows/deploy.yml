@@ -145,6 +145,6 @@ jobs:
             echo "=== Verifying Deployment Status ==="
             sleep 5
             docker compose -f docker-compose.prod.yml ps
-            docker compose -f docker-compose.prod.yml logs --tail 20 video-worker
-            docker image prune -af --filter "label=app=support-video-worker" --filter "until=72h" || true
+            docker image prune -af --filter "label=app=support-video-worker" || true
+            df -h /
             echo "Deployment completed successfully!"

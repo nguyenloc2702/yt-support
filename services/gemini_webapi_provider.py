@@ -153,12 +153,18 @@ class GeminiWebApiProvider(VideoProvider):
             credits_remaining = None
             reset_at = None
 
-            if client.usage_info:
-                tier_info = client.usage_info.get("tier", {})
-                tier = tier_info.get("label", "UNKNOWN")
-                current_window = client.usage_info.get("current_5h", {})
-                credits_remaining = current_window.get("remaining_credits")
-                reset_at = current_window.get("reset_at")
+            if not client.usage_info:
+                return SessionValidationResult(
+                    valid=False,
+                    error_kind=ErrorKind.AUTH,
+                    message="Cookie không hợp lệ hoặc đã hết hạn đăng nhập (UNAUTHENTICATED). Vui lòng cập nhật cookie mới.",
+                )
+
+            tier_info = client.usage_info.get("tier", {})
+            tier = tier_info.get("label", "UNKNOWN")
+            current_window = client.usage_info.get("current_5h", {})
+            credits_remaining = current_window.get("remaining_credits")
+            reset_at = current_window.get("reset_at")
 
             # Check if cookie was updated during init
             new_psidts = client.cookies.get("__Secure-1PSIDTS") if hasattr(client, "cookies") else None
