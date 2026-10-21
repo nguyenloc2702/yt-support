@@ -139,3 +139,32 @@ def test_generate_success(mock_client_cls, tmp_path: Path):
     assert result.ok is True
     assert result.video_path.exists()
     assert result.duration_sec >= 0.0
+
+
+@patch("services.gemini_webapi_provider.GeminiClient")
+def test_generate_quota_exhausted(mock_client_cls, tmp_path: Path):
+    session_file = tmp_path / "acc.json"
+    atomic_save_session(session_file, "psid", "psidts")
+    out_video = tmp_path / "output.mp4"
+
+    mock_resp = MagicMock()
+    mock_resp.videos = []
+    mock_resp.text = "I can create more videos as soon as your limit resets. Check your usage in Settings."
+
+    mock_client = MagicMock()
+    mock_client.init = AsyncMock()
+    mock_client.close = AsyncMock()
+    mock_client.generate_content = AsyncMock(return_value=mock_resp)
+    mock_client.usage_info = {"tier": {"label": "PRO"}}
+    mock_client.cookies = {}
+    mock_client_cls.return_value = mock_client
+
+    provider = GeminiWebApiProvider()
+    result = provider.generate("A cinematic shot", out_video, session_file)
+
+    assert result.ok is False
+    assert result.error_kind == ErrorKind.QUOTA
+    assert "quota exhausted" in result.error_message.lower()
+    # Ensure "Generate a video:" prefix was passed to generate_content
+    call_args = mock_client.generate_content.call_args[1]
+    assert call_args["prompt"].startswith("Generate a video:")

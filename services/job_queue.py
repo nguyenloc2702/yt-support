@@ -564,6 +564,11 @@ class JobQueueManager:
                 """).fetchone()
             return dict(row) if row else None
 
+    def get_shot(self, shot_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM factory_shots WHERE id = ?", (shot_id,)).fetchone()
+            return dict(row) if row else None
+
     def get_next_upload_pending_shot(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Returns next shot ready to be uploaded (UPLOAD_PENDING and backoff expired)."""
         now = time.time()
@@ -638,6 +643,18 @@ class JobQueueManager:
             """, (new_status, error_message, shot_id))
             conn.commit()
             return new_status == "FAILED"
+
+    def mark_shot_retry_later(self, shot_id: str, error_message: str) -> bool:
+        """Resets shot to PENDING without consuming an attempt (used for QUOTA / RATE_LIMIT)."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            UPDATE factory_shots 
+            SET status = 'PENDING', attempts = MAX(0, attempts - 1), last_error = ?
+            WHERE id = ? AND status = 'IN_PROGRESS'
+            """, (error_message, shot_id))
+            conn.commit()
+            return cur.rowcount > 0
 
     def mark_shot_upload_failed(self, shot_id: str, error_message: str, max_retries: int = 5) -> bool:
         """

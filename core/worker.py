@@ -213,9 +213,14 @@ class VideoAutomationWorker:
                 if not marked:
                     continue
 
+                session_path = None
+                avail = self.account_pool.get_available_account(reserve=False)
+                if avail and Path(avail.session_file).exists():
+                    session_path = Path(avail.session_file)
+
                 start_time = time.time()
                 with self.jq.heavy_lock_lease(job_id, interval=15.0):
-                    res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=None)
+                    res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_path)
                 duration = time.time() - start_time
 
             # 3. Handle generation result
@@ -246,8 +251,18 @@ class VideoAutomationWorker:
                 if needs_veo:
                     if res.error_kind == ErrorKind.RATE_LIMIT:
                         self.account_pool.report_rate_limit(acc_id, cooldown_seconds=3600)
+                        self.jq.mark_shot_retry_later(shot_id, res.error_message or "Rate limited")
+                        continue
                     elif res.error_kind == ErrorKind.QUOTA:
                         self.account_pool.report_quota_exhausted(acc_id)
+                        self.jq.mark_shot_retry_later(shot_id, res.error_message or "Veo quota exhausted")
+                        if self.notifier.is_configured:
+                            self.notifier.send_message(
+                                f"⚠️ <b>HẾT HẠN NGẠCH VEO ({acc_id})</b>\n"
+                                f"Tài khoản <code>{acc_id}</code> đã chạm giới hạn video của Google.\n"
+                                f"Đã đánh dấu EXHAUSTED và hoãn cảnh {shot_idx} chờ quota hồi phục hoặc chuyển tài khoản tiếp theo."
+                            )
+                        continue
                     elif res.error_kind in (ErrorKind.AUTH, ErrorKind.VERIFY):
                         self.account_pool.trigger_kill_switch(acc_id, res.error_message or "Auth/Verification failure")
                         if self.notifier.is_configured:

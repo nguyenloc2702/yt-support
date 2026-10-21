@@ -498,15 +498,14 @@ class AutomatedFactory:
                 if len(words) > 28:
                     clean_seg_text = " ".join(words[:28]) + "..."
 
-                # Key scene detection: dramatic keywords, milestone opening, or climax ending
-                has_dramatic_cue = any(cue in clean_seg_text.lower() for cue in dramatic_cues)
-                is_key = has_dramatic_cue or (idx == 1) or (idx == target_shots)
+                # Mode 2: All scenes default to Veo AI generation (is_key_scene = True)
+                is_key = True
 
                 shots.append({
                     "index": idx,
                     "text": clean_seg_text,
                     "prompt": (
-                        f"Cinematic 4K, professional documentary cinematography. Visual representation of: "
+                        f"Generate a video: Cinematic 4K, professional documentary cinematography. Visual representation of: "
                         f"{clean_seg_text[:140]}. 35mm master lens, photorealistic atmospheric depth, "
                         f"dramatic cinematic lighting, silent, no audio."
                     ),

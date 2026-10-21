@@ -111,3 +111,30 @@ def test_account_pool_atomic_reservation(mock_pool_env):
     assert state["accounts"]["acc_01"]["shots_today"] == 1
     assert state["accounts"]["acc_02"]["in_flight"] == 0
     assert state["accounts"]["acc_02"]["shots_today"] == 0
+
+
+def test_account_pool_quota_exhausted_reset(mock_pool_env):
+    from datetime import datetime, timezone, timedelta
+    mgr = AccountPoolManager(
+        session_dir=mock_pool_env["session_dir"],
+        state_file=mock_pool_env["state_file"],
+        max_daily_shots=5,
+    )
+    # Expire in 1 hour
+    future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    mgr.report_quota_exhausted("acc_01", reset_at=future_time)
+
+    state = json.loads(mock_pool_env["state_file"].read_text())
+    assert state["accounts"]["acc_01"]["status"] == "EXHAUSTED"
+    assert state["accounts"]["acc_01"]["cooldown_until"] == future_time
+
+    # When cooldown_until has passed:
+    past_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    state["accounts"]["acc_01"]["cooldown_until"] = past_time
+    mock_pool_env["state_file"].write_text(json.dumps(state))
+
+    # Getting available account should restore acc_01
+    acc = mgr.get_available_account()
+    assert acc is not None
+    assert acc.acc_id == "acc_01"
+    assert acc.status == "AVAILABLE"

@@ -127,3 +127,26 @@ def test_heavy_lock_heartbeat(temp_jq: JobQueueManager):
     temp_jq.release_heavy_lock(job_id)
 
 
+def test_mark_shot_retry_later(temp_jq: JobQueueManager):
+    job_id = temp_jq.create_job(mode="remake", url="https://youtube.com/test_retry_later")
+    temp_jq.transition_job(job_id, "APPROVED")
+    temp_jq.add_shots_for_job(job_id, [{"index": 1, "prompt": "Shot 1", "duration": 10.0}])
+
+    shot = temp_jq.get_next_pending_shot(job_id)
+    assert shot is not None
+    shot_id = shot["id"]
+
+    # Mark in progress (increments attempts to 1)
+    temp_jq.mark_shot_in_progress(shot_id, "acc_01")
+    s_in_prog = temp_jq.get_shot(shot_id)
+    assert s_in_prog["attempts"] == 1
+    assert s_in_prog["status"] == "IN_PROGRESS"
+
+    # Retry later (due to QUOTA/RATE_LIMIT) -> should reset attempts back to 0 and status to PENDING
+    assert temp_jq.mark_shot_retry_later(shot_id, "Quota exhausted") is True
+    s_retried = temp_jq.get_shot(shot_id)
+    assert s_retried["status"] == "PENDING"
+    assert s_retried["attempts"] == 0
+    assert s_retried["last_error"] == "Quota exhausted"
+
+

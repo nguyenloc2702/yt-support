@@ -188,8 +188,8 @@ class AccountPoolManager:
                     if acc["status"] == "EXHAUSTED":
                         acc["status"] = "AVAILABLE"
 
-                # Check cooldown expiry
-                if acc["status"] == "COOLDOWN" and acc.get("cooldown_until"):
+                # Check cooldown / quota reset expiry
+                if acc["status"] in ("COOLDOWN", "EXHAUSTED") and acc.get("cooldown_until"):
                     try:
                         cd_time = datetime.fromisoformat(acc["cooldown_until"])
                         if cd_time.tzinfo is None:
@@ -197,6 +197,7 @@ class AccountPoolManager:
                         if now >= cd_time:
                             acc["status"] = "AVAILABLE"
                             acc["cooldown_until"] = None
+                            logger.info("Account %s cooldown/quota expired. Restored to AVAILABLE.", acc.get("acc_id"))
                     except Exception:
                         acc["status"] = "AVAILABLE"
 
@@ -261,14 +262,19 @@ class AccountPoolManager:
                 logger.warning("Account %s in COOLDOWN for %ds.", acc_id, cooldown_seconds)
                 self._save_state_unlocked(state)
 
-    def report_quota_exhausted(self, acc_id: str):
+    def report_quota_exhausted(self, acc_id: str, reset_at: Optional[str] = None):
         with FileLock(str(self.lock_file), timeout=10):
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
             if acc_id in state["accounts"]:
                 acc = state["accounts"][acc_id]
                 acc["in_flight"] = max(0, acc.get("in_flight", 0) - 1)
                 acc["status"] = "EXHAUSTED"
-                logger.warning("Account %s marked as EXHAUSTED.", acc_id)
+                if reset_at:
+                    acc["cooldown_until"] = reset_at
+                else:
+                    cd = datetime.now(timezone.utc) + timedelta(hours=5)
+                    acc["cooldown_until"] = cd.isoformat()
+                logger.warning("Account %s marked as EXHAUSTED until %s.", acc_id, acc.get("cooldown_until"))
                 self._save_state_unlocked(state)
 
     def release_reservation(self, acc_id: str):

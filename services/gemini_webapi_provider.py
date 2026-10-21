@@ -271,14 +271,35 @@ class GeminiWebApiProvider(VideoProvider):
                         duration_sec=time.time() - start_time,
                     )
 
-            logger.info("Submitting Veo prompt: '%s'...", prompt[:80])
-            response = await client.generate_content(prompt=prompt)
+            veo_prompt = prompt.strip()
+            if not any(kw in veo_prompt.lower() for kw in ("video", "motion", "cinematography", "footage")):
+                veo_prompt = f"Generate a video: {veo_prompt}"
+            elif not veo_prompt.lower().startswith("generate a video") and not veo_prompt.lower().startswith("video of"):
+                veo_prompt = f"Generate a video: {veo_prompt}"
+
+            logger.info("Submitting Veo prompt: '%s'...", veo_prompt[:80])
+            response = await client.generate_content(prompt=veo_prompt)
 
             if not response.videos:
                 resp_text = (response.text or "").strip()
                 logger.warning("No video in response. Response text: %s", resp_text[:200])
 
-                if "capacity" in resp_text.lower() or "traffic" in resp_text.lower():
+                resp_lower = resp_text.lower()
+                # Check for Google Veo quota limits (5h rolling or daily)
+                quota_keywords = [
+                    "limit reset", "limit resets", "as soon as your limit",
+                    "more videos as soon as", "usage limit", "quota",
+                    "reach your limit", "reached the limit", "exceeded your limit",
+                ]
+                if any(kw in resp_lower for kw in quota_keywords):
+                    return ProviderResult(
+                        ok=False,
+                        error_kind=ErrorKind.QUOTA,
+                        error_message=f"Veo video quota exhausted: {resp_text[:200]}",
+                        duration_sec=time.time() - start_time,
+                    )
+
+                if "capacity" in resp_lower or "traffic" in resp_lower or "try again later" in resp_lower:
                     return ProviderResult(
                         ok=False,
                         error_kind=ErrorKind.RATE_LIMIT,
