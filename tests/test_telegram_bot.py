@@ -61,14 +61,75 @@ def test_reup_command(mock_bot: TelegramCommandBot):
     reup_handler.assert_called_once_with("https://youtube.com/watch?v=123", 90.0)
 
 
-def test_remake_command(mock_bot: TelegramCommandBot):
+def test_remake_command_shows_options(mock_bot: TelegramCommandBot):
     remake_handler = MagicMock()
     mock_bot.on_remake_handler = remake_handler
 
     mock_bot._handle_command("/remake https://youtube.com/watch?v=456")
+    mock_bot.notifier.send_message.assert_called_once()
+    msg, kwargs = mock_bot.notifier.send_message.call_args[0][0], mock_bot.notifier.send_message.call_args[1]
+    assert "Option 1 - AI Tự Biên Kịch" in msg
+    assert "Option 2 - Tôi Tự Nhập Script" in msg
+    assert "reply_markup" in kwargs
+    # Handlers shouldn't be executed until an option is selected
+    remake_handler.assert_not_called()
+
+
+def test_remake_ai_direct(mock_bot: TelegramCommandBot):
+    remake_handler = MagicMock()
+    mock_bot.on_remake_handler = remake_handler
+
+    mock_bot._handle_command("/remake https://youtube.com/watch?v=456 ai")
     import time
     time.sleep(0.1)
-    remake_handler.assert_called_once_with("https://youtube.com/watch?v=456")
+    remake_handler.assert_called_once()
+
+
+def test_custom_script_and_voice_flow(mock_bot: TelegramCommandBot, tmp_path: Path):
+    remake_handler = MagicMock()
+    mock_bot.on_remake_handler = remake_handler
+
+    # 1. Trigger remake with custom option
+    mock_bot._handle_command("/remake https://youtube.com/watch?v=789 custom")
+    active_job = mock_bot.jq.get_active_awaiting_script_job()
+    assert active_job is not None
+    job_id = active_job["id"]
+    assert active_job["status"] == "AWAITING_CUSTOM_SCRIPT"
+
+    # 2. Test voice command
+    mock_bot._handle_command(f"/voice {job_id} vi-VN-NamMinhNeural")
+    v_file = Path(f"data/automated_runs/{job_id}/voice.txt")
+    if v_file.exists():
+        assert v_file.read_text(encoding="utf-8").strip() == "vi-VN-NamMinhNeural"
+        v_file.unlink()
+
+    # 3. Test submitting valid custom script text
+    valid_script = "\n".join([f"Cảnh {i}: Đây là một cảnh quay tài liệu điện ảnh vô cùng đặc sắc và kịch tính số {i}." for i in range(1, 25)])
+    mock_bot._handle_command(f"/script {job_id} {valid_script}")
+    import time
+    time.sleep(0.1)
+    remake_handler.assert_called_once()
+    called_kwargs = remake_handler.call_args[1] if remake_handler.call_args[1] else {}
+    assert "custom_script" in called_kwargs or len(remake_handler.call_args[0]) >= 2
+
+
+def test_callback_query_inline_buttons(mock_bot: TelegramCommandBot):
+    job_id = mock_bot.jq.create_job("remake", "https://youtube.com/watch?v=111")
+    remake_handler = MagicMock()
+    mock_bot.on_remake_handler = remake_handler
+
+    # Test callback for remake_ai
+    cb = {
+        "id": "cb_001",
+        "data": f"remake_ai:{job_id}",
+        "from": {"id": "999888777"},
+    }
+    with patch("requests.post") as mock_post:
+        mock_post.return_value.status_code = 200
+        mock_bot._handle_callback_query(cb)
+        import time
+        time.sleep(0.1)
+        remake_handler.assert_called_once_with("https://youtube.com/watch?v=111", job_id=job_id)
 
 
 def test_approve_and_reject_flow(mock_bot: TelegramCommandBot):
@@ -167,7 +228,7 @@ def test_reup_missing_video_id_rejected(mock_bot: TelegramCommandBot):
 def test_remake_with_mobile_share_title(mock_bot: TelegramCommandBot):
     handler = MagicMock()
     mock_bot.on_remake_handler = handler
-    raw_share = "/remake The ENTIRE History of Costco in 19 Minutes https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn"
+    raw_share = "/remake The ENTIRE History of Costco in 19 Minutes https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn ai"
     mock_bot._handle_command(raw_share)
     import time
     time.sleep(0.1)

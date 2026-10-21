@@ -131,6 +131,30 @@ def deduplicate_vtt_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, A
     return deduped
 
 
+def send_voice_previews(notifier: TelegramNotifier, job_id: str, project_dir: Path, target_lang: str = "vi") -> None:
+    """Generates 3 short voice samples (Nam Minh, Hoai My, Guy) and sends them to Telegram."""
+    if not notifier or not notifier.is_configured:
+        return
+    samples_dir = project_dir / "voice_samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+
+    voices_to_preview = [
+        ("vi-VN-NamMinhNeural", "Nam Minh (Nam Việt - Đĩnh đạc / Phim tài liệu)", "Xin chào, đây là giọng đọc tài liệu điện ảnh của Nam Minh."),
+        ("vi-VN-HoaiMyNeural", "Hoài My (Nữ Việt - Truyền cảm / Nhẹ nhàng)", "Xin chào, đây là giọng đọc mẫu của Hoài My."),
+        ("en-US-GuyNeural", "Guy (Nam Mỹ - Chuẩn Documentary English)", "Hello, this is a cinematic documentary voice preview by Guy."),
+    ]
+
+    from services.voice_service import preview_voice
+    for voice_id, label, text in voices_to_preview:
+        sample_path = samples_dir / f"{voice_id}.mp3"
+        try:
+            if not sample_path.exists() or sample_path.stat().st_size == 0:
+                preview_voice(voice_id, sample_path, sample_text=text)
+            notifier.send_voice(str(sample_path), caption=f"🔊 <b>Mẫu giọng:</b> {label}\n👉 Chọn: <code>/voice {job_id} {voice_id}</code>")
+        except Exception as e:
+            logger.warning("Failed to generate voice sample for %s: %s", voice_id, e)
+
+
 class AutomatedFactory:
     def __init__(self, output_dir: Optional[Path] = None, db_path: Optional[Path] = None):
         self.output_dir = Path(output_dir or "data/automated_runs")
@@ -445,11 +469,20 @@ class AutomatedFactory:
     # MODE 2: FULL AI GENESIS
     # =========================================================================
 
-    def run_ai_genesis(self, youtube_url: str, job_id: Optional[str] = None) -> str:
+    def run_ai_genesis(
+        self,
+        youtube_url: str,
+        job_id: Optional[str] = None,
+        custom_script: Optional[str] = None,
+        chosen_voice: Optional[str] = None,
+        preview_voice_samples: bool = True,
+    ) -> str:
         """
         Executes Mode 2: Full AI Genesis.
-        Extracts narrative structure, decomposes into dynamic granular 10-15s shots,
-        identifies dramatic key scenes, and requests approval for autonomous multi-account rendering.
+        Supports:
+        - Option 1 (AI Genesis): Generates dual scripts (Vietnamese & English) from YouTube video.
+        - Option 2 (Custom Script): Audits custom script, verifies pacing & safety, and decomposes into shots.
+        - Dynamic Voice Audition: Sends 3-5s voice samples to Telegram for user selection.
         """
         if not job_id:
             job_id = self.jq.create_job(mode="remake", url=youtube_url)
@@ -457,64 +490,79 @@ class AutomatedFactory:
         project_dir.mkdir(parents=True, exist_ok=True)
         self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
 
+        from services.script_auditor import ScriptAuditor, build_dual_scripts_from_transcript, detect_language, VOICE_MAP
+
         logger.info("=== STARTING FULL AI GENESIS PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
+            script_mode_desc = "Tự cung cấp kịch bản" if custom_script else "AI tự động biên kịch song ngữ"
             self.notifier.send_message(
                 f"🎬 <b>[MODE 2: AI GENESIS] Nhận job: {job_id}</b>\n"
                 f"🔗 Link: {youtube_url}\n"
+                f"⚙️ Chế độ kịch bản: <i>{script_mode_desc}</i>\n"
                 f"<i>Đang phân tích cốt truyện & lập danh sách shot điện ảnh...</i>"
             )
 
         try:
-            # 1. Download YouTube video
-            raw_video = download_video(youtube_url, project_dir, max_height=1080)
-
-            # 2. Extract Transcript (Subtitles first, then Whisper under heavy lock lease)
-            sub_segments = try_extract_subtitles(project_dir)
-            if not sub_segments:
-                with self.jq.heavy_lock_lease(job_id, interval=15.0):
-                    from pipeline.transcribe import transcribe_audio
-                    stt_res = transcribe_audio(raw_video, model_size="small", compute_type="int8")
-                    sub_segments = stt_res.get("segments", [])
-
-            # 3. Dynamic Narrative Decomposition (Granular shots across documentary storyline)
-            total_dur = max((float(s.get("end", 0)) for s in (sub_segments or [])), default=180.0)
-            target_shots = max(6, min(24, int(total_dur // 15)))
-
-            dramatic_cues = {
-                "đột ngột", "quyết định", "khủng hoảng", "bước ngoặt", "thành công",
-                "thất bại", "chiến thắng", "sụp đổ", "ra mắt", "bắt đầu", "shock",
-                "war", "battle", "turning point", "founded", "crisis", "breakthrough", "launch"
-            }
-
-            step = max(1, len(sub_segments) // target_shots) if sub_segments else 1
             shots = []
-            for idx in range(1, target_shots + 1):
-                seg_idx = min((idx - 1) * step, len(sub_segments) - 1) if sub_segments else None
-                seg_text = sub_segments[seg_idx].get("text", "") if (seg_idx is not None and seg_idx < len(sub_segments)) else f"Historical milestone scene {idx}"
-                clean_seg_text = clean_narration_for_tts(seg_text.replace("\n", " ").strip())
+            if custom_script:
+                # Option 2: Custom script flow
+                auditor = ScriptAuditor()
+                audit_res = auditor.audit_script(custom_script)
+                if not audit_res.is_valid:
+                    logger.warning("Custom script for job %s failed audit: %s", job_id, audit_res.issues)
+                    self.jq.transition_job(job_id, to_state="AWAITING_CUSTOM_SCRIPT")
+                    if self.notifier.is_configured:
+                        self.notifier.send_message(audit_res.format_telegram_feedback(job_id))
+                    return job_id
 
-                # Narrative length constraint (P1.2): ~2.5 - 2.8 words/sec for 10s shot to ensure TTS fits comfortably
-                words = clean_seg_text.split()
-                if len(words) > 28:
-                    clean_seg_text = " ".join(words[:28]) + "..."
+                parsed_scenes = auditor.parse_raw_script(custom_script)
+                target_shots = len(parsed_scenes)
+                for idx, text in enumerate(parsed_scenes, 1):
+                    clean_text = clean_narration_for_tts(text)
+                    prompt = sanitize_veo_prompt(clean_text, scene_idx=idx, total_scenes=target_shots)
+                    shots.append({
+                        "index": idx,
+                        "text": clean_text,
+                        "prompt": prompt,
+                        "duration": 10.0,
+                        "is_key_scene": True,
+                    })
+            else:
+                # Option 1: AI Dual-Script Genesis from YouTube video
+                raw_video = download_video(youtube_url, project_dir, max_height=1080)
+                sub_segments = try_extract_subtitles(project_dir)
+                if not sub_segments:
+                    with self.jq.heavy_lock_lease(job_id, interval=15.0):
+                        from pipeline.transcribe import transcribe_audio
+                        stt_res = transcribe_audio(raw_video, model_size="small", compute_type="int8")
+                        sub_segments = stt_res.get("segments", [])
 
-                # Mode 2: All scenes default to Veo AI generation (is_key_scene = True)
-                is_key = True
+                total_dur = max((float(s.get("end", 0)) for s in (sub_segments or [])), default=180.0)
+                target_shots = max(6, min(24, int(total_dur // 15)))
 
-                prompt = sanitize_veo_prompt(clean_seg_text, scene_idx=idx, total_scenes=target_shots)
+                vi_scenes, en_scenes = build_dual_scripts_from_transcript(sub_segments or [], target_shots=target_shots)
 
-                shots.append({
-                    "index": idx,
-                    "text": clean_seg_text,
-                    "prompt": prompt,
-                    "duration": 10.0,
-                    "is_key_scene": is_key,
-                })
+                # Persist both scripts
+                shots_vi_file = project_dir / "shots_plan_vi.json"
+                shots_vi_file.write_text(json.dumps(vi_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            # Save shots plan
+                shots_en_file = project_dir / "shots_plan_en.json"
+                shots_en_file.write_text(json.dumps(en_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                if chosen_voice and chosen_voice.startswith("en-"):
+                    shots = en_scenes
+                else:
+                    shots = vi_scenes
+
+            # Save active shots plan
             shots_file = project_dir / "shots_plan.json"
             shots_file.write_text(json.dumps(shots, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            # Determine target voice and save voice.txt
+            first_few_texts = " ".join(s.get("text", "") for s in shots[:4])
+            detected_lang = detect_language(first_few_texts)
+            target_voice = chosen_voice or VOICE_MAP.get(detected_lang, VOICE_MAP["vi"])["male"]
+            (project_dir / "voice.txt").write_text(target_voice, encoding="utf-8")
 
             # Store in database
             self.jq.add_shots_for_job(job_id, shots)
@@ -523,22 +571,40 @@ class AutomatedFactory:
             self.jq.transition_job(
                 job_id,
                 to_state="WAITING_APPROVAL",
-                script_summary=f"Tạo {len(shots)} cảnh AI (10s/cảnh: {key_count} Veo Key Scenes + {broll_count} B-roll) tái hiện toàn bộ câu chuyện.",
+                script_summary=f"Tạo {len(shots)} cảnh AI (10s/cảnh, ngôn ngữ: {detected_lang.upper()}, giọng: {target_voice}).",
                 script_file=str(shots_file),
             )
 
-            # Notify Telegram
+            # Send voice auditions directly to Telegram
+            if preview_voice_samples and self.notifier.is_configured:
+                send_voice_previews(self.notifier, job_id, project_dir, target_lang=detected_lang)
+
+            # Notify Telegram with interactive buttons
             if self.notifier.is_configured:
+                inline_markup = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "🎙 Nam Minh (VN)", "callback_data": f"voice:{job_id}:vi-VN-NamMinhNeural"},
+                            {"text": "🎙 Hoài My (VN)", "callback_data": f"voice:{job_id}:vi-VN-HoaiMyNeural"},
+                            {"text": "🎙 Guy (US)", "callback_data": f"voice:{job_id}:en-US-GuyNeural"},
+                        ],
+                        [
+                            {"text": "🚀 Duyệt & Bắt Đầu Render", "callback_data": f"approve:{job_id}"},
+                            {"text": "🚫 Hủy Job", "callback_data": f"reject:{job_id}"},
+                        ]
+                    ]
+                }
                 approval_msg = (
-                    f"🎬 <b>[MODE 2: CHỜ DUYỆT SHOTS AI] Job: {job_id}</b>\n\n"
+                    f"🎬 <b>[MODE 2: CHỜ DUYỆT SHOTS AI & GIỌNG ĐỌC] Job: {job_id}</b>\n\n"
                     f"📊 Tổng số cảnh: <b>{len(shots)} cảnh (10s/cảnh)</b>\n"
                     f"🌟 <b>{key_count} cảnh Veo điện ảnh</b> + 🖼 <b>{broll_count} cảnh Ken Burns</b>\n"
-                    f"👤 Sẽ điều phối pool tài khoản Pro sinh video tuần tự & tự động ráp phim cuối.\n\n"
+                    f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b> (Nam tài liệu)\n\n"
                     f"👉 <b>Hành động:</b>\n"
-                    f"• Gõ <code>/approve {job_id}</code> để kích hoạt sinh video.\n"
+                    f"• Bấm nút chọn giọng đọc bên dưới hoặc gõ: <code>/voice {job_id} &lt;voice_id&gt;</code>\n"
+                    f"• Gõ <code>/approve {job_id}</code> (hoặc bấm Duyệt) để kích hoạt sinh video.\n"
                     f"• Gõ <code>/reject {job_id}</code> để hủy job."
                 )
-                self.notifier.send_message(approval_msg)
+                self.notifier.send_message(approval_msg, reply_markup=inline_markup)
 
             return job_id
 

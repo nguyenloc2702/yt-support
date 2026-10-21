@@ -47,6 +47,50 @@ EMOTION_TTS_STYLE = {
     "neutral": ("+0%", "+0Hz"),
 }
 
+XKIRO_VOICES = {
+    "confident-male-vietnamese",
+    "sweet-female-vietnamese",
+    "gentle-female-vietnamese",
+    "standard-female-vietnamese",
+}
+
+
+def is_xkiro_voice(voice_id: str) -> bool:
+    """Returns True if voice_id belongs to xKiro catalog."""
+    if not voice_id:
+        return False
+    v = voice_id.lower().strip()
+    return v in XKIRO_VOICES or "xkiro" in v
+
+
+def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Optional[str] = None) -> float:
+    """Synthesizes text using xKiro API and saves to out_path."""
+    import os
+    import requests
+
+    key = api_key or os.environ.get("XKIRO_API_KEY")
+    if not key:
+        raise RenderError("XKIRO_API_KEY is not configured.")
+
+    url = os.environ.get("XKIRO_TTS_URL", "https://api.xkiro.com/v1/audio/speech")
+    payload = {
+        "model": "xkiro-voice",
+        "input": text,
+        "voice": voice_id,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        raise RenderError(f"xKiro TTS API returned status {resp.status_code}: {resp.text[:200]}")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(resp.content)
+    return float(len(resp.content))
+
+
 
 def _split_sentences(text: str) -> list[str]:
     """Split Vietnamese text into sentence-ish cues."""

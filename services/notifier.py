@@ -46,6 +46,8 @@ class TelegramNotifier:
             {"command": "status", "description": "📊 Trạng thái hệ thống, hàng đợi & đĩa VPS"},
             {"command": "reup", "description": "✂️ Mode 1: Tóm tắt & cắt dựng từ video gốc"},
             {"command": "remake", "description": "🎬 Mode 2: Sinh 100% video AI Veo mới"},
+            {"command": "custom_script", "description": "✍️ Nạp kịch bản tự tạo cho Job"},
+            {"command": "voice", "description": "🎙 Chọn giọng đọc tài liệu (Nam Minh/Guy)"},
             {"command": "pause", "description": "⏸ Tạm dừng sinh video AI"},
             {"command": "resume", "description": "▶️ Tiếp tục chạy dây chuyền"},
             {"command": "help", "description": "ℹ️ Hướng dẫn sử dụng chi tiết"},
@@ -125,6 +127,70 @@ class TelegramNotifier:
         except Exception as e:
             logger.error("Failed to send Telegram video: %s", e)
             return False
+
+    def send_voice(self, voice_path: str, caption: str = "") -> bool:
+        """Send a voice audio sample to Telegram."""
+        if not self.is_configured:
+            return False
+        path = Path(voice_path)
+        if not path.exists():
+            logger.warning("Voice file not found for Telegram upload: %s", voice_path)
+            return False
+        url = f"{self.base_url}/sendVoice"
+        try:
+            with open(path, "rb") as vf:
+                files = {"voice": vf}
+                data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "HTML"}
+                resp = requests.post(url, data=data, files=files, timeout=30)
+                return resp.status_code == 200
+        except Exception as e:
+            logger.error("Failed to send Telegram voice: %s", e)
+            return False
+
+    def send_audio(self, audio_path: str, caption: str = "", title: str = "", performer: str = "") -> bool:
+        """Send an audio file to Telegram."""
+        if not self.is_configured:
+            return False
+        path = Path(audio_path)
+        if not path.exists():
+            logger.warning("Audio file not found for Telegram upload: %s", audio_path)
+            return False
+        url = f"{self.base_url}/sendAudio"
+        try:
+            with open(path, "rb") as af:
+                files = {"audio": af}
+                data = {
+                    "chat_id": self.chat_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "title": title or path.stem,
+                    "performer": performer or "Video Voiceover",
+                }
+                resp = requests.post(url, data=data, files=files, timeout=45)
+                return resp.status_code == 200
+        except Exception as e:
+            logger.error("Failed to send Telegram audio: %s", e)
+            return False
+
+    def send_document(self, document_path: str, caption: str = "") -> bool:
+        """Send a document (.txt, .json, etc.) to Telegram."""
+        if not self.is_configured:
+            return False
+        path = Path(document_path)
+        if not path.exists():
+            logger.warning("Document file not found for Telegram upload: %s", document_path)
+            return False
+        url = f"{self.base_url}/sendDocument"
+        try:
+            with open(path, "rb") as df:
+                files = {"document": df}
+                data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "HTML"}
+                resp = requests.post(url, data=data, files=files, timeout=45)
+                return resp.status_code == 200
+        except Exception as e:
+            logger.error("Failed to send Telegram document: %s", e)
+            return False
+
 
     def notify_shot_started(self, shot_idx: int, total_shots: int, shot_id: str, acc_id: str, prompt: str):
         prompt_snippet = (prompt[:140] + "...") if len(prompt) > 140 else prompt

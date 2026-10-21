@@ -25,17 +25,18 @@ LOCK_NAME_HEAVY = "HEAVY_PROCESS_LOCK"
 HEAVY_LOCK_TIMEOUT_SEC = 600.0  # 10 minutes safety auto-expire (managed with active heartbeats)
 
 JOB_TRANSITIONS = {
-    "QUEUED": {"ANALYZING", "WAITING_APPROVAL", "APPROVED", "CANCELLED", "FAILED"},
-    "ANALYZING": {"WAITING_APPROVAL", "APPROVED", "FAILED", "CANCELLED"},
-    "WAITING_APPROVAL": {"APPROVED", "CANCELLED", "FAILED"},
+    "QUEUED": {"ANALYZING", "AWAITING_CUSTOM_SCRIPT", "WAITING_APPROVAL", "APPROVED", "CANCELLED", "FAILED"},
+    "ANALYZING": {"AWAITING_CUSTOM_SCRIPT", "WAITING_APPROVAL", "APPROVED", "FAILED", "CANCELLED"},
+    "AWAITING_CUSTOM_SCRIPT": {"ANALYZING", "WAITING_APPROVAL", "CANCELLED", "FAILED"},
+    "WAITING_APPROVAL": {"APPROVED", "CANCELLED", "FAILED", "AWAITING_CUSTOM_SCRIPT"},
     "APPROVED": {"PROCESSING", "ASSEMBLING", "RENDERING", "CANCELLED", "FAILED"},
     "PROCESSING": {"ASSEMBLING", "RENDERING", "COMPLETED", "FAILED", "CANCELLED"},
     "RENDERING": {"COMPLETED", "FAILED", "CANCELLED"},
     "ASSEMBLING": {"FINAL_UPLOAD_PENDING", "ASSEMBLY_FAILED", "COMPLETED", "CANCELLED", "FAILED"},
     "ASSEMBLY_FAILED": {"ASSEMBLING", "APPROVED", "CANCELLED"},
     "FINAL_UPLOAD_PENDING": {"COMPLETED", "FINAL_UPLOAD_PENDING", "CANCELLED", "ASSEMBLING"},
-    "FAILED": {"APPROVED", "CANCELLED"},
-    "CANCELLED": {"APPROVED"},
+    "FAILED": {"APPROVED", "CANCELLED", "QUEUED"},
+    "CANCELLED": {"APPROVED", "QUEUED"},
     "COMPLETED": set(),
 }
 
@@ -350,6 +351,14 @@ class JobQueueManager:
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._get_conn() as conn:
             row = conn.execute("SELECT * FROM factory_jobs WHERE id = ?", (job_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_active_awaiting_script_job(self) -> Optional[Dict[str, Any]]:
+        """Finds the most recent active job waiting for custom script input."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM factory_jobs WHERE status = 'AWAITING_CUSTOM_SCRIPT' ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
             return dict(row) if row else None
 
     def transition_job(

@@ -83,7 +83,9 @@ def assemble_documentary(
     project_dir: Path,
     output_path: Optional[Path] = None,
     audio_path: Optional[Path] = None,
+    voice: Optional[str] = None,
 ) -> Path:
+
     """
     Strictly normalizes and concatenates all raw shot clips for job_id into a single documentary video.
     Overlays per-shot aligned narration/soundtrack, validates output, and cleans up temp files.
@@ -203,12 +205,34 @@ def assemble_documentary(
                 aligned_audio_segments = []
                 narration_report = []
 
+                # Resolve target voice (prioritize Male per user requirement)
+                from services.script_auditor import detect_language, VOICE_MAP
+                from services.prompt_sanitizer import clean_narration_for_tts
+                from pipeline.tts import is_xkiro_voice, synthesize_one_xkiro
+
+                target_voice = voice
+                if not target_voice:
+                    voice_file = project_dir / "voice.txt"
+                    if voice_file.exists():
+                        target_voice = voice_file.read_text(encoding="utf-8").strip()
+
+                if not target_voice:
+                    first_few_texts = " ".join(str(s.get("text", "")) for s in shots_data[:4])
+                    detected_lang = detect_language(first_few_texts)
+                    target_voice = VOICE_MAP[detected_lang]["male"]
+
+                logger.info("Synthesizing documentary voiceover with voice: %s", target_voice)
+
                 import edge_tts
 
                 async def _synth_shot_with_retry(text: str, out_p: Path):
+                    if is_xkiro_voice(target_voice):
+                        synthesize_one_xkiro(text, target_voice, out_p)
+                        return
+
                     for attempt in range(2):
                         try:
-                            comm = edge_tts.Communicate(text, "vi-VN-HoaiMyNeural")
+                            comm = edge_tts.Communicate(text, target_voice)
                             await asyncio.wait_for(comm.save(str(out_p)), timeout=60.0)
                             return
                         except Exception as e:
@@ -221,9 +245,11 @@ def assemble_documentary(
                 for idx, (idx_num, _) in enumerate(indexed_files):
                     shot_dur = shot_durations[idx]
                     s_meta = shots_by_idx.get(idx_num, {})
-                    shot_text = str(s_meta.get("text", "")).strip()
+                    raw_shot_text = str(s_meta.get("text", "")).strip()
+                    shot_text = clean_narration_for_tts(raw_shot_text)
                     seg_out = temp_tts_dir / f"seg_aligned_{idx_num:03d}.wav"
                     truncated = False
+
 
                     if shot_text:
                         raw_tts_file = temp_tts_dir / f"raw_tts_{idx_num:03d}.mp3"

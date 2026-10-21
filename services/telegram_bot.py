@@ -71,6 +71,7 @@ class TelegramCommandBot:
         max_workers: int = 2,
     ):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
+        self.base_url = f"https://api.telegram.org/bot{self.token}" if self.token else ""
         self.allowed_chat_id = str(chat_id or os.environ.get("TELEGRAM_CHAT_ID", ""))
         self.notifier = TelegramNotifier(self.token, self.allowed_chat_id)
         self.on_reup_handler = on_reup_handler
@@ -124,22 +125,144 @@ class TelegramCommandBot:
                     except Exception:
                         pass
 
+                    # 1. Handle Inline Button Clicks (Callback Query)
+                    cb = update.get("callback_query")
+                    if cb:
+                        sender_id = str(cb.get("from", {}).get("id", ""))
+                        if not self.allowed_chat_id or sender_id == self.allowed_chat_id:
+                            self._handle_callback_query(cb)
+                        continue
+
+                    # 2. Handle Messages
                     msg = update.get("message", {})
                     chat = msg.get("chat", {})
                     sender_id = str(chat.get("id", ""))
                     text = msg.get("text", "").strip()
+                    doc = msg.get("document")
 
                     # Security check: only allow commands from the designated chat_id
                     if self.allowed_chat_id and sender_id != self.allowed_chat_id:
                         logger.warning("Ignored message from unauthorized chat_id: %s", sender_id)
                         continue
 
-                    if text:
+                    if doc:
+                        self._handle_document(doc, caption=msg.get("caption", ""))
+                    elif text:
                         self._handle_command(text)
 
             except Exception as e:
                 logger.error("Error in Telegram polling loop: %s", e)
                 time.sleep(5)
+
+    def _handle_callback_query(self, cb: dict):
+        """Processes button presses from Telegram inline keyboards."""
+        cb_id = cb.get("id")
+        data = cb.get("data", "")
+        try:
+            requests.post(f"{self.base_url}/answerCallbackQuery", json={"callback_query_id": cb_id}, timeout=10)
+        except Exception:
+            pass
+
+        if not data:
+            return
+
+        parts = data.split(":")
+        action = parts[0]
+
+        if action == "remake_ai" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/remake_ai {job_id}")
+
+        elif action == "remake_custom" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/custom_script {job_id}")
+
+        elif action == "voice" and len(parts) >= 3:
+            job_id = parts[1]
+            voice_id = parts[2]
+            self._handle_command(f"/voice {job_id} {voice_id}")
+
+        elif action == "approve" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/approve {job_id}")
+
+        elif action == "reject" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/reject {job_id}")
+
+    def _handle_document(self, doc: dict, caption: str = ""):
+        """Processes uploaded document files (e.g. .txt custom scripts)."""
+        file_name = doc.get("file_name", "")
+        file_id = doc.get("file_id")
+        if not file_id:
+            return
+
+        target_job = None
+        if caption:
+            for word in caption.split():
+                j = self.jq.get_job(word.strip())
+                if j:
+                    target_job = j
+                    break
+
+        if not target_job:
+            target_job = self.jq.get_active_awaiting_script_job()
+
+        if not target_job:
+            self.notifier.send_message(
+                "⚠️ Nhận file nhưng không tìm thấy Job nào đang chờ nhập script (trạng thái <code>AWAITING_CUSTOM_SCRIPT</code>).\n"
+                "Vui lòng tạo job bằng <code>/remake &lt;url&gt;</code> trước khi gửi file."
+            )
+            return
+
+        job_id = target_job["id"]
+        try:
+            file_info_resp = requests.get(f"{self.base_url}/getFile?file_id={file_id}", timeout=15)
+            if file_info_resp.status_code != 200:
+                self.notifier.send_message(f"❌ Không thể tải file từ Telegram (mã lỗi {file_info_resp.status_code}).")
+                return
+            file_path = file_info_resp.json().get("result", {}).get("file_path")
+            dl_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+            file_content_resp = requests.get(dl_url, timeout=30)
+            file_text = file_content_resp.content.decode("utf-8", errors="replace").strip()
+        except Exception as e:
+            self.notifier.send_message(f"❌ Lỗi khi đọc file đính kèm: <code>{e}</code>")
+            return
+
+        self._process_custom_script_for_job(job_id, file_text)
+
+    def _process_custom_script_for_job(self, job_id: str, script_text: str):
+        """Audits custom script and dispatches remake pipeline if valid."""
+        from services.script_auditor import ScriptAuditor
+        auditor = ScriptAuditor()
+        audit_res = auditor.audit_script(script_text)
+
+        if not audit_res.is_valid:
+            feedback_msg = audit_res.format_telegram_feedback(job_id=job_id)
+            self.notifier.send_message(feedback_msg)
+            return
+
+        job = self.jq.get_job(job_id)
+        if not job:
+            self.notifier.send_message(f"❌ Không tìm thấy thông tin Job {job_id}.")
+            return
+
+        self.notifier.send_message(
+            f"✅ <b>Kịch bản đã đạt chuẩn hoàn hảo! ({audit_res.total_scenes} cảnh, ngôn ngữ: {audit_res.language.upper()})</b>\n"
+            f"🚀 Đang khởi động phân tích phân cảnh và tạo mẫu giọng đọc nghe thử..."
+        )
+
+        if self.on_remake_handler:
+            try:
+                import inspect
+                sig = inspect.signature(self.on_remake_handler)
+                has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                if "custom_script" in sig.parameters or has_kwargs:
+                    self._executor.submit(self.on_remake_handler, job["url"], job_id=job_id, custom_script=script_text)
+                else:
+                    self._executor.submit(self.on_remake_handler, job["url"], job_id=job_id)
+            except Exception:
+                self._executor.submit(self.on_remake_handler, job["url"], job_id=job_id)
 
     def get_accounts_report(self, check_realtime: bool = True) -> str:
         """Inspects all accounts in pool and returns a detailed real-time HTML status report."""
@@ -262,7 +385,7 @@ class TelegramCommandBot:
         yt_match = re.search(r"https?://(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/[^\s]+", text)
         found_url = yt_match.group(0) if yt_match else None
 
-        # Handle raw YouTube URLs (or mobile share messages) sent without a slash command
+        # Handle raw YouTube URLs or candidate custom script text sent without a slash command
         if not cmd.startswith("/"):
             if found_url:
                 from pipeline.youtube import extract_youtube_video_id
@@ -282,6 +405,12 @@ class TelegramCommandBot:
                         "Vui lòng mở video trên YouTube và bấm <b>Chia sẻ</b> ➔ <b>Sao chép liên kết</b> để lấy link đầy đủ (dạng <code>https://youtu.be/...</code> hoặc <code>https://www.youtube.com/watch?v=...</code>).",
                         reply_markup=get_default_keyboard(),
                     )
+            else:
+                # Check if there is an active job awaiting custom script input
+                active_job = self.jq.get_active_awaiting_script_job()
+                if active_job and len(text.split()) >= 10:
+                    logger.info("Received candidate custom script (%d words) for waiting job %s", len(text.split()), active_job['id'])
+                    self._process_custom_script_for_job(active_job["id"], text)
             return
 
         if cmd in ["/start", "/help"]:
@@ -292,8 +421,12 @@ class TelegramCommandBot:
                 "  ➔ <i>Xem danh sách, thông tin chi tiết & quota realtime từng tài khoản.</i>\n\n"
                 "• <code>/reup &lt;link_youtube&gt; [duration=180]</code>\n"
                 "  ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc.</i>\n\n"
-                "• <code>/remake &lt;link_youtube&gt;</code>\n"
-                "  ➔ <i>Mode 2: Sinh 100% video AI mới bằng pool tài khoản Pro.</i>\n\n"
+                "• <code>/remake &lt;link_youtube&gt; [ai|custom]</code>\n"
+                "  ➔ <i>Mode 2: Sinh 100% video AI mới (chọn AI Genesis hoặc Tự nhập script).</i>\n\n"
+                "• <code>/custom_script &lt;job_id&gt;</code> | <code>/script &lt;job_id&gt; &lt;text&gt;</code>\n"
+                "  ➔ <i>Nạp kịch bản tùy biến cho Job để AI thẩm định.</i>\n\n"
+                "• <code>/voice &lt;job_id&gt; &lt;voice_id&gt;</code>\n"
+                "  ➔ <i>Chọn giọng đọc tài liệu (Nam Minh / Hoài My / Guy US).</i>\n\n"
                 "• <code>/approve &lt;job_id&gt;</code>\n"
                 "  ➔ <i>Duyệt kịch bản và tiến hành sản xuất video.</i>\n\n"
                 "• <code>/reject &lt;job_id&gt;</code>\n"
@@ -415,6 +548,12 @@ class TelegramCommandBot:
                 )
                 return
 
+            submode = ""
+            for p in parts[1:]:
+                if p.lower() in ("ai", "auto", "custom"):
+                    submode = p.lower()
+                    break
+
             # Atomic creation and duplicate check (P1.9)
             job_id = self.jq.create_job_if_no_active("remake", url)
             if not job_id:
@@ -423,16 +562,104 @@ class TelegramCommandBot:
                 )
                 return
 
+            if submode in ("ai", "auto"):
+                if self.on_remake_handler:
+                    self._executor.submit(self.on_remake_handler, url, job_id=job_id)
+            elif submode == "custom":
+                self.jq.transition_job(job_id, to_state="AWAITING_CUSTOM_SCRIPT")
+                self.notifier.send_message(
+                    f"✍️ <b>[JOB {job_id}: NHẬP SCRIPT TÙY BIẾN]</b>\n\n"
+                    f"Vui lòng gửi nội dung kịch bản cho Job này bằng cách:\n"
+                    f"1. Gửi file đính kèm <code>.txt</code>\n"
+                    f"2. Hoặc paste trực tiếp nội dung văn bản vào khung chat (hoặc gõ: <code>/script {job_id} &lt;nội dung&gt;</code>).\n\n"
+                    f"<i>Lưu ý: Kịch bản tài liệu nên có 24 cảnh (mỗi cảnh 18-25 từ, tối đa 28 từ).</i>"
+                )
+            else:
+                inline_options = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "🤖 Option 1: AI Tự Động Biên Kịch", "callback_data": f"remake_ai:{job_id}"},
+                        ],
+                        [
+                            {"text": "✍️ Option 2: Tôi Sẽ Nhập Script", "callback_data": f"remake_custom:{job_id}"},
+                        ]
+                    ]
+                }
+                msg = (
+                    f"🎬 <b>[MODE 2: REMAKE AI] Nhận diện link video:</b>\n"
+                    f"<code>{url}</code>\n"
+                    f"🆔 Job ID: <code>{job_id}</code>\n\n"
+                    f"Vui lòng chọn 1 trong 2 phương án biên kịch:\n\n"
+                    f"<b>1️⃣ Option 1 - AI Tự Biên Kịch:</b>\n"
+                    f"AI sẽ tải video, lọc sạch metadata phụ đề và tạo song song 2 kịch bản tiếng Việt & tiếng Anh.\n"
+                    f"👉 Bấm nút <b>AI Tự Động Biên Kịch</b> hoặc gõ: <code>/remake_ai {job_id}</code>\n\n"
+                    f"<b>2️⃣ Option 2 - Tôi Tự Nhập Script:</b>\n"
+                    f"Bạn tự gửi kịch bản (paste text hoặc gửi file .txt). AI sẽ thẩm định độ dài, nhịp đọc 10s và từ an toàn Veo.\n"
+                    f"👉 Bấm nút <b>Tôi Sẽ Nhập Script</b> hoặc gõ: <code>/custom_script {job_id}</code>"
+                )
+                self.notifier.send_message(msg, reply_markup=inline_options)
+
+        elif cmd == "/remake_ai":
+            if len(parts) < 2:
+                self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/remake_ai &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job {job_id}.")
+                return
             if self.on_remake_handler:
-                try:
-                    import inspect
-                    sig = inspect.signature(self.on_remake_handler)
-                    if "job_id" in sig.parameters:
-                        self._executor.submit(self.on_remake_handler, url, job_id=job_id)
-                    else:
-                        self._executor.submit(self.on_remake_handler, url)
-                except Exception:
-                    self._executor.submit(self.on_remake_handler, url)
+                self._executor.submit(self.on_remake_handler, job["url"], job_id=job_id)
+
+        elif cmd == "/custom_script":
+            if len(parts) < 2:
+                active = self.jq.get_active_awaiting_script_job()
+                if active:
+                    job_id = active["id"]
+                else:
+                    self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/custom_script &lt;job_id&gt;</code>")
+                    return
+            else:
+                job_id = parts[1]
+
+            self.jq.transition_job(job_id, to_state="AWAITING_CUSTOM_SCRIPT")
+            self.notifier.send_message(
+                f"✍️ <b>[JOB {job_id}: NHẬP SCRIPT TÙY BIẾN]</b>\n\n"
+                f"Hệ thống đang chờ bạn gửi kịch bản:\n"
+                f"• Gửi file <code>.txt</code> đính kèm\n"
+                f"• Hoặc copy & paste trực tiếp văn bản vào chat này (hoặc gõ: <code>/script {job_id} &lt;nội dung&gt;</code>).\n\n"
+                f"<i>Quy chuẩn: 24 cảnh tài liệu (18-25 từ/cảnh để đọc vừa vặn 10s).</i>"
+            )
+
+        elif cmd == "/script":
+            if len(parts) < 3:
+                self.notifier.send_message("⚠️ Cú pháp: <code>/script &lt;job_id&gt; &lt;nội dung kịch bản...&gt;</code>")
+                return
+            job_id = parts[1]
+            script_text = clean_text[len(parts[0]) + len(parts[1]) + 2:].strip()
+            self._process_custom_script_for_job(job_id, script_text)
+
+        elif cmd == "/voice":
+            if len(parts) < 3:
+                self.notifier.send_message(
+                    "⚠️ Cú pháp: <code>/voice &lt;job_id&gt; &lt;voice_id&gt;</code>\n"
+                    "Ví dụ: <code>/voice remake_xxx vi-VN-NamMinhNeural</code>"
+                )
+                return
+            job_id = parts[1]
+            voice_id = parts[2].strip()
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job {job_id}.")
+                return
+            project_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            project_dir.mkdir(parents=True, exist_ok=True)
+            voice_file = project_dir / "voice.txt"
+            voice_file.write_text(voice_id, encoding="utf-8")
+            self.notifier.send_message(
+                f"🎙 <b>Đã chọn giọng đọc thành công:</b> <code>{voice_id}</code> cho Job <code>{job_id}</code>.\n"
+                f"👉 Gõ <code>/approve {job_id}</code> để tiến hành sản xuất video!"
+            )
 
 
         elif cmd == "/approve":

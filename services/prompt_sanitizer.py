@@ -86,14 +86,37 @@ SENSITIVE_PATTERNS: List[Tuple[str, str]] = [
 
 
 def clean_narration_for_tts(text: str) -> str:
-    """Removes subtitle artifacts, sound tags, and bracketed notes for clean TTS voiceover."""
+    """Removes subtitle artifacts, VTT metadata headers, sound tags, and bracketed notes for clean TTS voiceover."""
     if not text:
         return ""
-    cleaned = re.sub(r"\[.*?\]", " ", text)
+    cleaned = text
+    # 1. Unescape HTML entities & strip HTML tags
+    cleaned = re.sub(r"&gt;", ">", cleaned)
+    cleaned = re.sub(r"&lt;", "<", cleaned)
+    cleaned = re.sub(r"&amp;", "&", cleaned)
+    cleaned = re.sub(r"&quot;", '"', cleaned)
+    cleaned = re.sub(r"&#39;", "'", cleaned)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+
+    # 2. Strip VTT metadata headers if leaked into text
+    cleaned = re.sub(r"\bKind:\s*captions\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bLanguage:\s*[a-zA-Z_-]+\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bWEBVTT\b", " ", cleaned, flags=re.IGNORECASE)
+
+    # 3. Strip sound fx, bracketed tags, and musical notes
+    cleaned = re.sub(r"\[.*?\]", " ", cleaned)
     cleaned = re.sub(r"\(.*?\)", " ", cleaned)
     cleaned = re.sub(r"[♪♫#]+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # 4. Strip speaker markers and arrows
+    cleaned = re.sub(r"^\s*>>+\s*", " ", cleaned)
+    cleaned = re.sub(r"\s+>>+\s*", " ", cleaned)
+    cleaned = re.sub(r"\bSPEAKER(?:_\d+|\s+\d+)?:\s*", " ", cleaned, flags=re.IGNORECASE)
+
+    # 5. Clean whitespace and surrounding punctuation
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\n\r\"'->:")
     return cleaned
+
 
 
 def sanitize_veo_prompt(
