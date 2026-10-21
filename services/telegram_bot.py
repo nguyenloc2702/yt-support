@@ -12,6 +12,7 @@ Allows controlling the pipeline directly from a smartphone via Telegram:
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
@@ -22,10 +23,39 @@ from typing import Callable, Optional
 import requests
 
 from services.account_pool import AccountPoolManager
+from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.job_queue import JobQueueManager
-from services.notifier import TelegramNotifier
+from services.notifier import TelegramNotifier, get_default_keyboard
 
 logger = logging.getLogger("telegram_bot")
+
+
+def format_vn_time(iso_str: Optional[str]) -> str:
+    """Formats an ISO timestamp to Vietnam Time (UTC+7) with human countdown."""
+    if not iso_str:
+        return "Không có"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        vn_tz = timezone(timedelta(hours=7))
+        vn_dt = dt.astimezone(vn_tz)
+        diff = dt - datetime.now(timezone.utc)
+        if diff.total_seconds() > 0:
+            hrs = int(diff.total_seconds() // 3600)
+            mins = int((diff.total_seconds() % 3600) // 60)
+            secs = int(diff.total_seconds() % 60)
+            if hrs > 0:
+                remain = f"còn {hrs}h {mins}p"
+            elif mins > 0:
+                remain = f"còn {mins}p {secs}s"
+            else:
+                remain = f"còn {secs}s"
+            return f"<b>{vn_dt.strftime('%H:%M:%S (%d/%m)')}</b> (⏳ {remain})"
+        else:
+            return f"<b>{vn_dt.strftime('%H:%M:%S (%d/%m)')}</b> (✅ Đã reset)"
+    except Exception:
+        return str(iso_str)
 
 
 class TelegramCommandBot:
@@ -48,6 +78,7 @@ class TelegramCommandBot:
         self.on_approve_handler = on_approve_handler
         self.jq = job_queue or JobQueueManager()
         self.pool = account_pool or AccountPoolManager()
+        self.provider = GeminiWebApiProvider()
         self.running = False
         stored_offset = self.jq.get_kv("telegram_last_update_id") if self.jq else None
         self.last_update_id = int(stored_offset) if (stored_offset and stored_offset.isdigit()) else 0
@@ -65,6 +96,10 @@ class TelegramCommandBot:
 
         self.running = True
         logger.info("Starting Telegram Bot long-polling (offset: %d)...", self.last_update_id)
+
+        # Register bot commands menu with Telegram asynchronously
+        threading.Thread(target=self.notifier.set_bot_commands, daemon=True).start()
+
         thread = threading.Thread(target=self._poll_loop, daemon=True)
         thread.start()
 
@@ -106,8 +141,118 @@ class TelegramCommandBot:
                 logger.error("Error in Telegram polling loop: %s", e)
                 time.sleep(5)
 
+    def get_accounts_report(self, check_realtime: bool = True) -> str:
+        """Inspects all accounts in pool and returns a detailed real-time HTML status report."""
+        accounts = self.pool.get_all_accounts_state()
+        if not accounts:
+            self.pool.reload_accounts()
+            accounts = self.pool.get_all_accounts_state()
+
+        if not accounts:
+            return (
+                "📋 <b>DANH SÁCH TÀI KHOẢN GOOGLE GEMINI:</b>\n\n"
+                "⚠️ <i>Chưa có tài khoản nào được nạp vào thư mục <code>sessions/</code>.</i>\n\n"
+                "👉 Dùng lệnh terminal sau trên VPS để nạp cookie:\n"
+                "<code>python scripts/manage_accounts.py add --acc 1</code>"
+            )
+
+        report_lines = [
+            "📋 <b>BÁO CÁO CHI TIẾT TÀI KHOẢN (REALTIME):</b>\n"
+        ]
+
+        now = datetime.now(timezone.utc)
+        total_accs = len(accounts)
+        ready_count = 0
+        sorted_acc_ids = sorted(accounts.keys())
+
+        for idx, acc_id in enumerate(sorted_acc_ids, 1):
+            acc = accounts[acc_id]
+            session_file = Path(acc.get("session_file", f"sessions/{acc_id}.json"))
+            status = acc.get("status", "UNKNOWN")
+            shots_today = acc.get("shots_today", 0)
+            total_shots = acc.get("total_shots", 0)
+            cd_until = acc.get("cooldown_until")
+
+            tier = "UNKNOWN"
+            credits_remaining = None
+            reset_at = cd_until
+            is_valid = True
+
+            if check_realtime and session_file.exists():
+                try:
+                    val_res = self.provider.validate_session(session_file)
+                    is_valid = val_res.valid
+                    tier = val_res.tier or "UNKNOWN"
+                    if val_res.credits_remaining is not None:
+                        credits_remaining = val_res.credits_remaining
+                    if val_res.reset_at:
+                        reset_at = val_res.reset_at
+
+                    # Auto-recover status if reset time has passed
+                    if reset_at:
+                        try:
+                            rdt = datetime.fromisoformat(reset_at)
+                            if rdt.tzinfo is None:
+                                rdt = rdt.replace(tzinfo=timezone.utc)
+                            if now >= rdt and status in ("EXHAUSTED", "COOLDOWN"):
+                                status = "AVAILABLE"
+                                self.pool.update_account_status(acc_id, "AVAILABLE", None)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning("Error checking account %s: %s", acc_id, e)
+
+            # Determine badge & status label
+            if not session_file.exists():
+                status_icon = "❌"
+                status_desc = "MẤT FILE SESSION"
+            elif not is_valid:
+                status_icon = "🔴"
+                status_desc = "HẾT HẠN COOKIE (AUTH_ERROR)"
+            elif status == "EXHAUSTED":
+                status_icon = "🟡"
+                status_desc = "HẾT QUOTA VEO (CHỜ RESET)"
+            elif status == "COOLDOWN":
+                status_icon = "🟠"
+                status_desc = "ĐANG COOLDOWN TẠM THỜI"
+            elif tier == "FREE":
+                status_icon = "⚠️"
+                status_desc = "GÓI FREE (KHÔNG CÓ VEO)"
+            else:
+                status_icon = "🟢"
+                status_desc = "SẴN SÀNG SINH VIDEO"
+                ready_count += 1
+
+            tier_badge = "PRO ⭐" if tier == "PRO" else ("FREE ⚠️" if tier == "FREE" else tier)
+
+            report_lines.append(
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>[{idx}/{total_accs}] Tài khoản: <code>{acc_id}</code></b> ({tier_badge})\n"
+                f"• Trạng thái: {status_icon} <b>{status_desc}</b>\n"
+                f"• Giới hạn mới (Reset lúc): {format_vn_time(reset_at)}\n"
+                f"• Credits 5h còn lại: <b>{credits_remaining if credits_remaining is not None else 'Không rõ'}</b>\n"
+                f"• Tiến độ hôm nay: <b>{shots_today}</b> shots (Tổng: <b>{total_shots}</b> shots)\n"
+                f"• File session: <code>{session_file.name}</code>"
+            )
+
+        report_lines.append("━━━━━━━━━━━━━━━━━━━")
+        report_lines.append(
+            f"📊 <b>Tổng kết:</b> <b>{ready_count}/{total_accs}</b> tài khoản sẵn sàng sinh video Veo.\n\n"
+            f"💡 <i>Gợi ý: Nếu hết quota, hãy nạp thêm tài khoản bằng:</i>\n"
+            f"<code>python scripts/manage_accounts.py add --acc 2</code>\n"
+            f"<i>Sau đó gõ <code>/resume</code> để tiếp tục dây chuyền.</i>"
+        )
+
+        return "\n".join(report_lines)
+
     def _handle_command(self, text: str):
-        parts = text.split()
+        # Strip button emoji prefixes if user tapped custom reply keyboard
+        clean_text = text
+        for emoji in ["📋", "📊", "⏸", "▶️", "ℹ️"]:
+            clean_text = clean_text.replace(emoji, "")
+        clean_text = clean_text.strip()
+
+        parts = clean_text.split()
         if not parts:
             return
         cmd = parts[0].lower()
@@ -127,13 +272,15 @@ class TelegramCommandBot:
                         f"💡 <b>Nhận diện link YouTube:</b>\n<code>{found_url}</code>\n\n"
                         f"Vui lòng chọn chế độ sản xuất:\n"
                         f"• <code>/reup {found_url}</code> ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc</i>\n"
-                        f"• <code>/remake {found_url}</code> ➔ <i>Mode 2: Sinh 100% video AI mới (Veo/Ken Burns)</i>"
+                        f"• <code>/remake {found_url}</code> ➔ <i>Mode 2: Sinh 100% video AI mới (Veo/Ken Burns)</i>",
+                        reply_markup=get_default_keyboard(),
                     )
                 else:
                     self.notifier.send_message(
                         f"⚠️ <b>Link YouTube không hợp lệ hoặc thiếu mã video:</b>\n<code>{found_url}</code>\n\n"
                         "Link bạn gửi chỉ có mã theo dõi (<code>si=...</code>) mà thiếu mã video (<code>v=...</code>).\n"
-                        "Vui lòng mở video trên YouTube và bấm <b>Chia sẻ</b> ➔ <b>Sao chép liên kết</b> để lấy link đầy đủ (dạng <code>https://youtu.be/...</code> hoặc <code>https://www.youtube.com/watch?v=...</code>)."
+                        "Vui lòng mở video trên YouTube và bấm <b>Chia sẻ</b> ➔ <b>Sao chép liên kết</b> để lấy link đầy đủ (dạng <code>https://youtu.be/...</code> hoặc <code>https://www.youtube.com/watch?v=...</code>).",
+                        reply_markup=get_default_keyboard(),
                     )
             return
 
@@ -141,10 +288,12 @@ class TelegramCommandBot:
             help_msg = (
                 "🤖 <b>HỆ THỐNG ĐIỀU KHIỂN VIDEO FACTORY TỰ ĐỘNG</b>\n\n"
                 "📌 <b>Các lệnh khả dụng:</b>\n"
+                "• <code>/accounts</code> | <code>/acc</code>\n"
+                "  ➔ <i>Xem danh sách, thông tin chi tiết & quota realtime từng tài khoản.</i>\n\n"
                 "• <code>/reup &lt;link_youtube&gt; [duration=180]</code>\n"
                 "  ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc.</i>\n\n"
                 "• <code>/remake &lt;link_youtube&gt;</code>\n"
-                "  ➔ <i>Mode 2: Sinh 100% video AI mới bằng 10 tài khoản Pro.</i>\n\n"
+                "  ➔ <i>Mode 2: Sinh 100% video AI mới bằng pool tài khoản Pro.</i>\n\n"
                 "• <code>/approve &lt;job_id&gt;</code>\n"
                 "  ➔ <i>Duyệt kịch bản và tiến hành sản xuất video.</i>\n\n"
                 "• <code>/reject &lt;job_id&gt;</code>\n"
@@ -158,7 +307,14 @@ class TelegramCommandBot:
                 "• <code>/pause</code> | <code>/resume</code>\n"
                 "  ➔ <i>Tạm dừng hoặc kích hoạt lại sau kill-switch.</i>"
             )
-            self.notifier.send_message(help_msg)
+            self.notifier.send_message(help_msg, reply_markup=get_default_keyboard())
+
+        elif cmd in ["/accounts", "/acc"]:
+            self.notifier.send_message("🔍 <i>Đang kiểm tra quota realtime từng tài khoản từ Google server...</i>")
+            def _async_acc_report():
+                report = self.get_accounts_report(check_realtime=True)
+                self.notifier.send_message(report, reply_markup=get_default_keyboard())
+            self._executor.submit(_async_acc_report)
 
         elif cmd == "/status":
             pool_summary = self.pool.get_status_summary()
@@ -197,11 +353,12 @@ class TelegramCommandBot:
                 f"• Hàng đợi tác vụ: <code>{queue_str}</code>\n\n"
                 f"👤 <b>Tài khoản Gemini Pro ({pool_summary['total_accounts']}):</b>\n"
                 f"• Sẵn sàng: <b>{pool_summary['available']}</b> | Đang chờ reset: <b>{pool_summary['exhausted']}</b>\n"
-                f"• Cooldown: <b>{pool_summary['cooldown']}</b> | Lỗi xác thực: <b>{pool_summary['auth_error']}</b>"
+                f"• Cooldown: <b>{pool_summary['cooldown']}</b> | Lỗi xác thực: <b>{pool_summary['auth_error']}</b>\n\n"
+                f"👉 <b>Bấm /accounts để xem chi tiết quota realtime từng tài khoản.</b>"
             )
             if pool_summary["kill_switch_reason"]:
                 status_msg += f"\n⚠️ Lý do dừng: <code>{pool_summary['kill_switch_reason']}</code>"
-            self.notifier.send_message(status_msg)
+            self.notifier.send_message(status_msg, reply_markup=get_default_keyboard())
 
         elif cmd == "/reup":
             url = found_url or (parts[1].strip() if len(parts) > 1 else "")
@@ -338,14 +495,23 @@ class TelegramCommandBot:
 
         elif cmd == "/pause":
             self.pool.trigger_kill_switch("ADMIN", "Manual pause requested via Telegram /pause")
-            self.notifier.send_message("⏸ <b>Hệ thống đã tạm dừng.</b> Không có tác vụ sinh video AI mới nào được thực hiện.")
+            self.notifier.send_message(
+                "⏸ <b>Hệ thống đã tạm dừng.</b> Không có tác vụ sinh video AI mới nào được thực hiện.",
+                reply_markup=get_default_keyboard(),
+            )
 
         elif cmd == "/resume":
             self.pool.reset_kill_switch()
-            self.notifier.send_message("▶️ <b>Hệ thống đã tiếp tục hoạt động!</b> Dây chuyền worker đã sẵn sàng.")
+            self.notifier.send_message(
+                "▶️ <b>Hệ thống đã tiếp tục hoạt động!</b> Dây chuyền worker đã sẵn sàng.",
+                reply_markup=get_default_keyboard(),
+            )
 
         else:
-            self.notifier.send_message(f"❓ Không nhận diện được lệnh: <code>{cmd}</code>. Gõ <code>/help</code> để xem hướng dẫn.")
+            self.notifier.send_message(
+                f"❓ Không nhận diện được lệnh: <code>{cmd}</code>. Gõ <code>/help</code> hoặc <code>/accounts</code> để xem thông tin.",
+                reply_markup=get_default_keyboard(),
+            )
 
 
 if __name__ == "__main__":

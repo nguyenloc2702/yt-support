@@ -183,3 +183,64 @@ def test_raw_mobile_share_message_prompts_mode(mock_bot: TelegramCommandBot):
     msg = mock_bot.notifier.send_message.call_args[0][0]
     assert "Nhận diện link YouTube" in msg
     assert "https://youtu.be/AwxcZVfJUSA?si=YUia3_msKPGIsuzn" in msg
+
+
+def test_accounts_command(mock_bot: TelegramCommandBot):
+    import time
+    from services.video_provider import SessionValidationResult
+    mock_bot.provider.validate_session = MagicMock(return_value=SessionValidationResult(
+        valid=True,
+        tier="PRO",
+        credits_remaining=2000,
+        reset_at="2026-10-21T05:42:13+00:00",
+        message="OK",
+    ))
+    # Populate a mock account
+    acc_file = mock_bot.pool.session_dir / "acc_01.json"
+    acc_file.write_text('{"__Secure-1PSID": "fake"}')
+    mock_bot.pool.reload_accounts()
+
+    mock_bot._handle_command("/accounts")
+    time.sleep(0.1)
+    # Check that send_message was called with prompt and final report
+    assert mock_bot.notifier.send_message.call_count >= 2
+    report_call = mock_bot.notifier.send_message.call_args_list[-1]
+    report_text = report_call[0][0]
+    assert "BÁO CÁO CHI TIẾT TÀI KHOẢN" in report_text
+
+
+def test_button_shortcut_stripping(mock_bot: TelegramCommandBot):
+    # Test button with emoji prefix "📊 /status"
+    mock_bot._handle_command("📊 /status")
+    mock_bot.notifier.send_message.assert_called_once()
+    msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "BÁO CÁO TRẠNG THÁI HỆ THỐNG" in msg
+
+    mock_bot.notifier.send_message.reset_mock()
+    # Test button with emoji prefix "⏸ /pause"
+    mock_bot._handle_command("⏸ /pause")
+    assert mock_bot.pool.kill_switch_active is True
+
+
+def test_accounts_report_formatting(mock_bot: TelegramCommandBot, tmp_path: Path):
+    from services.video_provider import SessionValidationResult
+    # Setup mock validation return
+    mock_bot.provider.validate_session = MagicMock(return_value=SessionValidationResult(
+        valid=True,
+        tier="PRO",
+        credits_remaining=1850,
+        reset_at="2026-10-21T05:42:13+00:00",
+        message="OK",
+    ))
+
+    # Add a mock account to pool
+    acc_file = tmp_path / "sessions" / "acc_01.json"
+    acc_file.write_text('{"__Secure-1PSID": "fake"}')
+    mock_bot.pool.reload_accounts()
+
+    report = mock_bot.get_accounts_report(check_realtime=True)
+    assert "acc_01" in report
+    assert "PRO ⭐" in report
+    assert "1850" in report
+    assert "Giới hạn mới" in report
+    assert "12:42:13" in report

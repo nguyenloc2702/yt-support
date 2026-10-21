@@ -328,3 +328,18 @@ class AccountPoolManager:
                 "kill_switch_active": state.get("kill_switch_active", False),
                 "kill_switch_reason": state.get("kill_switch_reason", ""),
             }
+
+    def get_all_accounts_state(self) -> dict:
+        """Returns snapshot of all registered accounts."""
+        with FileLock(str(self.lock_file), timeout=10):
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            return state.get("accounts", {})
+
+    def update_account_status(self, acc_id: str, status: str, cooldown_until: Optional[str] = None):
+        """Updates account status in pool state (e.g. after realtime check)."""
+        with FileLock(str(self.lock_file), timeout=10):
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            if acc_id in state.get("accounts", {}):
+                state["accounts"][acc_id]["status"] = status
+                state["accounts"][acc_id]["cooldown_until"] = cooldown_until
+                self._save_state_unlocked(state)

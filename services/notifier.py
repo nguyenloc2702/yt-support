@@ -13,6 +13,19 @@ import requests
 logger = logging.getLogger("telegram_notifier")
 
 
+def get_default_keyboard() -> dict:
+    """Returns persistent Telegram reply keyboard with shortcut buttons."""
+    return {
+        "keyboard": [
+            [{"text": "📋 /accounts"}, {"text": "📊 /status"}],
+            [{"text": "⏸ /pause"}, {"text": "▶️ /resume"}],
+            [{"text": "ℹ️ /help"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
 class TelegramNotifier:
     def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -23,7 +36,32 @@ class TelegramNotifier:
     def is_configured(self) -> bool:
         return bool(self.token and self.chat_id)
 
-    def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
+    def set_bot_commands(self) -> bool:
+        """Registers the bot command autocomplete menu in Telegram."""
+        if not self.is_configured:
+            return False
+        url = f"{self.base_url}/setMyCommands"
+        commands = [
+            {"command": "accounts", "description": "📋 Quota realtime & trạng thái từng tài khoản"},
+            {"command": "status", "description": "📊 Trạng thái hệ thống, hàng đợi & đĩa VPS"},
+            {"command": "reup", "description": "✂️ Mode 1: Tóm tắt & cắt dựng từ video gốc"},
+            {"command": "remake", "description": "🎬 Mode 2: Sinh 100% video AI Veo mới"},
+            {"command": "pause", "description": "⏸ Tạm dừng sinh video AI"},
+            {"command": "resume", "description": "▶️ Tiếp tục chạy dây chuyền"},
+            {"command": "help", "description": "ℹ️ Hướng dẫn sử dụng chi tiết"},
+        ]
+        try:
+            resp = requests.post(url, json={"commands": commands}, timeout=15)
+            if resp.status_code == 200:
+                logger.info("Successfully registered Telegram bot command menu.")
+                return True
+            logger.warning("Telegram setMyCommands error (%d): %s", resp.status_code, resp.text)
+            return False
+        except Exception as e:
+            logger.error("Failed to set Telegram bot commands: %s", e)
+            return False
+
+    def send_message(self, text: str, parse_mode: str = "HTML", reply_markup: Optional[dict] = None) -> bool:
         """Send a formatted text message to Telegram, automatically chunking if > 4000 chars."""
         if not self.is_configured:
             logger.debug("TelegramNotifier not configured. Skipping message.")
@@ -33,14 +71,16 @@ class TelegramNotifier:
         if len(text) > 4000:
             chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
             all_ok = True
-            for chunk in chunks:
-                if not self._send_single_message(chunk, parse_mode):
+            for i, chunk in enumerate(chunks):
+                # Only attach reply_markup to the final chunk
+                markup = reply_markup if i == len(chunks) - 1 else None
+                if not self._send_single_message(chunk, parse_mode, reply_markup=markup):
                     all_ok = False
             return all_ok
 
-        return self._send_single_message(text, parse_mode)
+        return self._send_single_message(text, parse_mode, reply_markup=reply_markup)
 
-    def _send_single_message(self, text: str, parse_mode: str = "HTML") -> bool:
+    def _send_single_message(self, text: str, parse_mode: str = "HTML", reply_markup: Optional[dict] = None) -> bool:
         url = f"{self.base_url}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
@@ -48,6 +88,8 @@ class TelegramNotifier:
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         try:
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200:
