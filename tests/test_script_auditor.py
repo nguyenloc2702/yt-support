@@ -1,9 +1,86 @@
-import pytest
+from pathlib import Path
 from services.script_auditor import (
     ScriptAuditor,
     detect_language,
     build_dual_scripts_from_transcript,
+    format_srt_timestamp,
+    export_segments_to_srt,
+    export_segments_to_txt,
 )
+
+
+def test_format_srt_timestamp():
+    assert format_srt_timestamp(0.0) == "00:00:00,000"
+    assert format_srt_timestamp(65.123) == "00:01:05,123"
+    assert format_srt_timestamp(3661.05) == "01:01:01,050"
+
+
+def test_parse_srt_script():
+    auditor = ScriptAuditor(target_scenes=2)
+    raw_srt = """1
+00:00:00,800 --> 00:00:04,500
+Đây là câu chuyện về một công ty thương mại giàu nhất lịch sử thế giới.
+
+2
+00:00:04,500 --> 00:00:08,200
+Vào thời kỳ hoàng kim, giá trị của họ vượt xa mọi tập đoàn hiện đại ngày nay.
+"""
+    scenes = auditor.parse_raw_script(raw_srt)
+    assert len(scenes) == 2
+    assert "công ty thương mại" in scenes[0]
+    assert "00:00" not in scenes[0]
+    assert "-->" not in scenes[0]
+    assert "1" not in scenes[0]
+
+
+def test_parse_script_with_metadata_headers():
+    auditor = ScriptAuditor(target_scenes=2)
+    template_text = """============================================================
+📝 KỊCH BẢN GỐC & GỢI Ý PHÂN CẢNH TỪ VIDEO GỐC
+============================================================
+📺 Tiêu đề: Test Video
+🔗 Link gốc: https://youtube.com/watch?v=123
+⏱ Thời lượng gốc: 3 phút 20 giây | Tổng số từ: 50 từ
+============================================================
+📌 HƯỚNG DẪN XÀO CHẺ / TÙY BIẾN KỊCH BẢN:
+1. Bạn có thể chỉnh sửa theo ý mình.
+
+[CẢNH 1] (00:00:00 - 00:00:10)
+Đây là phân cảnh mở đầu câu chuyện lịch sử thú vị này.
+
+[CẢNH 2] (00:00:10 - 00:00:20)
+Diễn biến tiếp theo chứng kiến những biến động kinh tế bất ngờ.
+"""
+    scenes = auditor.parse_raw_script(template_text)
+    assert len(scenes) == 2
+    assert "phân cảnh mở đầu" in scenes[0]
+    assert "Diễn biến tiếp theo" in scenes[1]
+    assert "TIÊU ĐỀ" not in scenes[0].upper()
+    assert "HƯỚNG DẪN" not in scenes[0].upper()
+
+
+def test_export_segments_to_srt_and_txt(tmp_path: Path):
+    segments = [
+        {"start": 0.0, "end": 4.5, "text": "Câu mở đầu đoạn 1."},
+        {"start": 4.5, "end": 9.2, "text": "Câu kết thúc đoạn 2."},
+    ]
+    srt_file = tmp_path / "test.srt"
+    txt_file = tmp_path / "test.txt"
+
+    export_segments_to_srt(segments, srt_file)
+    export_segments_to_txt(segments, txt_file, title="Test Video", url="https://youtube.com/watch?v=123", target_scenes=2)
+
+    assert srt_file.exists()
+    assert txt_file.exists()
+
+    srt_content = srt_file.read_text(encoding="utf-8")
+    assert "00:00:00,000 --> 00:00:04,500" in srt_content
+    assert "Câu mở đầu đoạn 1." in srt_content
+
+    txt_content = txt_file.read_text(encoding="utf-8")
+    assert "Test Video" in txt_content
+    assert "[CẢNH 1]" in txt_content
+    assert "Câu mở đầu đoạn 1." in txt_content
 
 
 def test_detect_language():

@@ -19,10 +19,10 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
-from pipeline.youtube import download_video
+from pipeline.youtube import download_video, probe_youtube_title
 from services.job_queue import JobQueueManager
 from services.notifier import TelegramNotifier
 from pipeline.output_validator import validate_rendered_output
@@ -63,7 +63,7 @@ def try_extract_subtitles(project_dir: Path) -> Optional[List[Dict[str, Any]]]:
 
         for line in lines:
             line_str = line.strip()
-            if not line_str or line_str.startswith("WEBVTT") or line_str.isdigit():
+            if not line_str or line_str.startswith("WEBVTT") or line_str.isdigit() or line_str.lower().startswith(("kind:", "language:", "align:", "position:", "note")):
                 continue
             match = time_pattern.search(line_str)
             if match:
@@ -173,16 +173,23 @@ class AutomatedFactory:
         Clones YouTube video, extracts highlights, writes Vietnamese review script (LLM),
         prepares beat timeline, requests Telegram approval, and prepares for TTS + BGM render.
         """
+        source_title = probe_youtube_title(youtube_url)
         if not job_id:
-            job_id = self.jq.create_job(mode="reup", url=youtube_url, target_duration=target_duration)
+            job_id = self.jq.create_job(mode="reup", url=youtube_url, target_duration=target_duration, source_title=source_title)
+        elif source_title:
+            with self.jq._get_conn() as conn:
+                conn.execute("UPDATE factory_jobs SET source_title = ? WHERE id = ? AND (source_title IS NULL OR source_title = '')", (source_title, job_id))
+                conn.commit()
         project_dir = self.output_dir / job_id
         project_dir.mkdir(parents=True, exist_ok=True)
         self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
 
         logger.info("=== STARTING SMART REUP PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
+            title_line = f"📺 Tiêu đề: <b>{source_title}</b>\n" if source_title else ""
             self.notifier.send_message(
                 f"🎬 <b>[MODE 1: SMART REUP] Nhận job: {job_id}</b>\n"
+                f"{title_line}"
                 f"🔗 Link: {youtube_url}\n"
                 f"⏱ Thời lượng mục tiêu: {target_duration}s\n"
                 f"<i>Đang tải video & trích xuất phụ đề/audio...</i>"
@@ -469,6 +476,68 @@ class AutomatedFactory:
     # MODE 2: FULL AI GENESIS
     # =========================================================================
 
+    def extract_and_export_original_script(
+        self,
+        youtube_url: str,
+        job_id: str,
+        target_scenes: int = 24,
+    ) -> Tuple[Path, Path, str, int]:
+        """
+        Quickly extracts subtitles/transcript from a YouTube URL and exports:
+        1. job_{job_id}_{safe_title}_subtitles.srt
+        2. job_{job_id}_{safe_title}_kich_ban_goc.txt
+        Returns (srt_path, txt_path, source_title, segment_count).
+        """
+        source_title = probe_youtube_title(youtube_url) or "YouTube_Video"
+        safe_title = re.sub(r'[^a-zA-Z0-9_\-\u00C0-\u024F\u1EA0-\u1EF9]+', '_', source_title).strip('_')[:40] or "video"
+        project_dir = self.output_dir / job_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        with self.jq._get_conn() as conn:
+            conn.execute(
+                "UPDATE factory_jobs SET source_title = ?, project_dir = ? WHERE id = ?",
+                (source_title, str(project_dir), job_id)
+            )
+            conn.commit()
+
+        # 1. Try fast subtitle extraction via yt-dlp --skip-download (2-5s)
+        from pipeline.youtube import download_subtitles_fast, download_audio_fast
+        sub_segments = download_subtitles_fast(youtube_url, project_dir)
+
+        # 2. Fallback to Whisper audio transcription if no captions on YouTube
+        if not sub_segments:
+            logger.info("No subtitles on YouTube for %s. Transcribing audio with Whisper...", job_id)
+            if self.notifier.is_configured:
+                self.notifier.send_message(f"🎙 <i>[Job {job_id}] Video không có phụ đề sẵn. Đang bóc băng bằng Whisper AI...</i>")
+            with self.jq.heavy_lock_lease(job_id, interval=15.0):
+                audio_file = download_audio_fast(youtube_url, project_dir)
+                from pipeline.transcribe import transcribe_audio
+                stt_res = transcribe_audio(audio_file, model_size="small", compute_type="int8")
+                sub_segments = stt_res.get("segments", [])
+
+        if not sub_segments:
+            sub_segments = [
+                {"start": 0.0, "end": 10.0, "text": "Đoạn mở đầu video."},
+                {"start": 10.0, "end": 20.0, "text": "Diễn biến trung tâm câu chuyện."},
+                {"start": 20.0, "end": 30.0, "text": "Phần cao trào và kết thúc."},
+            ]
+
+        # 3. Export to SRT & TXT formats
+        from services.script_auditor import export_segments_to_srt, export_segments_to_txt
+        srt_path = project_dir / f"job_{job_id}_{safe_title}_subtitles.srt"
+        txt_path = project_dir / f"job_{job_id}_{safe_title}_kich_ban_goc.txt"
+
+        export_segments_to_srt(sub_segments, srt_path)
+        export_segments_to_txt(sub_segments, txt_path, title=source_title, url=youtube_url, target_scenes=target_scenes)
+
+        # Cache transcript.json
+        (project_dir / "transcript.json").write_text(
+            json.dumps({"segments": sub_segments}, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
+
+        return srt_path, txt_path, source_title, len(sub_segments)
+
     def run_ai_genesis(
         self,
         youtube_url: str,
@@ -484,8 +553,13 @@ class AutomatedFactory:
         - Option 2 (Custom Script): Audits custom script, verifies pacing & safety, and decomposes into shots.
         - Dynamic Voice Audition: Sends 3-5s voice samples to Telegram for user selection.
         """
+        source_title = probe_youtube_title(youtube_url)
         if not job_id:
-            job_id = self.jq.create_job(mode="remake", url=youtube_url)
+            job_id = self.jq.create_job(mode="remake", url=youtube_url, source_title=source_title)
+        elif source_title:
+            with self.jq._get_conn() as conn:
+                conn.execute("UPDATE factory_jobs SET source_title = ? WHERE id = ? AND (source_title IS NULL OR source_title = '')", (source_title, job_id))
+                conn.commit()
         project_dir = self.output_dir / job_id
         project_dir.mkdir(parents=True, exist_ok=True)
         self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
@@ -495,8 +569,10 @@ class AutomatedFactory:
         logger.info("=== STARTING FULL AI GENESIS PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
             script_mode_desc = "Tự cung cấp kịch bản" if custom_script else "AI tự động biên kịch song ngữ"
+            title_line = f"📺 Tiêu đề: <b>{source_title}</b>\n" if source_title else ""
             self.notifier.send_message(
                 f"🎬 <b>[MODE 2: AI GENESIS] Nhận job: {job_id}</b>\n"
+                f"{title_line}"
                 f"🔗 Link: {youtube_url}\n"
                 f"⚙️ Chế độ kịch bản: <i>{script_mode_desc}</i>\n"
                 f"<i>Đang phân tích cốt truyện & lập danh sách shot điện ảnh...</i>"
@@ -529,9 +605,20 @@ class AutomatedFactory:
                     })
             else:
                 # Option 1: AI Dual-Script Genesis from YouTube video
-                raw_video = download_video(youtube_url, project_dir, max_height=1080)
-                sub_segments = try_extract_subtitles(project_dir)
+                sub_segments = None
+                transcript_file = project_dir / "transcript.json"
+                if transcript_file.exists():
+                    try:
+                        sub_segments = json.loads(transcript_file.read_text(encoding="utf-8")).get("segments", [])
+                    except Exception:
+                        pass
+
                 if not sub_segments:
+                    from pipeline.youtube import download_subtitles_fast
+                    sub_segments = download_subtitles_fast(youtube_url, project_dir)
+
+                if not sub_segments:
+                    raw_video = download_video(youtube_url, project_dir, max_height=1080)
                     with self.jq.heavy_lock_lease(job_id, interval=15.0):
                         from pipeline.transcribe import transcribe_audio
                         stt_res = transcribe_audio(raw_video, model_size="small", compute_type="int8")

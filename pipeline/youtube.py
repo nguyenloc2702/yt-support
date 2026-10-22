@@ -6,10 +6,13 @@ import subprocess
 from urllib.parse import urlparse
 
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+import logging
 
 from config.settings import settings
 from core.exceptions import DependencyNotFoundError, InvalidMediaError, JobCancelledError
+
+logger = logging.getLogger("youtube")
 
 
 def _ytdlp_path() -> str:
@@ -257,3 +260,77 @@ def download_video(
         result = remux_target
 
     return result
+
+
+def probe_youtube_title(url: str, timeout: int = 15) -> str:
+    """Quickly probes the title of a YouTube video using yt-dlp --get-title."""
+    if not url or not check_ytdlp():
+        return ""
+    cmd = [_ytdlp_path(), "--get-title", "--no-warnings", url.strip()]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip().splitlines()[0]
+    except Exception as e:
+        logger.debug("Failed to probe youtube title for %s: %s", url, e)
+    return ""
+
+
+def download_subtitles_fast(url: str, output_dir: Path) -> Optional[List[Dict[str, Any]]]:
+    """
+    Fast subtitle downloader using yt-dlp --skip-download.
+    Fetches auto/manual subtitles (.vtt/.srt) in ~2-5s without downloading video.
+    """
+    if not url or not check_ytdlp():
+        return None
+    validate_youtube_url(url.strip())
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_template = str(output_dir / "download.%(ext)s")
+
+    cmd = [
+        _ytdlp_path(),
+        "--skip-download",
+        "--ignore-errors",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs", "en,vi,en.*,vi.*",
+        "--sub-format", "vtt/srt/best",
+        *_js_runtime_args(),
+        "-o", out_template,
+        url.strip(),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=30)
+    except Exception as e:
+        logger.warning("yt-dlp fast subtitle extraction failed for %s: %s", url, e)
+
+    from pipeline.automated_factory import try_extract_subtitles
+    return try_extract_subtitles(output_dir)
+
+
+def download_audio_fast(url: str, output_dir: Path) -> Path:
+    """Fast audio-only downloader using yt-dlp (used when video has no subtitles)."""
+    if not url or not check_ytdlp():
+        raise DependencyNotFoundError("yt-dlp is not available")
+    validate_youtube_url(url.strip())
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_template = str(output_dir / "audio.%(ext)s")
+
+    cmd = [
+        _ytdlp_path(),
+        "--ignore-errors",
+        "-f", "ba/bestaudio",
+        "-x",
+        "--audio-format", "mp3",
+        *_js_runtime_args(),
+        "-o", out_template,
+        url.strip(),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    candidates = sorted(output_dir.glob("audio.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        tail = res.stderr[-200:] if res.stderr else ""
+        raise InvalidMediaError(f"Failed to download audio for Whisper: {tail}")
+    return candidates[0]

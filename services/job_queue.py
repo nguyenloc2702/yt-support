@@ -195,6 +195,8 @@ class JobQueueManager:
             # Dynamic migration for optional / added columns
             self._ensure_column(conn, "factory_jobs", "next_retry_at", "REAL")
             self._ensure_column(conn, "factory_jobs", "upload_attempts", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "factory_jobs", "source_title", "TEXT")
+            self._ensure_column(conn, "factory_jobs", "source_id", "TEXT")
             self._ensure_column(conn, "factory_shots", "upload_attempts", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "factory_shots", "next_retry_at", "REAL")
             self._ensure_column(conn, "factory_shots", "worker_id", "TEXT")
@@ -299,24 +301,41 @@ class JobQueueManager:
 
     # --- Jobs Management ---
 
-    def create_job(self, mode: str, url: str, target_duration: float = 180.0, project_dir: Optional[str] = None) -> str:
+    def create_job(
+        self,
+        mode: str,
+        url: str,
+        target_duration: float = 180.0,
+        project_dir: Optional[str] = None,
+        source_title: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> str:
         job_id = f"{mode}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         now = time.time()
+        sid = source_id or extract_youtube_id(url)
         with self._get_conn() as conn:
             conn.execute("""
-            INSERT INTO factory_jobs (id, mode, url, status, target_duration, project_dir, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?)
-            """, (job_id, mode, url, target_duration, project_dir, now, now))
+            INSERT INTO factory_jobs (id, mode, url, status, target_duration, project_dir, source_title, source_id, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?)
+            """, (job_id, mode, url, target_duration, project_dir, source_title, sid, now, now))
             conn.commit()
-        logger.info("Created job %s (mode: %s, url: %s)", job_id, mode, url)
+        logger.info("Created job %s (mode: %s, url: %s, title: %s, yt_id: %s)", job_id, mode, url, source_title, sid)
         return job_id
 
-    def create_job_if_no_active(self, mode: str, url: str, target_duration: float = 180.0, project_dir: Optional[str] = None) -> Optional[str]:
+    def create_job_if_no_active(
+        self,
+        mode: str,
+        url: str,
+        target_duration: float = 180.0,
+        project_dir: Optional[str] = None,
+        source_title: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Atomically creates a job only if no active (non-completed, non-failed, non-cancelled) job
         already exists for the given YouTube video URL.
         """
-        video_id = extract_youtube_id(url)
+        video_id = source_id or extract_youtube_id(url)
         conn = self._get_conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -332,11 +351,11 @@ class JobQueueManager:
             job_id = f"{mode}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
             now = time.time()
             conn.execute("""
-            INSERT INTO factory_jobs (id, mode, url, status, target_duration, project_dir, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?)
-            """, (job_id, mode, url, target_duration, project_dir, now, now))
+            INSERT INTO factory_jobs (id, mode, url, status, target_duration, project_dir, source_title, source_id, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?)
+            """, (job_id, mode, url, target_duration, project_dir, source_title, video_id, now, now))
             conn.commit()
-            logger.info("Created unique job %s (mode: %s, url: %s)", job_id, mode, url)
+            logger.info("Created unique job %s (mode: %s, url: %s, title: %s, yt_id: %s)", job_id, mode, url, source_title, video_id)
             return job_id
         except Exception as e:
             logger.error("Error in create_job_if_no_active: %s", e)

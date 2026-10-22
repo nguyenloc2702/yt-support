@@ -61,18 +61,53 @@ def test_reup_command(mock_bot: TelegramCommandBot):
     reup_handler.assert_called_once_with("https://youtube.com/watch?v=123", 90.0)
 
 
-def test_remake_command_shows_options(mock_bot: TelegramCommandBot):
+def test_remake_command_initiates_script_extraction(mock_bot: TelegramCommandBot):
     remake_handler = MagicMock()
     mock_bot.on_remake_handler = remake_handler
+    mock_bot._async_extract_and_send_script = MagicMock()
 
     mock_bot._handle_command("/remake https://youtube.com/watch?v=456")
     mock_bot.notifier.send_message.assert_called_once()
-    msg, kwargs = mock_bot.notifier.send_message.call_args[0][0], mock_bot.notifier.send_message.call_args[1]
-    assert "Option 1 - AI Tự Biên Kịch" in msg
-    assert "Option 2 - Tôi Tự Nhập Script" in msg
-    assert "reply_markup" in kwargs
-    # Handlers shouldn't be executed until an option is selected
+    msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "Đang bóc tách kịch bản gốc và phụ đề từ YouTube" in msg
+    assert "xào chẻ" in msg
+
+    # Job is created and placed in AWAITING_CUSTOM_SCRIPT
+    active_job = mock_bot.jq.get_active_awaiting_script_job()
+    assert active_job is not None
+    assert active_job["url"] == "https://youtube.com/watch?v=456"
+
+    # Async extractor dispatched
+    mock_bot._async_extract_and_send_script.assert_called_once()
     remake_handler.assert_not_called()
+
+
+def test_async_extract_and_send_script(mock_bot: TelegramCommandBot, tmp_path: Path):
+    srt_file = tmp_path / "sample.srt"
+    txt_file = tmp_path / "sample.txt"
+    srt_file.write_text("1\n00:00:00,000 --> 00:00:05,000\nHello", encoding="utf-8")
+    txt_file.write_text("Hello", encoding="utf-8")
+
+    mock_factory = MagicMock()
+    mock_factory.extract_and_export_original_script.return_value = (srt_file, txt_file, "Sample Video", 1)
+    mock_bot._factory = mock_factory
+
+    mock_bot._async_extract_and_send_script("https://youtube.com/watch?v=456", "remake_123")
+
+    # Both documents must be sent to Telegram
+    assert mock_bot.notifier.send_document.call_count == 2
+    doc_calls = [call[0][0] for call in mock_bot.notifier.send_document.call_args_list]
+    assert str(srt_file) in doc_calls
+    assert str(txt_file) in doc_calls
+
+    # Instruction message with inline button must be sent
+    mock_bot.notifier.send_message.assert_called_once()
+    instr_msg = mock_bot.notifier.send_message.call_args[0][0]
+    assert "ĐÃ GỬI FILE KỊCH BẢN & PHỤ ĐỀ GỐC" in instr_msg
+    assert "xào chẻ" in instr_msg
+    kwargs = mock_bot.notifier.send_message.call_args[1]
+    assert "reply_markup" in kwargs
+    assert "remake_ai:remake_123" in str(kwargs["reply_markup"])
 
 
 def test_remake_ai_direct(mock_bot: TelegramCommandBot):

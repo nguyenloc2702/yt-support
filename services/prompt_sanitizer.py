@@ -168,3 +168,23 @@ def sanitize_veo_prompt(
         f"35mm master lens, photorealistic atmospheric depth, dramatic cinematic lighting, silent, no audio."
     )
     return prompt
+
+
+def sanitize_filename(name: str, max_length: int = 80) -> str:
+    """Sanitizes a string into a clean, filesystem- and cloud-friendly filename.
+    
+    - Replaces illegal characters (/*?:\"<>|, newlines, tabs) with underscores.
+    - Replaces spaces with underscores.
+    - Strips leading/trailing punctuation and underscores.
+    - Truncates to max_length.
+    - Fallbacks to 'video_project' if empty.
+    """
+    if not name or not name.strip():
+        return "video_project"
+    cleaned = re.sub(r'[\\/*?:\"<>|#%&{}\r\n\t]+', " ", name)
+    cleaned = re.sub(r"\s+", "_", cleaned.strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip(" ._-")
+    if not cleaned:
+        return "video_project"
+    return cleaned[:max_length].rstrip(" ._-")
+

@@ -63,6 +63,7 @@ class VideoAutomationWorker:
             on_approve_handler=self.factory.execute_approved_reup,
             job_queue=self.jq,
             account_pool=self.account_pool,
+            factory=self.factory,
         )
 
         # Register signals for safe restart
@@ -369,6 +370,40 @@ class VideoAutomationWorker:
 
             # 2. Upload Phase: Idempotently upload final documentary to Google Drive
             logger.info("Uploading final assembled documentary for Job %s...", job_id)
+            from datetime import datetime
+            from services.prompt_sanitizer import sanitize_filename
+            from services.job_queue import extract_youtube_id
+
+            source_title = fresh_job.get("source_title") or ""
+            source_id = fresh_job.get("source_id") or extract_youtube_id(fresh_job.get("url") or "")
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            short_id = job_id.split("_")[-1] if "_" in job_id else job_id[:6]
+            safe_title = sanitize_filename(source_title or f"Video_{short_id}")
+
+            final_folder = f"Final_Videos/{date_str}/{safe_title}_[YT-{source_id}]"
+
+            # Check if dual language versions exist in project_dir
+            out_vi = project_dir / f"documentary_final_{job_id}_vi.mp4"
+            out_en = project_dir / f"documentary_final_{job_id}_en.mp4"
+
+            if out_vi.exists() and out_en.exists():
+                name_vi = f"{safe_title}_[YT-{source_id}]_[{short_id}]_VI.mp4"
+                name_en = f"{safe_title}_[YT-{source_id}]_[{short_id}]_EN.mp4"
+                self.uploader.upload_and_clean(local_path=out_vi, remote_filename=name_vi, remote_folder=final_folder, clean_local=False)
+                self.uploader.upload_and_clean(local_path=out_en, remote_filename=name_en, remote_folder=final_folder, clean_local=False)
+            else:
+                named_video_name = f"{safe_title}_[YT-{source_id}]_[{short_id}].mp4"
+                self.uploader.upload_and_clean(local_path=final_video, remote_filename=named_video_name, remote_folder=final_folder, clean_local=False)
+
+            # Also upload metadata & source info if available
+            meta_file = project_dir / "metadata.json"
+            if meta_file.exists():
+                self.uploader.upload_and_clean(local_path=meta_file, remote_folder=final_folder, clean_local=False)
+            source_txt = project_dir / "source_info.txt"
+            if source_txt.exists():
+                self.uploader.upload_and_clean(local_path=source_txt, remote_folder=final_folder, clean_local=False)
+
+            # Upload standard backup to Video_Projects/{job_id}
             remote_name = f"documentary_final_{job_id}.mp4"
             upload_ok, drive_url = self.uploader.upload_and_clean(
                 local_path=final_video,
@@ -389,12 +424,21 @@ class VideoAutomationWorker:
                 # Safe to clean local shots only after DB state is committed
                 shutil.rmtree(project_dir / "shots", ignore_errors=True)
                 final_video.unlink(missing_ok=True)
+                if out_vi.exists():
+                    out_vi.unlink(missing_ok=True)
+                if out_en.exists():
+                    out_en.unlink(missing_ok=True)
                 if self.notifier.is_configured:
+                    title_info = f"🎬 <b>Tiêu đề:</b> {source_title}\n" if source_title else ""
+                    yt_info = f"🔗 <b>YouTube gốc:</b> https://youtu.be/{source_id}\n" if source_id else ""
                     self.notifier.send_message(
                         f"🎉 <b>[MODE 2 HOÀN TẤT] PHIM TÀI LIỆU ĐÃ RÁP XONG!</b>\n\n"
+                        f"{title_info}"
+                        f"{yt_info}"
                         f"🆔 Job: <code>{job_id}</code>\n"
                         f"🎞 Tổng số cảnh: <b>{summary['done']} / {summary['total']} cảnh</b>\n"
-                        f"☁️ Google Drive: <code>{drive_url}</code>\n"
+                        f"📁 Thư mục Google Drive: <code>{final_folder}</code>\n"
+                        f"☁️ Backup: <code>{drive_url}</code>\n"
                         f"✨ Video phim tài liệu hoàn chỉnh đã được kiểm định QC và tải lên Google Drive!"
                     )
             else:

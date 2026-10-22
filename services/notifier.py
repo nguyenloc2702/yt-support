@@ -4,6 +4,7 @@ Sends progress updates, shot completion alerts, and preview videos directly to T
 Configured via TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -172,8 +173,8 @@ class TelegramNotifier:
             logger.error("Failed to send Telegram audio: %s", e)
             return False
 
-    def send_document(self, document_path: str, caption: str = "") -> bool:
-        """Send a document (.txt, .json, etc.) to Telegram."""
+    def send_document(self, document_path: str, caption: str = "", reply_markup: Optional[dict] = None) -> bool:
+        """Send a document (.txt, .srt, .json, etc.) to Telegram."""
         if not self.is_configured:
             return False
         path = Path(document_path)
@@ -185,6 +186,8 @@ class TelegramNotifier:
             with open(path, "rb") as df:
                 files = {"document": df}
                 data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "HTML"}
+                if reply_markup is not None:
+                    data["reply_markup"] = json.dumps(reply_markup)
                 resp = requests.post(url, data=data, files=files, timeout=45)
                 return resp.status_code == 200
         except Exception as e:

@@ -109,54 +109,250 @@ class ScriptAuditResult:
         return "\n".join(lines)
 
 
+def format_srt_timestamp(seconds: float) -> str:
+    """Formats seconds into standard SRT timestamp HH:MM:SS,mmm."""
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    if millis >= 1000:
+        secs += 1
+        millis = 0
+    return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+
+
+def export_segments_to_srt(segments: List[Dict[str, Any]], out_path: Path) -> Path:
+    """Exports transcript segments into standard SRT subtitle format."""
+    lines = []
+    for idx, seg in enumerate(segments, 1):
+        start_sec = float(seg.get("start", 0.0))
+        end_sec = float(seg.get("end", start_sec + 2.0))
+        if end_sec <= start_sec:
+            end_sec = start_sec + 2.0
+        start_ts = format_srt_timestamp(start_sec)
+        end_ts = format_srt_timestamp(end_sec)
+        text = clean_narration_for_tts(str(seg.get("text", "")).strip())
+        if not text:
+            continue
+        lines.append(f"{idx}\n{start_ts} --> {end_ts}\n{text}\n")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+def export_segments_to_txt(
+    segments: List[Dict[str, Any]],
+    out_path: Path,
+    title: str = "",
+    url: str = "",
+    target_scenes: int = 24,
+) -> Path:
+    """
+    Exports segments into a clean, human-friendly TXT script with suggested scenes
+    and original transcript for easy remixing ("xào chẻ").
+    """
+    total_words = sum(len(str(s.get("text", "")).split()) for s in segments)
+    max_end = max((float(s.get("end", 0.0)) for s in segments), default=0.0)
+    duration_str = f"{int(max_end // 60)} phút {int(max_end % 60)} giây" if max_end > 0 else "Không xác định"
+
+    lines = [
+        "============================================================",
+        "📝 KỊCH BẢN GỐC & GỢI Ý PHÂN CẢNH TỪ VIDEO GỐC",
+        "============================================================",
+        f"📺 Tiêu đề: {title or 'Video'}",
+        f"🔗 Link gốc: {url or 'N/A'}",
+        f"⏱ Thời lượng gốc: {duration_str} | Tổng số từ: {total_words} từ",
+        "============================================================",
+        "",
+        "📌 HƯỚNG DẪN XÀO CHẺ / TÙY BIẾN KỊCH BẢN:",
+        "1. Bạn có thể chỉnh sửa, thêm bớt, hoặc viết lại lời kể theo văn phong riêng.",
+        f"2. Chuẩn video Remake AI: khoảng {target_scenes} cảnh (mỗi cảnh ~10s, từ 14-25 từ/cảnh).",
+        "3. Sau khi sửa xong, bạn chỉ cần:",
+        "   • Gửi file .txt (hoặc .srt) này lên Telegram Bot",
+        "   • Hoặc copy & paste trực tiếp các cảnh vào khung chat Telegram.",
+        "4. Bot sẽ tự động kiểm tra nhịp đọc, từ an toàn Veo và tạo mẫu giọng đọc nghe thử!",
+        "",
+        f"============================================================",
+        f"🎬 GỢI Ý {target_scenes} CẢNH (BẠN CÓ THỂ SỬA TRỰC TIẾP TẠI ĐÂY):",
+        "============================================================",
+        "",
+    ]
+
+    if segments:
+        step = max(1, len(segments) // target_scenes)
+        for idx in range(1, target_scenes + 1):
+            seg_idx = min((idx - 1) * step, len(segments) - 1)
+            raw_text = clean_narration_for_tts(str(segments[seg_idx].get("text", "")))
+            start_t = float(segments[seg_idx].get("start", (idx - 1) * 10.0))
+            end_t = float(segments[seg_idx].get("end", start_t + 10.0))
+            lines.append(f"[CẢNH {idx}] ({format_srt_timestamp(start_t)[:8]} - {format_srt_timestamp(end_t)[:8]})")
+            lines.append(f"{raw_text}\n")
+
+    lines.extend([
+        "============================================================",
+        "📖 TOÀN BỘ LỜI THOẠI GỐC (DÙNG ĐỂ THAM KHẢO CHI TIẾT):",
+        "============================================================",
+        "",
+    ])
+
+    for seg in segments:
+        start_sec = float(seg.get("start", 0.0))
+        text = clean_narration_for_tts(str(seg.get("text", "")))
+        if text:
+            lines.append(f"[{format_srt_timestamp(start_sec)[:8]}] {text}")
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
 class ScriptAuditor:
     """Parses, verifies, and audits scripts before video generation."""
 
     def __init__(self, target_scenes: int = DEFAULT_TARGET_SHOTS):
         self.target_scenes = target_scenes
 
+    def _parse_srt_or_vtt(self, text: str) -> List[str]:
+        """Parses SRT or VTT content, stripping indices, timecodes, and HTML tags."""
+        time_pattern = re.compile(
+            r"(\d{1,2}:)?\d{2}:\d{2}[.,]\d{3}\s*-->\s*(\d{1,2}:)?\d{2}:\d{2}[.,]\d{3}"
+        )
+        blocks: List[str] = []
+        current_block: List[str] = []
+
+        for line in text.splitlines():
+            l = line.strip()
+            if not l or l.startswith("WEBVTT") or l.lower().startswith(("kind:", "language:")):
+                if current_block:
+                    blocks.append(" ".join(current_block))
+                    current_block = []
+                continue
+            if l.isdigit():  # Subtitle index number
+                if current_block:
+                    blocks.append(" ".join(current_block))
+                    current_block = []
+                continue
+            if time_pattern.search(l):  # Timestamp line
+                continue
+            clean_l = re.sub(r"<[^>]+>", "", l).strip()
+            if clean_l:
+                current_block.append(clean_l)
+
+        if current_block:
+            blocks.append(" ".join(current_block))
+
+        if not blocks:
+            return []
+
+        # If user crafted ~target_scenes blocks (e.g. 15-30 blocks), treat each block as a scene
+        if len(blocks) >= int(self.target_scenes * 0.7) and len(blocks) <= int(self.target_scenes * 1.5):
+            return blocks
+
+        # If too many small blocks (e.g. 100+ raw subtitle lines), group into target_scenes
+        full_text = " ".join(blocks)
+        sentences = re.split(r"(?<=[.!?…])\s+", full_text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if not sentences:
+            sentences = blocks
+
+        if len(sentences) <= self.target_scenes:
+            return sentences
+
+        step = len(sentences) / self.target_scenes
+        scenes = []
+        for i in range(self.target_scenes):
+            start = int(i * step)
+            end = int((i + 1) * step) if i < self.target_scenes - 1 else len(sentences)
+            bundle = " ".join(sentences[start:end]).strip()
+            if bundle:
+                scenes.append(bundle)
+        return scenes
+
     def parse_raw_script(self, raw_text: str) -> List[str]:
         """
         Parses raw text into individual scene narrations.
         Supports:
-        - Numbered lines: 'Cảnh 1: ...', '1. ...', '[Shot 1] ...'
+        - SRT / VTT subtitle files (with timecodes stripped)
+        - Numbered lines: '[CẢNH 1] ...', 'Cảnh 1: ...', '1. ...', '[Shot 1] ...'
         - Paragraph / newline separated blocks.
         - Freeform narrative text automatically chunked into scenes.
         """
         cleaned = raw_text.strip()
-        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        if not cleaned:
+            return []
 
-        scenes: List[str] = []
+        # 1. Handle SRT / VTT content (contains timestamp arrow '-->')
+        if "-->" in cleaned:
+            srt_scenes = self._parse_srt_or_vtt(cleaned)
+            if srt_scenes:
+                return [clean_narration_for_tts(s) for s in srt_scenes if s.strip()]
 
-        # Check if lines have scene prefixes like 'Cảnh 1:', 'Shot 1:', '1.', '1 -'
-        scene_prefix_pattern = re.compile(r"^(?:cảnh|shot|scene|\#)?\s*\d+[\s:.-]+", re.IGNORECASE)
+        # 2. Check for explicit scene starts like '[CẢNH 1]', 'Cảnh 1:', 'Shot 1:'
+        scene_1_pattern = re.compile(r"^\[?(?:cảnh|shot|scene)\s*1\]?(?:\s*\([^)]*\))?[\s:.-]*", re.IGNORECASE)
+        scene_prefix_pattern = re.compile(
+            r"^\[?(?:cảnh|shot|scene|\#)?\s*\d+\]?(?:\s*\([^)]*\))?[\s:.-]*",
+            re.IGNORECASE,
+        )
+        has_scene_1 = any(scene_1_pattern.match(l.strip()) for l in cleaned.splitlines())
+
+        if has_scene_1:
+            scenes = []
+            started = False
+            for l in cleaned.splitlines():
+                l_str = l.strip()
+                if not started:
+                    if scene_1_pattern.match(l_str):
+                        started = True
+                if started:
+                    if l_str.startswith("===") or "TOÀN BỘ LỜI THOẠI" in l_str.upper():
+                        break
+                    m = scene_prefix_pattern.match(l_str)
+                    if m and m.group(0).strip():
+                        content = l_str[m.end():].strip()
+                        scenes.append(content)
+                    elif l_str:
+                        if scenes:
+                            scenes[-1] = (scenes[-1] + " " + l_str).strip()
+                        else:
+                            scenes.append(l_str)
+            return [clean_narration_for_tts(s) for s in scenes if s.strip()]
+
+        # 3. Filter out metadata headers and template banners
+        header_pattern = re.compile(
+            r"^(?:={3,}|-{3,}|tiêu đề:|nguồn:|thời lượng:|tổng số từ:|hướng dẫn|toàn bộ lời thoại|gợi ý|đã gửi|job id:)",
+            re.IGNORECASE,
+        )
+        lines = []
+        for l in cleaned.splitlines():
+            l_str = l.strip()
+            if not l_str or header_pattern.match(l_str):
+                continue
+            lines.append(l_str)
+
+        if not lines:
+            return []
+
+        # 4. Fallback numbered lines or freeform text
         has_numbered_scenes = any(scene_prefix_pattern.match(l) for l in lines)
-
+        scenes: List[str] = []
         if has_numbered_scenes:
             for l in lines:
                 m = scene_prefix_pattern.match(l)
-                if m:
+                if m and m.group(0).strip():
                     content = l[m.end():].strip()
-                    if content:
-                        scenes.append(content)
+                    scenes.append(content)
                 else:
                     if scenes:
-                        scenes[-1] += " " + l
+                        scenes[-1] = (scenes[-1] + " " + l).strip()
                     else:
                         scenes.append(l)
         elif len(lines) >= self.target_scenes * 0.7:
-            # Lines already roughly match shot counts
             scenes = lines
         else:
-            # Freeform text: split into sentences and bundle into target_scenes
-            sentences = re.split(r"(?<=[.!?…])\s+", cleaned)
+            full_text = " ".join(lines)
+            sentences = re.split(r"(?<=[.!?…])\s+", full_text)
             sentences = [s.strip() for s in sentences if s.strip()]
-
-
             if len(sentences) <= self.target_scenes:
                 scenes = sentences
             else:
-                # Group sentences into target_scenes
                 step = len(sentences) / self.target_scenes
                 for i in range(self.target_scenes):
                     start = int(i * step)
