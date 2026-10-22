@@ -525,6 +525,11 @@ def build_dual_scripts_from_transcript(
             })
         return vi_scenes, en_scenes
 
+    # Strategy 1: AI Semantic Scene Slicing (xKiro LLM) - Slices scenes based on actual narrative situations with dynamic durations
+    ai_dual = build_semantic_dual_scripts_from_transcript(transcript_segments, target_shots)
+    if ai_dual:
+        return ai_dual
+
     total_segs = len(transcript_segments)
     en_scenes = []
     vi_scenes = []
@@ -587,6 +592,134 @@ def build_dual_scripts_from_transcript(
             "is_key_scene": True,
         })
     return vi_scenes, en_scenes
+
+
+def build_semantic_dual_scripts_from_transcript(
+    transcript_segments: List[Dict[str, Any]],
+    target_shots: int = DEFAULT_TARGET_SHOTS,
+) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
+    """
+    Intelligent AI Scriptwriter & Semantic Scene Slicer using xKiro LLM.
+    Bypasses dumb fixed 5-second mechanical slicing.
+    Slices scenes naturally based on specific dramatic & narrative situations,
+    with flexible dynamic durations (4.5s - 8.0s) and fluent documentary prose.
+    """
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    api_key = os.environ.get("XKIRO_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key,
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.xkiro.com/v1"),
+            timeout=45,
+        )
+
+        # 1. Clean subtitle stutters and chronological stitching
+        cleaned_segs = []
+        for s in transcript_segments:
+            txt = _clean_rolling_stutter(str(s.get("text", "")).strip())
+            if txt:
+                cleaned_segs.append({
+                    "start": float(s.get("start", 0)),
+                    "end": float(s.get("end", 0)),
+                    "text": txt,
+                })
+        if not cleaned_segs:
+            return None
+
+        total_dur = max((s["end"] for s in cleaned_segs), default=180.0)
+        num_blocks = max(1, min(12, int(round(total_dur / 95.0))))
+        block_dur = total_dur / num_blocks
+
+        vi_scenes: List[Dict[str, Any]] = []
+        en_scenes: List[Dict[str, Any]] = []
+        scene_counter = 1
+
+        for b_idx in range(num_blocks):
+            t_start = b_idx * block_dur
+            t_end = (b_idx + 1) * block_dur
+            b_segs = [s for s in cleaned_segs if t_start <= s["start"] < t_end or (b_idx == num_blocks - 1 and s["start"] >= t_start)]
+            b_text = _clean_rolling_stutter(" ".join(s["text"] for s in b_segs))
+            if not b_text or len(b_text) < 15:
+                continue
+
+            prompt = f"""Bạn là Đạo diễn kiêm Biên kịch Phóng sự Tài liệu chuyên nghiệp.
+Phân tích đoạn nội dung thuyết minh tài chính ({t_start:.0f}s - {t_end:.0f}s) và băm thành các CẢNH THEO TÌNH HUỐNG NỘI DUNG CỤ THỂ, KHÔNG băm 5s máy móc.
+
+Nội dung:
+\"\"\"{b_text}\"\"\"
+
+Yêu cầu bắt buộc:
+1. Tự động băm thành các cảnh dựa trên sự chuyển biến của tình huống, luận điểm hoặc hành động cụ thể.
+2. situation: Mô tả tình huống cụ thể (Ví dụ: "Nhân viên ngân hàng gõ số tiền", "Ẩn dụ chiếc xe biến mất").
+3. voiceover_vi: Lời thuyết minh tiếng Việt cực kỳ mượt mà, truyền cảm, tròn câu trọn ý. Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
+4. voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác.
+5. estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ 4.5 đến 8.0 giây).
+6. visual_prompt: Prompt tiếng Anh chi tiết chuẩn điện ảnh 4K cho Veo/Cinematic documentary.
+
+Trả về duy nhất JSON array:
+[
+  {{
+    "situation": "...",
+    "voiceover_vi": "...",
+    "voiceover_en": "...",
+    "estimated_duration": 6.0,
+    "visual_prompt": "Cinematic 4K, professional documentary cinematography..."
+  }}
+]
+Chỉ trả về JSON thuần túy."""
+
+            resp = client.chat.completions.create(
+                model=os.environ.get("LLM_MODEL", "qwen/qwen3.5-flash:free"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                timeout=45,
+            )
+            raw = resp.choices[0].message.content.strip()
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+
+            scenes_data = json.loads(raw)
+            for sc in scenes_data:
+                dur = float(sc.get("estimated_duration", 5.5))
+                dur = max(4.0, min(9.0, dur))
+                v_vi = sc.get("voiceover_vi", "").strip()
+                v_en = (sc.get("voiceover_en") or v_vi).strip()
+                p = (sc.get("visual_prompt") or sanitize_veo_prompt(v_en, scene_counter, target_shots)).strip()
+                sit = sc.get("situation", "").strip()
+
+                vi_scenes.append({
+                    "index": scene_counter,
+                    "situation": sit,
+                    "text": v_vi,
+                    "prompt": p,
+                    "duration": dur,
+                    "is_key_scene": True,
+                })
+                en_scenes.append({
+                    "index": scene_counter,
+                    "situation": sit,
+                    "text": v_en,
+                    "prompt": p,
+                    "duration": dur,
+                    "is_key_scene": True,
+                })
+                scene_counter += 1
+
+        if vi_scenes:
+            return vi_scenes, en_scenes
+
+    except Exception as e:
+        logger.warning("AI semantic scene slicing failed or unavailable: %s. Falling back to documentary slice mode.", e)
+
+    return None
 
 
 _ONLINE_TRANSLATE_DISABLED_UNTIL = 0.0
