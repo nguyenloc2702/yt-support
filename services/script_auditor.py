@@ -540,7 +540,9 @@ def build_dual_scripts_from_transcript(
 
         seg_slice = transcript_segments[start_seg:end_seg]
         raw_text = " ".join(str(s.get("text", "")).strip() for s in seg_slice)
+        raw_text = _clean_rolling_stutter(raw_text)
         clean_text = clean_narration_for_tts(raw_text)
+        clean_text = _clean_rolling_stutter(clean_text)
 
         # Enforce narrative pacing (~15 - 26 words per 5-second scene)
         words = clean_text.split()
@@ -556,14 +558,14 @@ def build_dual_scripts_from_transcript(
             # Attempt translation to Vietnamese, falling back to adaptive documentary phrasing
             translated_vi = _translate_text(en_text, source_lang="en", target_lang="vi")
             if translated_vi:
-                vi_text = translated_vi
+                vi_text = _clean_rolling_stutter(translated_vi)
             else:
                 vi_text = _adapt_en_to_vi_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
         else:
             vi_text = clean_text
             translated_en = _translate_text(vi_text, source_lang="vi", target_lang="en")
             if translated_en:
-                en_text = translated_en
+                en_text = _clean_rolling_stutter(translated_en)
             else:
                 en_text = _adapt_vi_to_en_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
 
@@ -584,7 +586,6 @@ def build_dual_scripts_from_transcript(
             "duration": 5.0,
             "is_key_scene": True,
         })
-
     return vi_scenes, en_scenes
 
 
@@ -592,10 +593,27 @@ _ONLINE_TRANSLATE_DISABLED_UNTIL = 0.0
 _TRANSLATION_CACHE: Dict[str, str] = {}
 
 
+def _clean_rolling_stutter(text: str) -> str:
+    """Removes rolling caption duplicate phrases common in YouTube auto-generated VTT subtitles."""
+    words = text.split()
+    for span in range(min(8, len(words) // 2), 1, -1):
+        i = 0
+        while i + 2 * span <= len(words):
+            p1 = [w.lower().strip(".,!?\"'") for w in words[i : i + span]]
+            p2 = [w.lower().strip(".,!?\"'") for w in words[i + span : i + 2 * span]]
+            if p1 == p2 and any(len(x) > 2 for x in p1):
+                words = words[: i + span] + words[i + 2 * span :]
+            else:
+                i += 1
+    return " ".join(words)
+
+
 def _translate_text(text: str, source_lang: str, target_lang: str) -> Optional[str]:
     """
-    Lightweight translation helper using MyMemory free API with strict timeout and circuit breaker.
-    Returns None on failure to cleanly fall back to offline documentary adaptation.
+    High-reliability translation helper.
+    1. Uses Google Translate clients5 endpoint (no API key, unlimited, instant).
+    2. Falls back to MyMemory.
+    3. Returns None on failure to cleanly fall back to offline documentary adaptation.
     """
     import os
     if os.environ.get("PYTEST_CURRENT_TEST"):
@@ -620,6 +638,24 @@ def _translate_text(text: str, source_lang: str, target_lang: str) -> Optional[s
     import urllib.parse
     import urllib.request
 
+    # Strategy 1: Google Translate endpoint (clients5)
+    try:
+        url = f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={source_lang}&tl={target_lang}&q={urllib.parse.quote(cleaned[:450])}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, list) and data and isinstance(data[0], str) and len(data[0].strip()) > 2:
+                res = html.unescape(data[0]).strip()
+                _TRANSLATION_CACHE[cache_key] = res
+                return res
+            elif isinstance(data, str) and len(data.strip()) > 2:
+                res = html.unescape(data).strip()
+                _TRANSLATION_CACHE[cache_key] = res
+                return res
+    except Exception as e:
+        logger.debug("Google translate client error: %s", e)
+
+    # Strategy 2: MyMemory free fallback
     try:
         url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(cleaned[:450])}&langpair={source_lang}|{target_lang}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -630,12 +666,9 @@ def _translate_text(text: str, source_lang: str, target_lang: str) -> Optional[s
                 res = html.unescape(translated).strip()
                 _TRANSLATION_CACHE[cache_key] = res
                 return res
-            else:
-                # Rate limit or quota warning from free tier, trip circuit breaker for 60s
-                _ONLINE_TRANSLATE_DISABLED_UNTIL = time.time() + 60.0
     except Exception as e:
-        logger.debug("Translation service unavailable: %s. Tripping circuit breaker for 60s.", e)
-        _ONLINE_TRANSLATE_DISABLED_UNTIL = time.time() + 60.0
+        logger.debug("MyMemory fallback error: %s", e)
+
     return None
 
 
