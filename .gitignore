@@ -24,6 +24,7 @@ __pycache__/
 *.aac
 *.ogg
 *.opus
+*.m4a
 
 # Local model/cache directories
 .huggingface/

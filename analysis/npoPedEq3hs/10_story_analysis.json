@@ -1,0 +1,182 @@
+{
+  "video_id": "npoPedEq3hs",
+  "title": "The Rise of Elon Musk Explained Like You're 5",
+  "channel": "Crayon Capital",
+  "total_duration_sec": 1150.0,
+  "total_words": 2755,
+  "hook": {
+    "end_time": 32.4,
+    "type": "paradox_and_shock_comparison",
+    "text": "June 2026, SpaceX goes public and Elon Musk becomes the first trillionaire in human history. The second richest person on Earth is worth roughly $300 billion. And here's the thing. If you have $1 in your pocket, you are closer to him than he is to Elon. How the freak does one man get that far ahead? This is the story of Elon Musk. Fired from both companies he built, bet everything on rockets that kept exploding, and somehow ended up here.",
+    "why_it_works": "1. Establishes a massive futuristic stake ($1 Trillion). 2. Uses a visceral kindergarten math paradox: an ordinary person with $1 is mathematically closer to the 2nd richest person ($300B) than the 2nd richest is to Musk ($1,000B). 3. Closes with an open loop contrasting catastrophic failure (fired twice, exploding rockets) with unprecedented triumph."
+  },
+  "beats": [
+    {
+      "start": 0.0,
+      "end": 32.4,
+      "role": "hook",
+      "tension_0_10": 8,
+      "summary": "The Trillionaire Paradox & The $1 Hook.",
+      "key_quote": "If you have $1 in your pocket, you are closer to him than he is to Elon."
+    },
+    {
+      "start": 32.4,
+      "end": 145.0,
+      "role": "setup",
+      "tension_0_10": 4,
+      "summary": "Pretoria childhood, difficult family life, bullying, self-taught coding Blastar game at age 12, escape to Canada.",
+      "key_quote": "A skinny, socially awkward kid who read 10 hours a day."
+    },
+    {
+      "start": 145.0,
+      "end": 285.0,
+      "role": "rising_action_1",
+      "tension_0_10": 6,
+      "summary": "Zip2: Living on the office floor, showering at YMCA, board ousting him from CEO, buyout by Compaq for $307M ($22M to Elon).",
+      "key_quote": "He didn't buy a house. He bought a million-dollar McLaren sports car."
+    },
+    {
+      "start": 285.0,
+      "end": 450.0,
+      "role": "rising_action_2",
+      "tension_0_10": 7,
+      "summary": "X.com to PayPal: Merging with Peter Thiel, boardroom coup on his honeymoon flight, eBay buyout netting $180M.",
+      "key_quote": "He boards a plane for his honeymoon as CEO, and lands as an unemployed multimillionaire."
+    },
+    {
+      "start": 450.0,
+      "end": 640.0,
+      "role": "crisis_escalation",
+      "tension_0_10": 8,
+      "summary": "Putting $100M in SpaceX and $70M in Tesla. Humiliated in Russia trying to buy ICBMs. Falcon 1 launches 1, 2, and 3 blow up.",
+      "key_quote": "Launch one: exploded. Launch two: failed to reach orbit. Launch three: stage separation collided. Money was gone."
+    },
+    {
+      "start": 640.0,
+      "end": 840.0,
+      "role": "climax_crisis",
+      "tension_0_10": 10,
+      "summary": "The Christmas 2008 Near-Death Experience: SpaceX Falcon 1 launch 4 succeeds, but Tesla is 72 hours from missing payroll. Dec 24 loan closes minutes before deadline.",
+      "key_quote": "If Tesla had died, SpaceX would have died with it. He was 48 hours away from zero."
+    },
+    {
+      "start": 840.0,
+      "end": 1040.0,
+      "role": "breakthrough_scaling",
+      "tension_0_10": 6,
+      "summary": "Falcon 9 booster landings on drone ships cut launch costs by 90%. Tesla Model 3 'Production Hell'. Becoming the most valuable automaker.",
+      "key_quote": "Landing an 18-story building on a floating barge in the middle of the ocean."
+    },
+    {
+      "start": 1040.0,
+      "end": 1150.0,
+      "role": "payoff_and_moral",
+      "tension_0_10": 7,
+      "summary": "Closing callback to 2026, the $1 gap, and the razor-thin margin between genius and lunatic.",
+      "key_quote": "The only difference between an insane gambler and a visionary is whether the rocket explodes on the fourth try."
+    }
+  ],
+  "open_loops": [
+    {
+      "opened_at": 18.3,
+      "closed_at": 1140.0,
+      "question": "How did a man fired from both his companies and betting on exploding rockets become the world's first trillionaire?",
+      "resolution": "He survived 2008 by minutes, mastered vertical integration, and reusable rocketry compounding exponential value."
+    },
+    {
+      "opened_at": 155.0,
+      "closed_at": 275.0,
+      "question": "Will Elon get crushed by the old media giants with Zip2?",
+      "resolution": "Compaq buys Zip2 for $307M, proving digital maps replace phone books."
+    },
+    {
+      "opened_at": 320.0,
+      "closed_at": 440.0,
+      "question": "Will X.com survive the online banking war against PayPal?",
+      "resolution": "They merge, but Elon is betrayed and ousted on his honeymoon, netting $180M on eBay exit."
+    },
+    {
+      "opened_at": 580.0,
+      "closed_at": 720.0,
+      "question": "With 3 failed launches and no cash left, can Falcon 1 launch 4 actually reach orbit?",
+      "resolution": "Launch 4 is flawless; NASA awards a lifesaving $1.6B commercial resupply contract."
+    },
+    {
+      "opened_at": 760.0,
+      "closed_at": 835.0,
+      "question": "Can Tesla make payroll before Christmas Eve 2008?",
+      "resolution": "Investors wire the bridge loan at 4:30 PM on Christmas Eve with hours to spare."
+    }
+  ],
+  "metaphors": [
+    {
+      "t": 14.0,
+      "concept": "Wealth disparity ($300B vs $1T)",
+      "metaphor": "If you have $1 in your pocket, you are closer to the 2nd richest person than he is to Elon."
+    },
+    {
+      "t": 165.0,
+      "concept": "Zip2 digital directory",
+      "metaphor": "Yellow pages combined with digital maps when internet was still delivered on floppy disks."
+    },
+    {
+      "t": 310.0,
+      "concept": "Online payment banking protocol",
+      "metaphor": "Emailing dollar bills to someone's computer."
+    },
+    {
+      "t": 480.0,
+      "concept": "Commercial rocketry expendability",
+      "metaphor": "Throwing away a Boeing 747 airplane after every single one-way flight."
+    },
+    {
+      "t": 890.0,
+      "concept": "Falcon 9 rocket booster propulsive landing",
+      "metaphor": "Landing an 18-story building standing upright on a tiny floating postage stamp in the ocean."
+    }
+  ],
+  "humor": [
+    {
+      "t": 18.3,
+      "technique": "informal_rhetorical_question",
+      "line": "How the freak does one man get that far ahead?"
+    },
+    {
+      "t": 280.0,
+      "technique": "understatement_irony",
+      "line": "He didn't buy a sensible house. He bought a McLaren F1 and drove it like a teenager."
+    },
+    {
+      "t": 390.0,
+      "technique": "absurd_comparison",
+      "line": "Board members waited for him to board a 14-hour flight so he couldn't answer emails before firing him."
+    },
+    {
+      "t": 510.0,
+      "technique": "self_aware_hyperbole",
+      "line": "Russian rocket engineers literally spat on his shoes and laughed him out of the room."
+    },
+    {
+      "t": 1130.0,
+      "technique": "cynical_punchline",
+      "line": "If rocket four blew up, he'd be that crazy guy sleeping on your couch today."
+    }
+  ],
+  "narrator_persona": {
+    "tone": "Conversational, witty, fast-paced, grounded, playfully irreverent, non-academic",
+    "pov": "3rd person storytelling with direct 2nd person conversational addresses ('you', 'look at this')",
+    "addresses_viewer": true,
+    "signature_phrases": [
+      "And here's the thing.",
+      "Look at this.",
+      "How the freak...",
+      "On paper, great. In reality, chaos.",
+      "Bum. Done."
+    ]
+  },
+  "ending": {
+    "type": "philosophical_callback",
+    "text": "The only difference between an insane gambler and a visionary genius is whether the rocket explodes on the fourth try.",
+    "callback_to_hook": "Directly ties back to the opening statement of Elon becoming the first trillionaire after risking every cent down to the last dollar."
+  }
+}

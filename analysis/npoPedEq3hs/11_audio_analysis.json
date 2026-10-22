@@ -1,0 +1,85 @@
+{
+  "video_id": "npoPedEq3hs",
+  "channel": "Crayon Capital",
+  "integrated_loudness_lufs": -18.3,
+  "loudness_range_lra": 3.8,
+  "true_peak_dbfs": 0.0,
+  "voice_spec": {
+    "gender_age_perceived": "Male, 28-38 years old, articulate American accent",
+    "delivery_style": "Fast conversational narration, clear plosives, relaxed vocal fry on punchlines",
+    "measured_pacing": {
+      "effective_speaking_wpm": 184.8,
+      "overall_video_wpm": 143.7,
+      "mean_sentence_words": 7.9,
+      "median_sentence_words": 6.0,
+      "pct_short_sentences_le_6_words": 54.4,
+      "mean_pause_between_sentences_ms": 713.0,
+      "dramatic_pauses_gte_600ms_per_minute": 11.58
+    },
+    "voiceover_emotional_engineering": {
+      "sentence_structure": "Pairs a short statement with a clarifying question or rhetorical punchline (e.g. 'And here's the thing.' [pause 600ms] 'If you have $1 in your pocket...')",
+      "emphasis_strategy": "Sudden volume and cadence drop on grave moments ('Money was gone.'), rising pitch on absurd comparisons ('Throwing away a 747 airplane after one flight?!')"
+    }
+  },
+  "bgm_spec": {
+    "genre": "Quirky indie acoustic, pizzicato strings, playful lo-fi percussion, muted walking bass",
+    "tempo_estimated_bpm": "105 - 118 BPM",
+    "ducking_level": {
+      "relative_to_voice": "-18 dB to -22 dB under voiceover",
+      "swells": "+6 dB during transition silences and dramatic pauses"
+    },
+    "dynamic_mood_shifts_by_beat": [
+      {
+        "beat": "1. Hook (0 - 32s)",
+        "track_mood": "Ticking clock, mysterious pizzicato violin, rising intrigue",
+        "drop_points": "Complete silence at 00:11.5 before 'And here's the thing.'"
+      },
+      {
+        "beat": "2. Pretoria Childhood (32 - 145s)",
+        "track_mood": "Gentle, nostalgic acoustic guitar, light xylophone",
+        "drop_points": "Subtle beat drop when describing intense school bullying"
+      },
+      {
+        "beat": "3. Zip2 (145 - 285s)",
+        "track_mood": "Fast bouncy bassline, typewriter click sounds, energetic startup hustle",
+        "drop_points": "Brief pause when board removes him as CEO"
+      },
+      {
+        "beat": "4. PayPal (285 - 450s)",
+        "track_mood": "Playful sneaky groove, woodwinds, ticking percussion",
+        "drop_points": "Sudden stop at the honeymoon airplane coup announcement"
+      },
+      {
+        "beat": "5. SpaceX/Tesla Risk (450 - 640s)",
+        "track_mood": "Low ominous cellos, accelerating staccato strings as launches 1, 2, 3 fail",
+        "drop_points": "Sub-bass rumble upon rocket explosion moments"
+      },
+      {
+        "beat": "6. Christmas 2008 Crisis (640 - 840s)",
+        "track_mood": "High tension sparse piano notes, ticking clock SFX, heart-beat kick drum",
+        "drop_points": "Uplifting warm acoustic crescendo at Dec 24 funding close"
+      },
+      {
+        "beat": "7. Scaling Dominance (840 - 1040s)",
+        "track_mood": "Triumphant indie-pop groove, steady driving drums, celebratory synth",
+        "drop_points": "Moment of silence as Falcon 9 touches down upright"
+      },
+      {
+        "beat": "8. Payoff & Moral (1040 - 1150s)",
+        "track_mood": "Calm, reflective acoustic guitar callback to the intro theme",
+        "drop_points": "Fade out on final punchline sentence"
+      }
+    ]
+  },
+  "sfx_spec": {
+    "average_density_per_minute": 8.5,
+    "event_triggers": {
+      "crayon_scribble": "When text or hand-drawn chart lines are drawn on screen",
+      "subtle_pop_plop": "When icons, dollar bills, or small caricature heads pop into frame",
+      "cartoon_whoosh": "During quick camera pans and paper slide transitions",
+      "ka_ching": "When dollar valuations and exits are displayed ($22M, $180M, $1T)",
+      "muffled_boom": "When rockets explode or companies hit crisis points",
+      "dramatic_silence": "Right before the delivery of the main punchline or twist"
+    }
+  }
+}

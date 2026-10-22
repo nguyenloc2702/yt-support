@@ -484,7 +484,38 @@ class JobQueueManager:
             """).fetchone()
             return dict(row) if row else None
 
-    def approve_job(self, job_id: str) -> bool:
+    def approve_job(self, job_id: str, enforce_gates: bool = True) -> bool:
+        job = self.get_job(job_id)
+        if not job:
+            return False
+
+        mode = str(job.get("mode", "")).lower()
+        is_mode_2 = mode in ("mode2", "remake", "ai_genesis") or "remake" in job_id
+
+        p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+        state_file = p_dir / "approval_state.json"
+
+        # Fail-closed: Mode 2 / AI Genesis jobs MUST have valid 4-gate approval
+        if is_mode_2:
+            if not state_file.exists():
+                logger.error("approve_job blocked for Mode 2 job %s: missing approval_state.json (fail-closed rule)", job_id)
+                return False
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            ready, errors, _ = asm.check_video_readiness()
+            if not ready:
+                logger.warning("approve_job blocked for %s: Gate 4 readiness failed: %s", job_id, "; ".join(errors))
+                return False
+            asm.approve_video_generation(approver="job_queue")
+        elif enforce_gates and state_file.exists():
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            ready, errors, _ = asm.check_video_readiness()
+            if not ready:
+                logger.warning("approve_job blocked for %s: Gate 4 readiness failed: %s", job_id, "; ".join(errors))
+                return False
+            asm.approve_video_generation(approver="job_queue")
+
         return self.transition_job(job_id, to_state="APPROVED", from_states=("WAITING_APPROVAL",))
 
     def reject_job(self, job_id: str, reason: str = "Rejected by user") -> bool:

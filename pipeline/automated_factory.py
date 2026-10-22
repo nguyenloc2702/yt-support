@@ -580,9 +580,15 @@ class AutomatedFactory:
 
         try:
             shots = []
+            vi_scenes = []
+            en_scenes = []
+            default_shot_duration = 5.0
+            audit_res = None
+
             if custom_script:
                 # Option 2: Custom script flow
-                auditor = ScriptAuditor()
+                from services.script_auditor import ScriptAuditor, detect_language
+                auditor = ScriptAuditor(algorithm_mode=True)
                 audit_res = auditor.audit_script(custom_script)
                 if not audit_res.is_valid:
                     logger.warning("Custom script for job %s failed audit: %s", job_id, audit_res.issues)
@@ -593,16 +599,24 @@ class AutomatedFactory:
 
                 parsed_scenes = auditor.parse_raw_script(custom_script)
                 target_shots = len(parsed_scenes)
+                detected_lang = detect_language(custom_script)
                 for idx, text in enumerate(parsed_scenes, 1):
                     clean_text = clean_narration_for_tts(text)
                     prompt = sanitize_veo_prompt(clean_text, scene_idx=idx, total_scenes=target_shots)
-                    shots.append({
+                    scene_item = {
                         "index": idx,
                         "text": clean_text,
                         "prompt": prompt,
-                        "duration": 10.0,
+                        "duration": default_shot_duration,
                         "is_key_scene": True,
-                    })
+                        "character_ids": [],
+                    }
+                    if detected_lang == "vi":
+                        vi_scenes.append(scene_item)
+                    else:
+                        en_scenes.append(scene_item)
+
+                shots = vi_scenes if vi_scenes else en_scenes
             else:
                 # Option 1: AI Dual-Script Genesis from YouTube video
                 sub_segments = None
@@ -628,6 +642,10 @@ class AutomatedFactory:
                 target_shots = max(6, min(24, int(total_dur // 15)))
 
                 vi_scenes, en_scenes = build_dual_scripts_from_transcript(sub_segments or [], target_shots=target_shots)
+                for s in vi_scenes:
+                    s["duration"] = default_shot_duration
+                for s in en_scenes:
+                    s["duration"] = default_shot_duration
 
                 # Persist both scripts
                 shots_vi_file = project_dir / "shots_plan_vi.json"
@@ -641,6 +659,24 @@ class AutomatedFactory:
                 else:
                     shots = vi_scenes
 
+                from services.script_auditor import ScriptAuditor
+                audit_res = ScriptAuditor(algorithm_mode=True).audit_script("\n".join(s.get("text", "") for s in shots))
+
+            # Character detection across scripts
+            from pipeline.character_manager import detect_characters_in_text
+            combined_script_text = " ".join(s.get("text", "") for s in vi_scenes) + " " + " ".join(s.get("text", "") for s in en_scenes)
+            detected_chars = detect_characters_in_text(combined_script_text)
+            required_characters = [d["name"] for d in detected_chars]
+
+            # Assign character_ids to shots
+            for s in shots:
+                s_txt = s.get("text", "").lower()
+                s["character_ids"] = [
+                    d["name"].lower().replace(" ", "_")
+                    for d in detected_chars
+                    if d["name"].lower() in s_txt
+                ]
+
             # Save active shots plan
             shots_file = project_dir / "shots_plan.json"
             shots_file.write_text(json.dumps(shots, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -651,6 +687,59 @@ class AutomatedFactory:
             target_voice = chosen_voice or VOICE_MAP.get(detected_lang, VOICE_MAP["vi"])["male"]
             (project_dir / "voice.txt").write_text(target_voice, encoding="utf-8")
 
+            # Initialize 4-Gate Approval State Machine
+            from services.approval_state_machine import ApprovalStateMachine, BeatIntent
+            asm = ApprovalStateMachine(project_dir, job_id)
+            beats_list = []
+            for i in range(1, len(shots) + 1):
+                vi_txt = vi_scenes[i - 1].get("text", "") if (vi_scenes and i - 1 < len(vi_scenes)) else ""
+                en_txt = en_scenes[i - 1].get("text", "") if (en_scenes and i - 1 < len(en_scenes)) else ""
+                shot_chars = shots[i - 1].get("character_ids", [])
+                beats_list.append(BeatIntent(
+                    id=i,
+                    text_vi=vi_txt,
+                    text_en=en_txt,
+                    duration=default_shot_duration,
+                    character_ids=shot_chars,
+                ))
+
+            vi_full = "\n".join(b.text_vi for b in beats_list if b.text_vi)
+            en_full = "\n".join(b.text_en for b in beats_list if b.text_en)
+
+            # Audit report check
+            is_valid_audit = bool(audit_res and audit_res.is_valid) and bool(vi_scenes) and bool(en_scenes)
+            audit_issues = list(audit_res.issues) if audit_res else []
+            if not vi_scenes:
+                audit_issues.append("Kịch bản thiếu bản tiếng Việt (VI).")
+            if not en_scenes:
+                audit_issues.append("Kịch bản thiếu bản tiếng Anh (EN).")
+
+            audit_report = {
+                "is_valid": is_valid_audit,
+                "issues": audit_issues,
+                "total_scenes": len(shots),
+            }
+
+            # Register characters in state machine
+            for d in detected_chars:
+                cid = d["name"].lower().replace(" ", "_")
+                char_shots = [s["index"] for s in shots if cid in s.get("character_ids", [])]
+                asm.register_character(
+                    char_id=cid,
+                    name=d["name"],
+                    description=d.get("context", f"Nhân vật trong kịch bản: {d['name']}"),
+                    shot_ids=char_shots,
+                )
+
+            asm.set_script(
+                script_vi=vi_full,
+                script_en=en_full,
+                beats=beats_list,
+                required_characters=required_characters,
+                audit_report=audit_report,
+            )
+            asm.set_shots_plan(shots)
+
             # Store in database
             self.jq.add_shots_for_job(job_id, shots)
             key_count = sum(1 for s in shots if s["is_key_scene"])
@@ -658,7 +747,7 @@ class AutomatedFactory:
             self.jq.transition_job(
                 job_id,
                 to_state="WAITING_APPROVAL",
-                script_summary=f"Tạo {len(shots)} cảnh AI (10s/cảnh, ngôn ngữ: {detected_lang.upper()}, giọng: {target_voice}).",
+                script_summary=f"Tạo {len(shots)} cảnh AI (ngôn ngữ: {detected_lang.upper()}, giọng: {target_voice}).",
                 script_file=str(shots_file),
             )
 
@@ -676,20 +765,28 @@ class AutomatedFactory:
                             {"text": "🎙 Guy (US)", "callback_data": f"voice:{job_id}:en-US-GuyNeural"},
                         ],
                         [
-                            {"text": "🚀 Duyệt & Bắt Đầu Render", "callback_data": f"approve:{job_id}"},
+                            {"text": "📝 Duyệt Kịch Bản (G1)", "callback_data": f"approve_script:{job_id}"},
+                            {"text": "📊 Tiến Độ 4 Gate", "callback_data": f"gates:{job_id}"},
+                        ],
+                        [
+                            {"text": "🚀 Duyệt Video (G4)", "callback_data": f"approve_video:{job_id}"},
                             {"text": "🚫 Hủy Job", "callback_data": f"reject:{job_id}"},
                         ]
                     ]
                 }
+                char_info = f"👤 Nhân vật phát hiện: <b>{', '.join(required_characters) if required_characters else 'Không có (Documentary thiên nhiên/lịch sử chung)'}</b>\n"
                 approval_msg = (
-                    f"🎬 <b>[MODE 2: CHỜ DUYỆT SHOTS AI & GIỌNG ĐỌC] Job: {job_id}</b>\n\n"
-                    f"📊 Tổng số cảnh: <b>{len(shots)} cảnh (10s/cảnh)</b>\n"
+                    f"🎬 <b>[MODE 2: CHỜ DUYỆT 4 GATE APPROVAL] Job: {job_id}</b>\n\n"
+                    f"📊 Tổng số cảnh: <b>{len(shots)} cảnh</b> ({default_shot_duration}s/cảnh)\n"
                     f"🌟 <b>{key_count} cảnh Veo điện ảnh</b> + 🖼 <b>{broll_count} cảnh Ken Burns</b>\n"
-                    f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b> (Nam tài liệu)\n\n"
-                    f"👉 <b>Hành động:</b>\n"
-                    f"• Bấm nút chọn giọng đọc bên dưới hoặc gõ: <code>/voice {job_id} &lt;voice_id&gt;</code>\n"
-                    f"• Gõ <code>/approve {job_id}</code> (hoặc bấm Duyệt) để kích hoạt sinh video.\n"
-                    f"• Gõ <code>/reject {job_id}</code> để hủy job."
+                    f"{char_info}"
+                    f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b>\n\n"
+                    f"👉 <b>Quy trình 4 Gate kiểm duyệt:</b>\n"
+                    f"1. <b>Gate 1 (Script):</b> Gõ <code>/approve_script {job_id}</code> để chốt kịch bản.\n"
+                    f"2. <b>Gate 2 (Audio):</b> Nghe duyệt audio (<code>/approve_audio_vi {job_id}</code> & <code>/approve_audio_en {job_id}</code>).\n"
+                    f"3. <b>Gate 3 (Character):</b> Gõ <code>/approve_character {job_id} all</code>.\n"
+                    f"4. <b>Gate 4 (Video):</b> Gõ <code>/approve_video {job_id}</code> để khóa manifest và render.\n"
+                    f"• Gõ <code>/gates {job_id}</code> bất kỳ lúc nào để xem bảng tiến độ chi tiết."
                 )
                 self.notifier.send_message(approval_msg, reply_markup=inline_markup)
 
@@ -701,4 +798,133 @@ class AutomatedFactory:
             if self.notifier.is_configured:
                 self.notifier.send_message(f"❌ <b>[LỖI AI GENESIS - {job_id}]:</b> <code>{str(e)[:300]}</code>")
             return job_id
+
+    def generate_gate2_and_gate3_artifacts(self, job_id: str, project_dir: Path):
+        """
+        Runs in background after Gate 1 (Script) approval:
+        1. Parallel synthesis of Audio VI and Audio EN voiceovers via edge-tts.
+        2. Generation / establishment of canonical reference images for required characters.
+        3. Updates state machine and notifies user on Telegram with audio & character sheet previews.
+        """
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        from services.approval_state_machine import ApprovalStateMachine
+        from pipeline.tts import _synthesize_one, _probe_duration
+
+        project_dir = Path(project_dir)
+        asm = ApprovalStateMachine(project_dir, job_id)
+        if not asm.is_script_gate_passed():
+            logger.warning("generate_gate2_and_gate3_artifacts called for %s but Gate 1 not passed", job_id)
+            return
+
+        logger.info("Starting parallel generation of Gate 2 (Audio VI/EN) & Gate 3 (Characters) for %s", job_id)
+
+        def _generate_audio_vi():
+            try:
+                voice_file = project_dir / "voice.txt"
+                voice_vi = voice_file.read_text(encoding="utf-8").strip() if voice_file.exists() else "vi-VN-NamMinhNeural"
+                if not voice_vi.startswith("vi-"):
+                    voice_vi = "vi-VN-NamMinhNeural"
+                out_vi = project_dir / "audio_vi.mp3"
+                txt_vi = asm.script_vi_text
+                if txt_vi:
+                    asyncio.run(_synthesize_one(txt_vi, voice_vi, rate="+0%", volume="+0%", out_path=out_vi))
+                    dur = _probe_duration(out_vi)
+                    asm.set_audio_generated(language="vi", file_path=out_vi, duration=dur, voice_id=voice_vi)
+                    if self.notifier.is_configured:
+                        markup = {
+                            "inline_keyboard": [[
+                                {"text": "🎙 Duyệt Audio VI", "callback_data": f"approve_audio_vi:{job_id}"}
+                            ]]
+                        }
+                        self.notifier.send_message(
+                            f"🎙 <b>[GATE 2 - AUDIO VI XONG]:</b> Job <code>{job_id}</code>\n"
+                            f"• Thời lượng: <b>{dur:.1f}s</b> | Giọng: <code>{voice_vi}</code>\n"
+                            f"👉 Gõ <code>/approve_audio_vi {job_id}</code> hoặc bấm nút bên dưới:",
+                            reply_markup=markup
+                        )
+            except Exception as e:
+                logger.error("Failed to generate audio VI for %s: %s", job_id, e)
+
+        def _generate_audio_en():
+            try:
+                voice_en = "en-US-GuyNeural"
+                out_en = project_dir / "audio_en.mp3"
+                txt_en = asm.script_en_text
+                if txt_en:
+                    asyncio.run(_synthesize_one(txt_en, voice_en, rate="+0%", volume="+0%", out_path=out_en))
+                    dur = _probe_duration(out_en)
+                    asm.set_audio_generated(language="en", file_path=out_en, duration=dur, voice_id=voice_en)
+                    if self.notifier.is_configured:
+                        markup = {
+                            "inline_keyboard": [[
+                                {"text": "🎙 Duyệt Audio EN", "callback_data": f"approve_audio_en:{job_id}"}
+                            ]]
+                        }
+                        self.notifier.send_message(
+                            f"🎙 <b>[GATE 2 - AUDIO EN XONG]:</b> Job <code>{job_id}</code>\n"
+                            f"• Duration: <b>{dur:.1f}s</b> | Voice: <code>{voice_en}</code>\n"
+                            f"👉 Gõ <code>/approve_audio_en {job_id}</code> hoặc bấm nút bên dưới:",
+                            reply_markup=markup
+                        )
+            except Exception as e:
+                logger.error("Failed to generate audio EN for %s: %s", job_id, e)
+
+        def _generate_character_sheets():
+            try:
+                asm.load()
+                for cid, char in asm.characters.items():
+                    char_dir = project_dir / "characters" / cid
+                    char_dir.mkdir(parents=True, exist_ok=True)
+                    ref_path = char_dir / "reference.png"
+                    if not ref_path.exists() or ref_path.stat().st_size < 100:
+                        try:
+                            from PIL import Image, ImageDraw
+                            img = Image.new("RGB", (512, 512), color=(30, 45, 65))
+                            draw = ImageDraw.Draw(img)
+                            draw.text((40, 240), f"Character: {char.name}", fill=(255, 255, 255))
+                            img.save(ref_path)
+                        except Exception:
+                            ref_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 500)
+
+                    asm.set_character_reference(cid, ref_path)
+                    if self.notifier.is_configured:
+                        markup = {
+                            "inline_keyboard": [[
+                                {"text": f"👤 Duyệt {char.name}", "callback_data": f"approve_char:{job_id}:{cid}"}
+                            ]]
+                        }
+                        self.notifier.send_message(
+                            f"👤 <b>[GATE 3 - CHARACTER SHEET XONG]:</b> <b>{char.name}</b> (ID: <code>{cid}</code>)\n"
+                            f"• Xuất hiện ở cảnh: {char.shot_ids}\n"
+                            f"👉 Gõ <code>/approve_character {job_id} {cid}</code> hoặc duyệt tất cả: <code>/approve_character {job_id} all</code>",
+                            reply_markup=markup
+                        )
+            except Exception as e:
+                logger.error("Failed to generate character sheets for %s: %s", job_id, e)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_vi = pool.submit(_generate_audio_vi)
+            f_en = pool.submit(_generate_audio_en)
+            f_char = pool.submit(_generate_character_sheets)
+            f_vi.result()
+            f_en.result()
+            f_char.result()
+
+        logger.info("Finished parallel generation of Gate 2 & Gate 3 artifacts for %s", job_id)
+        if self.notifier.is_configured:
+            summary_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📊 Tiến Độ 4 Gate", "callback_data": f"gates:{job_id}"},
+                        {"text": "🚀 Duyệt Video (G4)", "callback_data": f"approve_video:{job_id}"},
+                    ]
+                ]
+            }
+            self.notifier.send_message(
+                f"🎉 <b>[GATE 2 & GATE 3 ĐÃ TẠO XONG]:</b> Job <code>{job_id}</code>\n"
+                f"Các bản Audio VI, Audio EN và Character Sheets đã được chuẩn bị.\n"
+                f"👉 Hãy nghe duyệt audio và duyệt nhân vật để mở Gate 4 (Video)!",
+                reply_markup=summary_markup
+            )
 

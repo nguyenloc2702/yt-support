@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 from core.logging_config import get_logger
 from pipeline.output_validator import validate_rendered_output
+from pipeline.bgm_manager import BGMManager
+from pipeline.sfx_manager import SFXManager
 
 logger = get_logger("documentary_assembler")
 
@@ -358,42 +360,201 @@ def assemble_documentary(
                 logger.error("Failed to generate per-shot aligned narration: %s", e, exc_info=True)
                 raise RuntimeError(f"Edge-TTS documentary narration synthesis failed: {e}")
 
-        # 4. Mix with BGM if configured and asset available (P1.1: Never use original download.* speech!)
+        # 4. Mix Audio: Algorithm Mode (Multi-track BGM + SFX) or Legacy Fallback
         mixed_audio = target_audio
-        bgm_source_policy = os.environ.get("MODE2_BGM_SOURCE", "asset").lower()
+        
+        # Try to load Algorithm Result for advanced audio planning
+        algo_result_path = project_dir / "algorithm_result.json"
+        if not algo_result_path.exists():
+            candidates = list(project_dir.glob("*algorithm_result.json"))
+            if candidates:
+                algo_result_path = candidates[0]
 
-        # Check for licensed BGM music asset if requested
-        music_asset_path: Optional[Path] = None
-        if bgm_source_policy == "asset":
-            for music_dir in [project_dir / "assets", Path("assets/music"), Path("data/music")]:
-                if music_dir.exists():
-                    found = list(music_dir.glob("*.mp3")) + list(music_dir.glob("*.wav"))
-                    if found:
-                        music_asset_path = found[0]
-                        break
-
-        if target_audio and music_asset_path and music_asset_path.exists():
-            mixed_out = project_dir / "temp_mixed_soundtrack.aac"
+        bgm_mgr: Optional[BGMManager] = None
+        sfx_mgr: Optional[SFXManager] = None
+        
+        if algo_result_path.exists():
             try:
-                cmd_mix = [
-                    "ffmpeg", "-y",
-                    "-i", str(target_audio),
-                    "-stream_loop", "-1", "-i", str(music_asset_path),
-                    "-filter_complex",
-                    f"[0:a]volume=1.0[vocal];[1:a]volume=0.12[bgm];[vocal][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-                    "-map", "[aout]",
-                    "-t", f"{total_video_duration:.3f}",
-                    "-c:a", "aac", "-b:a", "192k",
-                    str(mixed_out)
-                ]
-                res_mix = subprocess.run(cmd_mix, capture_output=True, text=True, timeout=180)
-                if res_mix.returncode == 0 and mixed_out.exists() and mixed_out.stat().st_size > 1000:
-                    mixed_audio = mixed_out
-                    logger.info("✔ Licensed BGM mixed under narration at volume=0.12")
+                algo_data = json.loads(algo_result_path.read_text(encoding="utf-8"))
+                
+                # Initialize BGM Manager
+                raw_bgm = algo_data.get("bgm_tracks", [])
+                if raw_bgm:
+                    bgm_mgr = BGMManager()
+                    for t_dict in raw_bgm:
+                        if isinstance(t_dict, dict):
+                            track_id = t_dict.get("id", f"bgm_{len(bgm_mgr.tracks)}")
+                            mood = t_dict.get("mood", "")
+                            p = Path(t_dict["path"]) if t_dict.get("path") else None
+                            bgm_mgr.add_track(
+                                track_id=track_id,
+                                path=p,
+                                mood=mood,
+                                start_time=float(t_dict.get("start_time", 0.0)),
+                                end_time=float(t_dict.get("end_time", total_video_duration)),
+                                volume_db=float(t_dict.get("volume_db", -20.0)),
+                                beat_role=t_dict.get("beat_role", "")
+                            )
+                    logger.info("Loaded %d pre-configured BGM tracks from algorithm result.", len(bgm_mgr.tracks))
+                elif "sentences" in algo_data and isinstance(algo_data["sentences"], list):
+                    bgm_mgr = BGMManager()
+                    bgm_mgr.create_from_algorithm_result(algo_data["sentences"], total_video_duration)
+                    logger.info("Created %d BGM tracks from algorithm sentences.", len(bgm_mgr.tracks))
+                
+                # Initialize SFX Manager
+                raw_sfx = algo_data.get("sfx_events", [])
+                if raw_sfx:
+                    sfx_mgr = SFXManager()
+                    for evt in raw_sfx:
+                        if isinstance(evt, dict):
+                            sfx_mgr.add_event(
+                                sfx_type=evt.get("sfx_type", ""),
+                                timestamp=float(evt.get("timestamp", 0.0)),
+                                duration=float(evt.get("duration", 0.5)),
+                                volume_db=float(evt.get("volume_db", -15.0))
+                            )
+                    logger.info("Loaded %d pre-configured SFX events from algorithm result.", len(sfx_mgr.events))
+                elif any(k in algo_data for k in ("sentences", "shots", "metaphors", "humor_lines")):
+                    sfx_mgr = SFXManager()
+                    sfx_mgr.create_from_algorithm_result(
+                        algo_data.get("sentences", []),
+                        algo_data.get("shots", []),
+                        algo_data.get("metaphors", []),
+                        algo_data.get("humor_lines", [])
+                    )
+                    logger.info("Created %d SFX events from algorithm result.", len(sfx_mgr.events))
+                    
             except Exception as e:
-                logger.debug("BGM mixing skipped: %s", e)
-        else:
-            logger.info("Mode 2 soundtrack: narration-only (clean AI documentary, no YouTube speech mixed).")
+                logger.warning("Failed to parse algorithm_result.json for audio: %s", e)
+
+        # Execute Advanced Mixing if Managers are present
+        if bgm_mgr or sfx_mgr:
+            try:
+                final_mix_path = project_dir / "temp_advanced_mix.wav"
+                
+                input_args = []
+                filters = []
+                current_input_idx = 0
+                
+                # Add Narration/Vocal track
+                if target_audio:
+                    input_args.extend(["-i", str(target_audio)])
+                    filters.append(f"[{current_input_idx}:a]volume=1.0[vocal]")
+                    vocal_label = "vocal"
+                    current_input_idx += 1
+                else:
+                    vocal_label = None
+
+                # Add BGM Tracks
+                bgm_labels = []
+                if bgm_mgr:
+                    for i, track in enumerate(bgm_mgr.tracks.values()):
+                        track_path = Path(track.path) if track.path else None
+                        if track_path and track_path.exists():
+                            input_args.extend(["-stream_loop", "-1", "-i", str(track_path)])
+                            vol_db = getattr(track, 'volume_db', -20.0)
+                            label = f"bgm_{i}"
+                            st_ms = int(max(0.0, track.start_time) * 1000)
+                            dur = max(0.1, track.end_time - track.start_time)
+                            
+                            f_chain = [f"volume={vol_db}dB"]
+                            if track.start_time > 0 or (track.end_time < total_video_duration and len(bgm_mgr.tracks) > 1):
+                                f_chain.append(f"atrim=start=0:end={dur:.3f}")
+                                if st_ms > 0:
+                                    f_chain.append(f"adelay={st_ms}|{st_ms}")
+                            
+                            filters.append(f"[{current_input_idx}:a]{','.join(f_chain)}[{label}]")
+                            bgm_labels.append(label)
+                            current_input_idx += 1
+
+                # Add SFX Events
+                sfx_labels = []
+                if sfx_mgr:
+                    for j, evt in enumerate(sfx_mgr.events.values()):
+                        sfx_file = sfx_mgr.find_sfx_file(evt.sfx_type)
+                        if sfx_file and sfx_file.exists():
+                            input_args.extend(["-i", str(sfx_file)])
+                            label = f"sfx_{j}"
+                            vol_db = getattr(evt, 'volume_db', -15.0)
+                            st_ms = int(max(0.0, evt.timestamp) * 1000)
+                            dur = max(0.1, getattr(evt, 'duration', 0.5))
+                            f_chain = [
+                                f"volume={vol_db}dB",
+                                f"atrim=start=0:end={dur:.3f}",
+                                f"adelay={st_ms}|{st_ms}"
+                            ]
+                            filters.append(f"[{current_input_idx}:a]{','.join(f_chain)}[{label}]")
+                            sfx_labels.append(label)
+                            current_input_idx += 1
+
+                # Construct Filter Complex
+                all_audio_labels = []
+                if vocal_label:
+                    all_audio_labels.append(vocal_label)
+                all_audio_labels.extend(bgm_labels)
+                all_audio_labels.extend(sfx_labels)
+                
+                # Only execute amix if we actually have music/sfx tracks to mix with vocal
+                if len(all_audio_labels) > 1:
+                    amix_str = ";".join(filters) + ";" + "".join([f"[{l}]" for l in all_audio_labels]) + f"amix=inputs={len(all_audio_labels)}:duration=first:dropout_transition=2[aout]"
+                    
+                    cmd_mix_adv = [
+                        "ffmpeg", "-y",
+                        *input_args,
+                        "-filter_complex", amix_str,
+                        "-map", "[aout]",
+                        "-t", f"{total_video_duration:.3f}",
+                        "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2",
+                        str(final_mix_path)
+                    ]
+                    
+                    res_mix_adv = subprocess.run(cmd_mix_adv, capture_output=True, text=True, timeout=180)
+                    if res_mix_adv.returncode == 0 and final_mix_path.exists():
+                        mixed_audio = final_mix_path
+                        logger.info("✔ Advanced Audio Mix (BGM+SFX+Narration) generated successfully.")
+                    else:
+                        logger.error("Advanced Mix failed: %s", res_mix_adv.stderr[-300:])
+                else:
+                    logger.info("Advanced Audio Mix skipped: no matching BGM or SFX asset files found on disk.")
+                        
+            except Exception as e:
+                logger.error("Error during advanced audio mixing: %s", e, exc_info=True)
+
+        # Legacy Single BGM Fallback
+        if mixed_audio == target_audio:
+            bgm_source_policy = os.environ.get("MODE2_BGM_SOURCE", "asset").lower()
+            music_asset_path: Optional[Path] = None
+            
+            if bgm_source_policy == "asset":
+                for music_dir in [project_dir / "assets", Path("assets/music"), Path("data/music")]:
+                    if music_dir.exists():
+                        found = list(music_dir.glob("*.mp3")) + list(music_dir.glob("*.wav"))
+                        if found:
+                            music_asset_path = found[0]
+                            break
+
+            if target_audio and music_asset_path and music_asset_path.exists():
+                mixed_out = project_dir / "temp_mixed_soundtrack.aac"
+                try:
+                    cmd_mix = [
+                        "ffmpeg", "-y",
+                        "-i", str(target_audio),
+                        "-stream_loop", "-1", "-i", str(music_asset_path),
+                        "-filter_complex",
+                        f"[0:a]volume=1.0[vocal];[1:a]volume=0.12[bgm];[vocal][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                        "-map", "[aout]",
+                        "-t", f"{total_video_duration:.3f}",
+                        "-c:a", "aac", "-b:a", "192k",
+                        str(mixed_out)
+                    ]
+                    res_mix = subprocess.run(cmd_mix, capture_output=True, text=True, timeout=180)
+                    if res_mix.returncode == 0 and mixed_out.exists() and mixed_out.stat().st_size > 1000:
+                        mixed_audio = mixed_out
+                        logger.info("✔ Licensed BGM mixed under narration at volume=0.12 (Legacy)")
+                except Exception as e:
+                    logger.debug("Legacy BGM mixing skipped: %s", e)
+            else:
+                logger.info("Mode 2 soundtrack: narration-only (clean AI documentary, no YouTube speech mixed).")
 
         # 5. Build Final FFmpeg concat & mux command
         if temp_assembled.exists():

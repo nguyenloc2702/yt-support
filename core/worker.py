@@ -165,11 +165,40 @@ class VideoAutomationWorker:
             attempts = shot.get("attempts", 0)
             is_key_scene = bool(shot.get("is_key_scene", 0))
 
+            # Verify 4-gate manifest integrity if state machine exists (P0.5)
+            job_obj = self.jq.get_job(job_id)
+            p_dir = Path(job_obj.get("project_dir") or f"data/automated_runs/{job_id}") if job_obj else Path(f"data/automated_runs/{job_id}")
+            state_file = p_dir / "approval_state.json"
+            ref_images = []
+            if state_file.exists():
+                from services.approval_state_machine import ApprovalStateMachine, VideoReadinessStatus
+                asm = ApprovalStateMachine(p_dir, job_id)
+                valid, err = asm.verify_manifest_integrity()
+                if not valid:
+                    logger.error("❌ Manifest integrity check failed for job %s: %s. Refusing to generate!", job_id, err)
+                    self.jq.mark_shot_failed(shot_id, f"Manifest integrity failed: {err}")
+                    continue
+                if asm.video_status == VideoReadinessStatus.APPROVED:
+                    asm.mark_generating()
+
+                # Read prompt and reference images strictly from locked manifest
+                if asm.active_manifest:
+                    m_shot = next((s for s in asm.active_manifest.shot_manifest if s.get("index") == shot_idx), None)
+                    if m_shot:
+                        prompt = m_shot.get("prompt") or prompt
+                        ref_images = [Path(p) for p in m_shot.get("reference_images", []) if Path(p).is_file()]
+                        # Fail-closed check: if shot declares character but image is missing, do not generate!
+                        if m_shot.get("character_ids") and not ref_images:
+                            err_msg = f"Shot {shot_idx} has character_ids {m_shot.get('character_ids')} but no valid reference images found on disk!"
+                            logger.error("❌ Fail-closed violation: %s", err_msg)
+                            self.jq.mark_shot_failed(shot_id, err_msg)
+                            continue
+
             # Guarded transition from APPROVED -> PROCESSING upon starting shot (P0.4)
             self.jq.transition_job(job_id, to_state="PROCESSING", from_states=("APPROVED",))
 
             out_filename = f"shot_{shot_idx:03d}.mp4"
-            target_out_dir = Path("data/automated_runs") / job_id / "shots"
+            target_out_dir = p_dir / "shots"
             target_out_dir.mkdir(parents=True, exist_ok=True)
             target_out_path = target_out_dir / out_filename
 
@@ -221,7 +250,12 @@ class VideoAutomationWorker:
 
                 start_time = time.time()
                 with self.jq.heavy_lock_lease(job_id, interval=15.0):
-                    res = self.fallback_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_path)
+                    res = self.fallback_provider.generate(
+                        prompt=prompt,
+                        out_path=target_out_path,
+                        session_file=session_path,
+                        ref_image=ref_images[0] if ref_images else None,
+                    )
                 duration = time.time() - start_time
 
             # 3. Handle generation result
@@ -312,12 +346,12 @@ class VideoAutomationWorker:
 
     def _assemble_and_finalize_documentary(self, job_id: str, summary: dict):
         """Assembles all generated shots into a final documentary video and uploads to Google Drive with idempotent recovery."""
-        project_dir = Path("data/automated_runs") / job_id
-        final_video = project_dir / f"documentary_final_{job_id}.mp4"
-
         job = self.jq.get_job(job_id)
         if not job:
             return
+        project_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+        final_video = project_dir / f"documentary_final_{job_id}.mp4"
+
         current_status = job.get("status")
         if current_status in ("COMPLETED", "CANCELLED"):
             return
@@ -421,6 +455,13 @@ class VideoAutomationWorker:
                     final_video=str(final_video),
                     drive_url=drive_url,
                 )
+                if (project_dir / "approval_state.json").exists():
+                    try:
+                        from services.approval_state_machine import ApprovalStateMachine
+                        asm = ApprovalStateMachine(project_dir, job_id)
+                        asm.mark_completed()
+                    except Exception as e:
+                        logger.warning("Failed to mark state machine completed for %s: %s", job_id, e)
                 # Safe to clean local shots only after DB state is committed
                 shutil.rmtree(project_dir / "shots", ignore_errors=True)
                 final_video.unlink(missing_ok=True)

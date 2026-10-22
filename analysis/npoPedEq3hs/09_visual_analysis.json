@@ -1,0 +1,41 @@
+{
+  "video_id": "npoPedEq3hs",
+  "channel": "Crayon Capital",
+  "background": {
+    "type": "off-white textured sketchbook paper",
+    "mean_rgb": [
+      86,
+      92,
+      88
+    ],
+    "hex": "#565c58",
+    "is_white_paper": false
+  },
+  "palette": {
+    "dominant_foreground_hex": [
+      "#303638",
+      "#edf1ee",
+      "#737069",
+      "#e8cf5c",
+      "#0d0e16",
+      "#a3b0ac"
+    ],
+    "saturation_level": "medium_low",
+    "mean_saturation": 0.267
+  },
+  "line_art": {
+    "edge_density": 0.039,
+    "style": "rough crayon & colored pencil strokes with noticeable paper grain texture",
+    "shading": "flat 2D with minimal rough crayon cross-hatch shading, zero 3D specular/gloss"
+  },
+  "composition": {
+    "framing": "central character with expansive negative space (60-70% background unoccupied)",
+    "elements_per_frame": "1-3 focal elements (character + metaphoric object or text)",
+    "camera_motion_inferred": [
+      "ken_burns_push_in",
+      "line_wobble",
+      "slide_in",
+      "pop_scale"
+    ]
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "video_id": "npoPedEq3hs",
+  "total_segments": 8,
+  "segments": [
+    {
+      "segment_id": 1,
+      "role": "hook",
+      "title": "The Trillionaire Paradox & The $1 Hook",
+      "start": 0.0,
+      "end": 32.4,
+      "tension_0_10": 8,
+      "summary": "Establishes the extreme disparity: SpaceX goes public in 2026, Elon becomes first trillionaire. An ordinary person with $1 is closer to the 2nd richest person than that person is to Elon. Hook ends with: 'Fired from both companies he built, bet everything on rockets that kept exploding, and somehow ended up here.'"
+    },
+    {
+      "segment_id": 2,
+      "role": "setup_childhood",
+      "title": "Childhood in South Africa & Blastar",
+      "start": 32.4,
+      "end": 145.0,
+      "tension_0_10": 4,
+      "summary": "Born in Pretoria (1971), difficult childhood, bullying, devouring encyclopedia, teaching himself to code and selling video game Blastar for $500 at age 12. Escaping to Canada with $2,000."
+    },
+    {
+      "segment_id": 3,
+      "role": "first_win_zip2",
+      "title": "Zip2: Sleeping on the Office Floor to $22 Million",
+      "start": 145.0,
+      "end": 285.0,
+      "tension_0_10": 6,
+      "summary": "Dropping out of Stanford after 2 days (1995). Building Zip2 (yellow pages + internet map). Living in office, showering at YMCA. Board strips him of CEO role. Sold to Compaq for $307M, Elon pockets $22M. Buys McLaren F1."
+    },
+    {
+      "segment_id": 4,
+      "role": "rising_paypal",
+      "title": "X.com & PayPal: Coup on a Honeymoon Flight",
+      "start": 285.0,
+      "end": 450.0,
+      "tension_0_10": 7,
+      "summary": "Puts $12M into X.com (online bank). Merges with Peter Thiel's Confinity. Rebranded to PayPal. Board stage a coup while Elon is on an airplane for his honeymoon and fires him. Company sold to eBay for $1.5B, Elon nets $180M."
+    },
+    {
+      "segment_id": 5,
+      "role": "double_crisis_setup",
+      "title": "SpaceX & Tesla: Betting Everything (2002-2007)",
+      "start": 450.0,
+      "end": 640.0,
+      "tension_0_10": 8,
+      "summary": "Trips to Russia to buy ICBMs (spit on by Russian engineers). Founds SpaceX with $100M. Invests in Tesla Motors. Falcon 1 launch 1 explodes (corrosion). Launch 2 fails to reach orbit. Launch 3 collides with stage 1. Running out of money."
+    },
+    {
+      "segment_id": 6,
+      "role": "climax_crisis_2008",
+      "title": "Christmas 2008: 72 Hours from Complete Bankruptcy",
+      "start": 640.0,
+      "end": 840.0,
+      "tension_0_10": 10,
+      "summary": "Financial crisis. Both SpaceX and Tesla bleeding cash. Falcon 1 launch 4 is the last bullet: success on Sept 28, 2008! But Tesla is hours from missing payroll. Dec 23, 2008: NASA awards $1.6B contract. Dec 24 (Christmas Eve): Tesla investors close bridge loan with minutes to spare."
+    },
+    {
+      "segment_id": 7,
+      "role": "scaling_dominance",
+      "title": "The Empire Scaling: Reusability, Model 3 Hell & Valuation Surges",
+      "start": 840.0,
+      "end": 1040.0,
+      "tension_0_10": 6,
+      "summary": "Falcon 9 landing boosters on drone ships (cutting launch costs by 90%). Tesla Model S, Model X, and 'Production Hell' of Model 3. Tesla becomes most valuable carmaker. Starlink and space internet monopoly."
+    },
+    {
+      "segment_id": 8,
+      "role": "payoff_moral",
+      "title": "The Trillionaire Payoff & Callback to the $1",
+      "start": 1040.0,
+      "end": 1150.0,
+      "tension_0_10": 7,
+      "summary": "Returning to 2026: The math of compound high-risk bets. Callback to the opening hook ($1 closer to 2nd richest than 2nd richest to Elon). Closing moral: What separates an insane gamble from visionary genius is just one launch that doesn't blow up."
+    }
+  ]
+}

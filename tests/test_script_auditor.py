@@ -145,3 +145,15 @@ def test_build_dual_scripts_from_transcript():
     # Check language separation
     assert detect_language(vi_scenes[0]["text"]) == "vi"
     assert detect_language(en_scenes[0]["text"]) == "en"
+
+
+def test_audit_algorithm_mode_pacing_and_duration():
+    # 40 scenes, each 4 to 6 words
+    auditor = ScriptAuditor(algorithm_mode=True)
+    raw = "\n".join([f"{i}. Đây là cảnh ngắn {i}." for i in range(1, 41)])
+    res = auditor.audit_script(raw)
+    assert res.is_valid is True
+    assert len(res.scenes) == 40
+    assert res.scenes[0]["duration"] == 4.75
+    assert res.scenes[0]["word_count"] <= 6
+

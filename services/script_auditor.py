@@ -24,11 +24,20 @@ from services.prompt_sanitizer import (
 
 logger = logging.getLogger("script_auditor")
 
-# Target pacing for 10-second Veo shots
+# Target pacing for 10-second Veo shots (Legacy Mode)
 MIN_WORDS_PER_SHOT = 6
 RECOMMENDED_WORDS_PER_SHOT = (14, 25)
 MAX_WORDS_PER_SHOT = 28
 DEFAULT_TARGET_SHOTS = 24
+
+# Algorithm Mode constants (UNIVERSAL_VIDEO_ALGORITHM)
+# Target: 4.5-5s shots with <=6 words per shot
+MIN_WORDS_PER_SHOT_ALGORITHM = 4
+RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (4, 6)
+MAX_WORDS_PER_SHOT_ALGORITHM = 6
+TARGET_SHOT_DURATION_ALGORITHM = 4.75  # seconds (4.5-5s range)
+MIN_SHOT_DURATION_ALGORITHM = 4.0
+MAX_SHOT_DURATION_ALGORITHM = 6.0
 
 # Voice mapping defaults (User requirement: prioritize Male voices)
 VOICE_MAP = {
@@ -207,8 +216,21 @@ def export_segments_to_txt(
 class ScriptAuditor:
     """Parses, verifies, and audits scripts before video generation."""
 
-    def __init__(self, target_scenes: int = DEFAULT_TARGET_SHOTS):
+    def __init__(self, target_scenes: int = DEFAULT_TARGET_SHOTS, algorithm_mode: bool = False):
         self.target_scenes = target_scenes
+        self.algorithm_mode = algorithm_mode
+        
+        # Use algorithm constants if in algorithm mode
+        if algorithm_mode:
+            self.min_words_per_shot = MIN_WORDS_PER_SHOT_ALGORITHM
+            self.recommended_words_per_shot = RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
+            self.max_words_per_shot = MAX_WORDS_PER_SHOT_ALGORITHM
+            self.target_shot_duration = TARGET_SHOT_DURATION_ALGORITHM
+        else:
+            self.min_words_per_shot = MIN_WORDS_PER_SHOT
+            self.recommended_words_per_shot = RECOMMENDED_WORDS_PER_SHOT
+            self.max_words_per_shot = MAX_WORDS_PER_SHOT
+            self.target_shot_duration = 10.0
 
     def _parse_srt_or_vtt(self, text: str) -> List[str]:
         """Parses SRT or VTT content, stripping indices, timecodes, and HTML tags."""
@@ -388,10 +410,11 @@ class ScriptAuditor:
         # 1. Check scene count
         num_scenes = len(raw_scenes)
         min_required = min(6, self.target_scenes)
+        max_allowed = max(120, self.target_scenes + 20) if self.algorithm_mode else max(30, self.target_scenes + 6)
         if num_scenes < min_required:
             issues.append(f"Kịch bản quá ngắn (chỉ có {num_scenes} cảnh). Yêu cầu tối thiểu {min_required} cảnh.")
             suggestions.append(f"Bạn hãy bổ sung thêm các chi tiết mô tả câu chuyện để đạt ít nhất {min_required} cảnh.")
-        elif num_scenes > max(30, self.target_scenes + 6):
+        elif num_scenes > max_allowed:
             issues.append(f"Kịch bản quá dài ({num_scenes} cảnh).")
             suggestions.append(f"Hãy cô đọng câu chuyện lại thành khoảng {self.target_scenes} cảnh.")
 
@@ -406,9 +429,9 @@ class ScriptAuditor:
             words = cleaned_text.split()
             word_count = len(words)
 
-            if word_count > MAX_WORDS_PER_SHOT:
+            if word_count > self.max_words_per_shot:
                 too_long_scenes.append((idx, word_count))
-            elif word_count < MIN_WORDS_PER_SHOT:
+            elif word_count < self.min_words_per_shot:
                 too_short_scenes.append((idx, word_count))
 
             # Safety check against sensitive patterns
@@ -425,31 +448,40 @@ class ScriptAuditor:
                 "index": idx,
                 "text": cleaned_text,
                 "prompt": prompt,
-                "duration": 10.0,
+                "duration": self.target_shot_duration,
                 "is_key_scene": True,
                 "word_count": word_count,
             })
 
         if too_long_scenes:
+            max_words_display = self.max_words_per_shot
             samples = ", ".join(f"Cảnh {i} ({cnt} từ)" for i, cnt in too_long_scenes[:4])
             if len(too_long_scenes) > 4:
                 samples += f" và {len(too_long_scenes) - 4} cảnh khác"
             issues.append(
-                f"Có {len(too_long_scenes)} cảnh quá dài (>28 từ) khiến giọng đọc bị tua nhanh hoặc cắt đuôi: {samples}."
+                f"Có {len(too_long_scenes)} cảnh quá dài (>{max_words_display} từ) khiến giọng đọc bị tua nhanh hoặc cắt đuôi: {samples}."
             )
-            suggestions.append("Rút gọn các câu trên xuống khoảng 18-24 từ để vừa vặn thời lượng 10 giây mỗi cảnh.")
+            if self.algorithm_mode:
+                suggestions.append(f"Rút gọn các câu trên xuống ≤{max_words_display} từ cho phù hợp với thuật toán 4.5-5s.")
+            else:
+                suggestions.append("Rút gọn các câu trên xuống khoảng 18-24 từ để vừa vặn thời lượng 10 giây mỗi cảnh.")
 
         if too_short_scenes:
+            min_words_display = self.min_words_per_shot
             samples = ", ".join(f"Cảnh {i} ({cnt} từ)" for i, cnt in too_short_scenes[:4])
             issues.append(
-                f"Có {len(too_short_scenes)} cảnh quá ngắn (<6 từ): {samples}."
+                f"Có {len(too_short_scenes)} cảnh quá ngắn (<{min_words_display} từ): {samples}."
             )
-            suggestions.append("Bổ sung thêm 1-2 từ miêu tả cho các cảnh này để lời bình đều đặn hơn.")
+            if self.algorithm_mode:
+                suggestions.append(f"Bổ sung thêm từ để đạt tối thiểu {min_words_display} từ cho phù hợp với thuật toán.")
+            else:
+                suggestions.append("Bổ sung thêm 1-2 từ miêu tả cho các cảnh này để lời bình đều đặn hơn.")
 
         is_valid = len(issues) == 0
 
         # Auto-rebalance if it's just scene count slightly off and pacing is fine
-        if not is_valid and num_scenes >= 6 and len(too_long_scenes) == 0 and num_scenes <= 30:
+        max_pacing_allowed = 120 if self.algorithm_mode else 30
+        if not is_valid and num_scenes >= 6 and len(too_long_scenes) == 0 and num_scenes <= max_pacing_allowed:
             # Warning only, allow user to proceed
             pass
 

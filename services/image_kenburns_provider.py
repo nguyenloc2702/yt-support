@@ -9,6 +9,7 @@ Used for:
 
 import logging
 from pathlib import Path
+import shutil
 import subprocess
 import time
 from typing import Optional
@@ -32,6 +33,8 @@ class ImageKenBurnsProvider(VideoProvider):
         prompt: str,
         out_path: Path,
         session_file: Optional[Path] = None,
+        ref_image: Optional[Path] = None,
+        **kwargs,
     ) -> ProviderResult:
         start_time = time.time()
         safe_prompt = sanitize_veo_prompt(prompt)
@@ -42,8 +45,17 @@ class ImageKenBurnsProvider(VideoProvider):
         has_image = False
         is_placeholder = False
 
+        # Priority 0: Use canonical character reference image if provided
+        if ref_image and Path(ref_image).is_file():
+            try:
+                shutil.copyfile(str(ref_image), str(img_path))
+                has_image = True
+                logger.info("Ken Burns using canonical character reference image: %s", ref_image)
+            except Exception as e:
+                logger.warning("Failed to copy reference image %s: %s", ref_image, e)
+
         # Attempt to generate image via gemini_webapi if session provided
-        if session_file and session_file.exists():
+        if not has_image and session_file and session_file.exists():
             try:
                 import asyncio
                 from gemini_webapi import GeminiClient

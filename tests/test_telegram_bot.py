@@ -190,10 +190,27 @@ def test_approve_and_reject_flow(mock_bot: TelegramCommandBot):
     assert job2["status"] == "CANCELLED"
 
 
-def test_approve_mode2_does_not_trigger_reup_handler(mock_bot: TelegramCommandBot):
+def test_approve_mode2_does_not_trigger_reup_handler(mock_bot: TelegramCommandBot, tmp_path: Path):
     # Mode 2 (remake / ai_genesis)
-    job_id = mock_bot.jq.create_job("remake", "https://youtube.com/watch?v=123")
+    p_dir = tmp_path / "mode2_test"
+    p_dir.mkdir(parents=True, exist_ok=True)
+    job_id = mock_bot.jq.create_job("remake", "https://youtube.com/watch?v=123", project_dir=str(p_dir))
     mock_bot.jq.update_job_status(job_id, "WAITING_APPROVAL")
+
+    # Set up 4-gate approval state so that /approve can proceed
+    from services.approval_state_machine import ApprovalStateMachine, BeatIntent
+    asm = ApprovalStateMachine(p_dir, job_id)
+    asm.set_script("Kịch bản VI", "Script EN", beats=[BeatIntent(id=1, text_vi="A", text_en="B", duration=5.0)])
+    asm.approve_script()
+    a_vi = p_dir / "a_vi.wav"
+    a_en = p_dir / "a_en.wav"
+    a_vi.write_bytes(b"RIFF" + b"\x00" * 200)
+    a_en.write_bytes(b"RIFF" + b"\x00" * 200)
+    asm.set_audio_generated("vi", a_vi, duration=5.0)
+    asm.set_audio_generated("en", a_en, duration=5.0)
+    asm.approve_audio("vi")
+    asm.approve_audio("en")
+    asm.set_shots_plan([{"index": 1, "prompt": "shot 1", "duration": 5.0}])
 
     approve_handler = MagicMock()
     mock_bot.on_approve_handler = approve_handler

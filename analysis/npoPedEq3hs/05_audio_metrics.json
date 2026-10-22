@@ -1,0 +1,24 @@
+{
+  "video_id": "npoPedEq3hs",
+  "audio": {
+    "integrated_loudness_lufs": -18.3,
+    "loudness_range_lra": 3.8,
+    "true_peak_dbfs": 0.0,
+    "bgm_estimated_level_db": -36.3
+  },
+  "speech_pacing": {
+    "total_words": 2755,
+    "total_duration_sec": 1150.0,
+    "speaking_time_sec": 894.7,
+    "speech_time_ratio_pct": 77.8,
+    "wpm_effective_speech": 184.8,
+    "wpm_overall_video": 143.7,
+    "mean_sentence_length_words": 7.9,
+    "median_sentence_length_words": 6.0,
+    "short_sentences_count": 190,
+    "pct_short_sentences_le_6_words": 54.4,
+    "mean_gap_between_sentences_ms": 713.0,
+    "dramatic_pauses_gte_600ms_count": 222,
+    "dramatic_pauses_per_minute": 11.58
+  }
+}

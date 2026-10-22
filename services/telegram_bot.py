@@ -96,6 +96,11 @@ class TelegramCommandBot:
         return self._factory
 
     @property
+    def factory(self):
+        """Alias for automated_factory."""
+        return self.automated_factory
+
+    @property
     def is_configured(self) -> bool:
         return bool(self.token and self.allowed_chat_id)
 
@@ -138,21 +143,25 @@ class TelegramCommandBot:
                     # 1. Handle Inline Button Clicks (Callback Query)
                     cb = update.get("callback_query")
                     if cb:
-                        sender_id = str(cb.get("from", {}).get("id", ""))
-                        if not self.allowed_chat_id or sender_id == self.allowed_chat_id:
+                        sender_user_id = str(cb.get("from", {}).get("id", ""))
+                        sender_chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+                        if not self.allowed_chat_id or sender_user_id == self.allowed_chat_id or sender_chat_id == self.allowed_chat_id:
                             self._handle_callback_query(cb)
+                        else:
+                            logger.warning("Ignored callback query from unauthorized sender: user=%s, chat=%s", sender_user_id, sender_chat_id)
                         continue
 
                     # 2. Handle Messages
                     msg = update.get("message", {})
                     chat = msg.get("chat", {})
-                    sender_id = str(chat.get("id", ""))
+                    sender_chat_id = str(chat.get("id", ""))
+                    sender_user_id = str(msg.get("from", {}).get("id", ""))
                     text = msg.get("text", "").strip()
                     doc = msg.get("document")
 
-                    # Security check: only allow commands from the designated chat_id
-                    if self.allowed_chat_id and sender_id != self.allowed_chat_id:
-                        logger.warning("Ignored message from unauthorized chat_id: %s", sender_id)
+                    # Security check: only allow commands from the designated chat_id or user_id
+                    if self.allowed_chat_id and (sender_chat_id != self.allowed_chat_id and sender_user_id != self.allowed_chat_id):
+                        logger.warning("Ignored message from unauthorized chat_id/user_id: chat=%s, user=%s", sender_chat_id, sender_user_id)
                         continue
 
                     if doc:
@@ -191,6 +200,31 @@ class TelegramCommandBot:
             job_id = parts[1]
             voice_id = parts[2]
             self._handle_command(f"/voice {job_id} {voice_id}")
+
+        elif action == "approve_script" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/approve_script {job_id}")
+
+        elif action == "gates" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/gates {job_id}")
+
+        elif action == "approve_audio_vi" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/approve_audio_vi {job_id}")
+
+        elif action == "approve_audio_en" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/approve_audio_en {job_id}")
+
+        elif action == "approve_char" and len(parts) >= 2:
+            job_id = parts[1]
+            char_id = parts[2] if len(parts) >= 3 else "all"
+            self._handle_command(f"/approve_character {job_id} {char_id}")
+
+        elif action == "approve_video" and len(parts) >= 2:
+            job_id = parts[1]
+            self._handle_command(f"/approve_video {job_id}")
 
         elif action == "approve" and len(parts) >= 2:
             job_id = parts[1]
@@ -714,6 +748,218 @@ class TelegramCommandBot:
             )
 
 
+        elif cmd == "/gates":
+            if len(parts) < 2:
+                self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/gates &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job <code>{job_id}</code>.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            self.notifier.send_message(asm.format_telegram_status())
+
+        elif cmd == "/approve_script":
+            if len(parts) < 2:
+                self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/approve_script &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job <code>{job_id}</code>.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            ok, errs = asm.approve_script(approver="telegram")
+            if ok:
+                self.notifier.send_message(
+                    f"✅ <b>[GATE 1 - KỊCH BẢN ĐÃ DUYỆT]:</b> Job <code>{job_id}</code> (v{asm.script_version})!\n"
+                    f"🚀 Đang tiến hành tạo Audio VI/EN và Character Sheets song song...\n"
+                    f"👉 Gõ <code>/gates {job_id}</code> để theo dõi tiến độ."
+                )
+                if self.factory:
+                    self._executor.submit(self.factory.generate_gate2_and_gate3_artifacts, job_id, p_dir)
+            else:
+                self.notifier.send_message(f"⚠️ <b>[GATE 1 LỖI]:</b>\n" + "\n".join(f"• {e}" for e in errs))
+
+        elif cmd == "/reject_script":
+            if len(parts) < 2:
+                self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/reject_script &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job or job.get("status") not in ("WAITING_APPROVAL", "QUEUED"):
+                self.notifier.send_message(f"⚠️ Không thể từ chối kịch bản: Job <code>{job_id}</code> không tồn tại hoặc không ở trạng thái chờ duyệt.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            asm.reject_script(reason="Rejected via Telegram", approver="telegram")
+            self.notifier.send_message(f"🚫 <b>[GATE 1]:</b> Đã từ chối Kịch bản Job <code>{job_id}</code>.")
+
+        elif cmd in ("/approve_audio_vi", "/approve_audio_en"):
+            if len(parts) < 2:
+                self.notifier.send_message(f"⚠️ Vui lòng chỉ định mã Job: <code>{cmd} &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job <code>{job_id}</code>.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            lang = "vi" if "vi" in cmd else "en"
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            ok, errs = asm.approve_audio(language=lang, approver="telegram")
+            if ok:
+                status_note = "🎉 Cả hai bản VI và EN đã sẵn sàng!" if asm.is_audio_gate_passed() else "⏳ Còn chờ bản ngôn ngữ còn lại."
+                self.notifier.send_message(
+                    f"🎙 <b>[GATE 2 - AUDIO {lang.upper()} ĐÃ DUYỆT]:</b> Job <code>{job_id}</code>!\n"
+                    f"{status_note}\n"
+                    f"👉 Gõ <code>/gates {job_id}</code> để kiểm tra tổng thể."
+                )
+            else:
+                self.notifier.send_message(f"⚠️ <b>[GATE 2 LỖI AUDIO {lang.upper()}]:</b>\n" + "\n".join(f"• {e}" for e in errs))
+
+        elif cmd in ("/reject_audio_vi", "/reject_audio_en"):
+            if len(parts) < 2:
+                self.notifier.send_message(f"⚠️ Vui lòng chỉ định mã Job: <code>{cmd} &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job or job.get("status") not in ("WAITING_APPROVAL", "QUEUED"):
+                self.notifier.send_message(f"⚠️ Không thể từ chối audio: Job <code>{job_id}</code> không tồn tại hoặc không ở trạng thái chờ duyệt.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            lang = "vi" if "vi" in cmd else "en"
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            asm.reject_audio(language=lang, reason="Rejected via Telegram", approver="telegram")
+            self.notifier.send_message(f"🚫 <b>[GATE 2]:</b> Đã từ chối Audio {lang.upper()} cho Job <code>{job_id}</code>.")
+
+        elif cmd in ("/approve_character", "/approve_char"):
+            if len(parts) < 2:
+                self.notifier.send_message("⚠️ Cú pháp: <code>/approve_character &lt;job_id&gt; [char_id|all]</code>")
+                return
+            job_id = parts[1]
+            target_char = parts[2].strip() if len(parts) > 2 else "all"
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job <code>{job_id}</code>.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            if target_char.lower() == "all":
+                ok, errs = asm.approve_all_characters(approver="telegram")
+            else:
+                ok, errs = asm.approve_character(target_char, approver="telegram")
+            if ok:
+                self.notifier.send_message(f"👤 <b>[GATE 3 - CHARACTER ĐÃ DUYỆT]:</b> Job <code>{job_id}</code> ({target_char})!")
+            else:
+                self.notifier.send_message(f"⚠️ <b>[GATE 3 LỖI NHÂN VẬT]:</b>\n" + "\n".join(f"• {e}" for e in errs))
+
+        elif cmd in ("/reject_character", "/reject_char"):
+            if len(parts) < 3:
+                self.notifier.send_message("⚠️ Cú pháp: <code>/reject_character &lt;job_id&gt; &lt;char_id&gt; [reason]</code>")
+                return
+            job_id = parts[1]
+            char_id = parts[2]
+            reason = " ".join(parts[3:]) if len(parts) > 3 else "Rejected via Telegram"
+            job = self.jq.get_job(job_id)
+            if not job or job.get("status") not in ("WAITING_APPROVAL", "QUEUED"):
+                self.notifier.send_message(f"⚠️ Không thể từ chối nhân vật: Job <code>{job_id}</code> không ở trạng thái chờ duyệt.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            asm.reject_character(char_id, reason=reason, approver="telegram")
+            self.notifier.send_message(f"🚫 <b>[GATE 3]:</b> Đã từ chối nhân vật <code>{char_id}</code> cho Job <code>{job_id}</code>.")
+
+        elif cmd == "/replace_character_ref":
+            if len(parts) < 4:
+                self.notifier.send_message("⚠️ Cú pháp: <code>/replace_character_ref &lt;job_id&gt; &lt;char_id&gt; &lt;file_path&gt;</code>")
+                return
+            job_id = parts[1]
+            char_id = parts[2]
+            ref_path = Path(parts[3])
+            job = self.jq.get_job(job_id)
+            if not job or not ref_path.exists():
+                self.notifier.send_message("❌ Job hoặc file ảnh tham chiếu không tồn tại.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            try:
+                asm.set_character_reference(char_id, ref_path)
+                self.notifier.send_message(f"🔄 <b>[GATE 3]:</b> Đã cập nhật ảnh tham chiếu mới cho <code>{char_id}</code>. Trạng thái đã reset về chờ duyệt.")
+            except Exception as e:
+                self.notifier.send_message(f"❌ Lỗi: {e}")
+
+        elif cmd == "/edit_beat":
+            if len(parts) < 4:
+                self.notifier.send_message("⚠️ Cú pháp: <code>/edit_beat &lt;job_id&gt; &lt;beat_id&gt; &lt;text_vi&gt; [| &lt;text_en&gt;]</code>")
+                return
+            job_id = parts[1]
+            try:
+                beat_id = int(parts[2])
+            except ValueError:
+                self.notifier.send_message("❌ Beat ID phải là số nguyên.")
+                return
+            content = " ".join(parts[3:])
+            if "|" in content:
+                t_vi, t_en = content.split("|", 1)
+                text_vi = t_vi.strip()
+                text_en = t_en.strip()
+            else:
+                text_vi = content.strip()
+                text_en = None
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job <code>{job_id}</code>.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            try:
+                asm.edit_beat(beat_id, new_text_vi=text_vi, new_text_en=text_en)
+                self.notifier.send_message(
+                    f"✏️ <b>[GATE 1]:</b> Đã cập nhật beat {beat_id} cho Job <code>{job_id}</code> (v{asm.script_version}).\n"
+                    f"Gate 1, Audio và Video Readiness đã được reset theo quy tắc fail-closed."
+                )
+            except Exception as e:
+                self.notifier.send_message(f"❌ Lỗi khi sửa beat: {e}")
+
+        elif cmd in ("/approve_video", "/approve_video_generation"):
+            if len(parts) < 2:
+                self.notifier.send_message("⚠️ Cú pháp: <code>/approve_video &lt;job_id&gt;</code>")
+                return
+            job_id = parts[1]
+            job = self.jq.get_job(job_id)
+            if not job:
+                self.notifier.send_message(f"❌ Không tìm thấy Job <code>{job_id}</code>.")
+                return
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            from services.approval_state_machine import ApprovalStateMachine
+            asm = ApprovalStateMachine(p_dir, job_id)
+            ok, errs = asm.approve_video_generation(approver="telegram")
+            if ok:
+                transitioned = self.jq.transition_job(job_id, to_state="APPROVED", from_states=("WAITING_APPROVAL",))
+                if transitioned:
+                    self.notifier.send_message(
+                        f"🚀 <b>[GATE 4 - VIDEO GENERATION ĐÃ KHÓA & PHÊ DUYỆT]:</b> Job <code>{job_id}</code>!\n"
+                        f"🔒 Manifest: <code>{asm.active_manifest.manifest_id if asm.active_manifest else 'locked'}</code>\n"
+                        f"Dây chuyền worker bắt đầu sinh shot hình ảnh/video..."
+                    )
+                else:
+                    self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code> (Job không ở trạng thái WAITING_APPROVAL hoặc đã kết thúc).")
+            else:
+                self.notifier.send_message(f"⚠️ <b>[GATE 4 CHƯA ĐỦ ĐIỀU KIỆN SẴN SÀNG]:</b>\n" + "\n".join(f"• {e}" for e in errs))
+
         elif cmd == "/approve":
             if len(parts) < 2:
                 self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/approve &lt;job_id&gt;</code>")
@@ -724,18 +970,73 @@ class TelegramCommandBot:
                 self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code> (Job không ở trạng thái CHỜ DUYỆT hoặc không tồn tại).")
                 return
 
-            ok = self.jq.approve_job(job_id)
-            if ok:
-                mode = str(job.get("mode", "")).upper()
-                if mode in ("SMART_REUP", "REUP"):
-                    self.notifier.send_message(f"✅ <b>Đã duyệt Job Reup: {job_id}!</b>\n🚀 Đang kích hoạt render video hoàn chỉnh...")
-                    if self.on_approve_handler:
-                        self._executor.submit(self.on_approve_handler, job_id)
-                else:
+            p_dir = Path(job.get("project_dir") or f"data/automated_runs/{job_id}")
+            state_file = p_dir / "approval_state.json"
+
+            # 4-Gate Smart Routing
+            if state_file.exists():
+                from services.approval_state_machine import ApprovalStateMachine
+                asm = ApprovalStateMachine(p_dir, job_id)
+
+                # Gate 1 pending?
+                if not asm.is_script_gate_passed():
                     self.notifier.send_message(
-                        f"✅ <b>Đã duyệt Job Mode 2: {job_id}!</b>\n"
-                        f"🚀 Dây chuyền worker đang tiến hành sinh và ráp các cảnh tự động..."
+                        f"⏳ <b>[GATE 1 ĐANG CHỜ]:</b> Kịch bản chưa được phê duyệt.\n"
+                        f"👉 Vui lòng duyệt kịch bản trước: <code>/approve_script {job_id}</code>\n"
+                        f"Hoặc gõ <code>/gates {job_id}</code> để xem tiến độ."
                     )
+                    return
+
+                # Gate 2 pending?
+                if not asm.is_audio_gate_passed():
+                    self.notifier.send_message(
+                        f"⏳ <b>[GATE 2 ĐANG CHỜ]:</b> Kịch bản đã duyệt, nhưng chưa duyệt đủ cả 2 bản Audio VI và EN.\n"
+                        f"• Duyệt tiếng Việt: <code>/approve_audio_vi {job_id}</code>\n"
+                        f"• Duyệt tiếng Anh: <code>/approve_audio_en {job_id}</code>\n"
+                        f"👉 Gõ <code>/gates {job_id}</code> để xem tình trạng file."
+                    )
+                    return
+
+                # Gate 3 pending?
+                if not asm.is_character_gate_passed():
+                    self.notifier.send_message(
+                        f"⏳ <b>[GATE 3 ĐANG CHỜ]:</b> Còn ảnh nhân vật bắt buộc chưa được duyệt.\n"
+                        f"👉 Gõ <code>/approve_character {job_id} all</code> để duyệt toàn bộ nhân vật."
+                    )
+                    return
+
+                # Gate 4 ready check
+                ok, errs = asm.approve_video_generation(approver="telegram")
+                if not ok:
+                    self.notifier.send_message(f"⚠️ <b>[GATE 4 CHƯA THỂ BẮT ĐẦU VIDEO]:</b>\n" + "\n".join(f"• {e}" for e in errs))
+                    return
+
+                # All 4 gates passed -> Transition job
+                transitioned = self.jq.transition_job(job_id, to_state="APPROVED", from_states=("WAITING_APPROVAL",))
+                if transitioned:
+                    self.notifier.send_message(
+                        f"✅ <b>[4 GATES HOÀN TẤT - BẮT ĐẦU GENERATE VIDEO] Job: {job_id}!</b>\n"
+                        f"🚀 Manifest đã khóa an toàn. Dây chuyền worker đang tiến hành sinh và ráp các cảnh tự động..."
+                    )
+                else:
+                    self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code>.")
+                return
+
+            # Fail-closed check: Mode 2 / Remake jobs CANNOT bypass 4-gate approval
+            mode = str(job.get("mode", "")).lower()
+            if mode in ("mode2", "remake", "ai_genesis") or "remake" in job_id:
+                self.notifier.send_message(
+                    f"❌ <b>[LỖI 4-GATE]:</b> Job Mode 2 <code>{job_id}</code> thiếu file approval_state.json.\n"
+                    "Không thể duyệt theo quy tắc fail-closed."
+                )
+                return
+
+            # Legacy Flow (Only for Reup jobs without 4-gate state machine)
+            ok = self.jq.approve_job(job_id, enforce_gates=False)
+            if ok:
+                self.notifier.send_message(f"✅ <b>Đã duyệt Job Reup: {job_id}!</b>\n🚀 Đang kích hoạt render video hoàn chỉnh...")
+                if self.on_approve_handler:
+                    self._executor.submit(self.on_approve_handler, job_id)
             else:
                 self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code>.")
 
