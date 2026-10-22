@@ -138,3 +138,36 @@ def test_account_pool_quota_exhausted_reset(mock_pool_env):
     assert acc is not None
     assert acc.acc_id == "acc_01"
     assert acc.status == "AVAILABLE"
+
+
+def test_account_pool_keep_alive_refresh(mock_pool_env):
+    from unittest.mock import MagicMock
+    from services.video_provider import SessionValidationResult
+
+    mgr = AccountPoolManager(
+        session_dir=mock_pool_env["session_dir"],
+        state_file=mock_pool_env["state_file"],
+        max_daily_shots=5,
+    )
+
+    mock_provider = MagicMock()
+    mock_provider.validate_session.return_value = SessionValidationResult(
+        valid=True,
+        tier="PRO",
+        credits_remaining=5,
+        reset_at="2026-10-22T20:00:00Z",
+    )
+
+    # Run keep alive ping across all accounts
+    res = mgr.ping_and_refresh_all_accounts(provider=mock_provider, pacing_delay=0.0)
+    assert len(res) == 3
+    assert all(res.values()) is True
+    assert mock_provider.validate_session.call_count == 3
+
+    # Check start and stop lifecycle
+    mgr.start_keep_alive(interval_seconds=10, provider=mock_provider)
+    assert mgr._keep_alive_running is True
+    assert mgr._keep_alive_thread is not None
+    mgr.stop_keep_alive()
+    assert mgr._keep_alive_running is False
+

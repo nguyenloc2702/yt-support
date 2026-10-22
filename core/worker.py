@@ -73,6 +73,8 @@ class VideoAutomationWorker:
     def _handle_shutdown(self, signum, frame):
         logger.info("Received shutdown signal (%s). Finishing current step before stopping...", signum)
         self.running = False
+        if hasattr(self, "account_pool"):
+            self.account_pool.stop_keep_alive()
         if hasattr(self, "bot"):
             self.bot.stop_polling()
 
@@ -102,6 +104,9 @@ class VideoAutomationWorker:
         # 3. Start remote Telegram bot listener
         if self.bot.is_configured:
             self.bot.start_polling()
+
+        # 3b. Start auto keep-alive daemon to renew Google cookies 24/7
+        self.account_pool.start_keep_alive(interval_seconds=1800, provider=self.primary_provider)
 
         # 4. Main processing loop (Dedup based strictly on DB state, no in-memory sets)
         self._scan_and_assemble_pending_jobs()

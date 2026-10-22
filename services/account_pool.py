@@ -14,8 +14,10 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
+import random
+import threading
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from filelock import FileLock
 
 logger = logging.getLogger("account_pool")
@@ -52,6 +54,8 @@ class AccountPoolManager:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._kill_switch_active = False
         self._kill_switch_reason = ""
+        self._keep_alive_thread: Optional[threading.Thread] = None
+        self._keep_alive_running: bool = False
         self._load_or_init_state()
 
     @property
@@ -343,3 +347,102 @@ class AccountPoolManager:
                 state["accounts"][acc_id]["status"] = status
                 state["accounts"][acc_id]["cooldown_until"] = cooldown_until
                 self._save_state_unlocked(state)
+
+    # -------------------------------------------------------------------------
+    # AUTOMATED KEEP-ALIVE DAEMON (Token Rotation & Session Preservation)
+    # -------------------------------------------------------------------------
+
+    def start_keep_alive(self, interval_seconds: int = 1800, provider: Optional[Any] = None):
+        """
+        Starts a background daemon thread that periodically pings Google Gemini
+        for each valid account, triggering token rotation (__Secure-1PSIDTS)
+        and atomically saving the fresh tokens back to disk.
+        """
+        if self._keep_alive_thread and self._keep_alive_thread.is_alive():
+            return
+        self._keep_alive_running = True
+        self._keep_alive_thread = threading.Thread(
+            target=self._keep_alive_loop,
+            args=(interval_seconds, provider),
+            name="account_keep_alive",
+            daemon=True,
+        )
+        self._keep_alive_thread.start()
+        logger.info("Auto Keep-Alive daemon started (cycle: ~%ds with natural jitter).", interval_seconds)
+
+    def stop_keep_alive(self):
+        """Stops the background keep-alive thread."""
+        self._keep_alive_running = False
+
+    def _keep_alive_loop(self, interval_seconds: int, provider: Optional[Any] = None):
+        while self._keep_alive_running:
+            # Add jitter ±300s (5 minutes) to mimic authentic human browsing rhythm
+            jitter = random.uniform(-300, 300)
+            sleep_time = max(600, interval_seconds + jitter)
+
+            elapsed = 0
+            while elapsed < sleep_time and self._keep_alive_running:
+                time.sleep(5)
+                elapsed += 5
+
+            if not self._keep_alive_running:
+                break
+
+            try:
+                self.ping_and_refresh_all_accounts(provider=provider, pacing_delay=random.uniform(5.0, 10.0))
+            except Exception as e:
+                logger.warning("Error during keep-alive refresh: %s", e)
+
+    def ping_and_refresh_all_accounts(self, provider: Optional[Any] = None, pacing_delay: float = 5.0) -> Dict[str, bool]:
+        """
+        Pings Google Gemini for all registered accounts to auto-renew __Secure-1PSIDTS.
+        Saves updated cookies to disk and updates account status in pool_state.json.
+        """
+        from services.gemini_webapi_provider import GeminiWebApiProvider
+        val_provider = provider or GeminiWebApiProvider()
+        results = {}
+
+        with FileLock(str(self.lock_file), timeout=10):
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            accounts = dict(state.get("accounts", {}))
+
+        for acc_id, info in accounts.items():
+            if self._keep_alive_thread and self._keep_alive_thread.is_alive() and not self._keep_alive_running:
+                break
+            if info.get("status") == "DISABLED":
+                continue
+            if info.get("in_flight", 0) > 0:
+                logger.debug("Account %s is currently in-flight (%d). Skipping keep-alive ping.", acc_id, info.get("in_flight"))
+                continue
+
+            session_file = Path(info.get("session_file") or (self.session_dir / f"{acc_id}.json"))
+            if not session_file.exists():
+                continue
+
+            try:
+                logger.info("💓 [Auto Keep-Alive] Refreshing session token for account %s...", acc_id)
+                res = val_provider.validate_session(session_file)
+                if res.valid:
+                    with FileLock(str(self.lock_file), timeout=10):
+                        st = json.loads(self.state_file.read_text(encoding="utf-8"))
+                        if acc_id in st.get("accounts", {}):
+                            if st["accounts"][acc_id]["status"] == "AUTH_ERROR":
+                                st["accounts"][acc_id]["status"] = "AVAILABLE"
+                                st["accounts"][acc_id]["consecutive_errors"] = 0
+                            self._save_state_unlocked(st)
+                    logger.info("✔ [Auto Keep-Alive] Account %s successfully refreshed! (Tier: %s, Credits: %s)",
+                                acc_id, res.tier, res.credits_remaining)
+                    results[acc_id] = True
+                else:
+                    logger.warning("⚠️ [Auto Keep-Alive] Account %s validation failed: %s (%s)",
+                                   acc_id, res.error_kind, res.message)
+                    results[acc_id] = False
+            except Exception as e:
+                logger.error("Error refreshing account %s: %s", acc_id, e)
+                results[acc_id] = False
+
+            if pacing_delay > 0:
+                time.sleep(pacing_delay)
+
+        return results
+
