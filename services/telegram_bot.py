@@ -647,13 +647,21 @@ class TelegramCommandBot:
                 return
 
             submode = ""
+            duration = None
             for p in parts[1:]:
-                if p.lower() in ("ai", "auto", "custom"):
-                    submode = p.lower()
-                    break
+                p_lower = p.lower()
+                if p_lower in ("ai", "auto", "custom"):
+                    submode = p_lower
+                elif p_lower.startswith("duration="):
+                    try:
+                        val = p_lower.split("=")[1].strip()
+                        if val != "full":
+                            duration = float(val)
+                    except ValueError:
+                        pass
 
             # Atomic creation and duplicate check (P1.9)
-            job_id = self.jq.create_job_if_no_active("remake", url)
+            job_id = self.jq.create_job_if_no_active("remake", url, target_duration=duration or 180.0)
             if not job_id:
                 self.notifier.send_message(
                     "⚠️ URL này đang được xử lý trong một Job khác. Vui lòng đợi hoàn tất hoặc dùng <code>/status</code>."
@@ -662,7 +670,10 @@ class TelegramCommandBot:
 
             if submode in ("ai", "auto"):
                 if self.on_remake_handler:
-                    self._executor.submit(self.on_remake_handler, url, job_id=job_id)
+                    kwargs = {"job_id": job_id}
+                    if duration is not None:
+                        kwargs["target_duration"] = duration
+                    self._executor.submit(self.on_remake_handler, url, **kwargs)
             else:
                 # Default Remake Flow (User request: send .srt and .txt files to Telegram for remixing/xào chẻ)
                 self.jq.transition_job(job_id, to_state="AWAITING_CUSTOM_SCRIPT")
@@ -676,12 +687,23 @@ class TelegramCommandBot:
 
         elif cmd == "/remake_ai":
             if len(parts) < 2:
-                self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job hoặc link YouTube: <code>/remake_ai &lt;job_id_hoặc_url&gt;</code>")
+                self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job hoặc link YouTube: <code>/remake_ai &lt;job_id_hoặc_url&gt; [duration=...]</code>")
                 return
             target = parts[1].strip()
+            duration = None
+            for p in parts[2:]:
+                p_lower = p.lower()
+                if p_lower.startswith("duration="):
+                    try:
+                        val = p_lower.split("=")[1].strip()
+                        if val != "full":
+                            duration = float(val)
+                    except ValueError:
+                        pass
+
             from pipeline.youtube import extract_youtube_video_id
             if extract_youtube_video_id(target):
-                job_id = self.jq.create_job_if_no_active("remake", target)
+                job_id = self.jq.create_job_if_no_active("remake", target, target_duration=duration or 180.0)
                 if not job_id:
                     self.notifier.send_message("⚠️ URL này đang được xử lý trong một Job khác.")
                     return
@@ -695,7 +717,10 @@ class TelegramCommandBot:
                 url = job["url"]
 
             if self.on_remake_handler:
-                self._executor.submit(self.on_remake_handler, url, job_id=job_id)
+                kwargs = {"job_id": job_id}
+                if duration is not None:
+                    kwargs["target_duration"] = duration
+                self._executor.submit(self.on_remake_handler, url, **kwargs)
 
         elif cmd == "/custom_script":
             if len(parts) < 2:

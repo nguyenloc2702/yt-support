@@ -53,6 +53,44 @@ def test_factory_mode2_dynamic_shots(test_factory: AutomatedFactory, monkeypatch
     # Check that dramatic keyword correctly triggers is_key_scene
     assert any(s["is_key_scene"] for s in shots_data)
 
+    # Verify human-readable .txt script file was generated for final inspection ("tra phát cuối")
+    txt_script = proj_dir / f"kich_ban_VI_{job_id}.txt"
+    assert txt_script.exists()
+    assert "KỊCH BẢN PHÂN CẢNH VOICE-OVER TIẾNG VIỆT" in txt_script.read_text(encoding="utf-8")
+
+
+def test_factory_mode2_custom_duration_and_telegram_dispatch(test_factory: AutomatedFactory, monkeypatch):
+    from unittest.mock import MagicMock
+    mock_notifier = MagicMock()
+    mock_notifier.is_configured = True
+    test_factory.notifier = mock_notifier
+
+    monkeypatch.setattr("pipeline.automated_factory.download_video", lambda url, p, **kw: p / "download.mp4")
+    synthetic_subs = [
+        {"start": i * 10.0, "end": (i + 1) * 10.0, "text": f"Diễn biến tập {i+1} câu chuyện thế giới"}
+        for i in range(30)  # 300 seconds total
+    ]
+    monkeypatch.setattr("pipeline.automated_factory.try_extract_subtitles", lambda p: synthetic_subs)
+
+    # User specifies custom target_duration = 300.0s (5 minutes)
+    job_id = test_factory.run_ai_genesis("https://youtube.com/watch?v=doc_5min", target_duration=300.0)
+    summary = test_factory.jq.get_job_summary(job_id)
+    # 300s / 5s = 60 shots
+    assert summary["total"] == 60
+
+    # Ensure document was sent to Telegram for user final review
+    mock_notifier.send_document.assert_called()
+    doc_paths = [call[0][0] for call in mock_notifier.send_document.call_args_list]
+    assert any(f"kich_ban_VI_{job_id}.txt" in p for p in doc_paths)
+
+    # Ensure approval message with rich preview and Hook is sent
+    mock_notifier.send_message.assert_called()
+    sent_msgs = [call[0][0] for call in mock_notifier.send_message.call_args_list]
+    approval_msg = next(m for m in sent_msgs if "KỊCH BẢN ĐÃ XONG" in m)
+    assert "TRÍCH ĐOẠN MỞ ĐẦU (HOOK)" in approval_msg
+    assert "60 cảnh" in approval_msg
+
+
 
 def test_deduplicate_vtt_segments():
     from pipeline.automated_factory import deduplicate_vtt_segments

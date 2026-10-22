@@ -301,6 +301,31 @@ class AutomatedFactory:
             script_md = project_dir / "script.md"
             script_md.write_text("\n".join(md_lines), encoding="utf-8")
 
+            # Also generate clean human-readable .txt script file for final inspection
+            txt_lines = [
+                "=" * 80,
+                f"🎬 KỊCH BẢN REVIEW VOICE-OVER TIẾNG VIỆT",
+                f"Job ID: {job_id}",
+                f"Tiêu đề: {source_title or script_data.get('title', 'Video')}",
+                f"Thời lượng mục tiêu: {target_duration}s | Số beat: {len(script_data.get('beats', []))}",
+                "=" * 80,
+                "",
+            ]
+            for b in script_data.get("beats", []):
+                txt_lines.append(f"[BEAT {b['id'] + 1:02d}] ({b.get('emotion', 'neutral')}):")
+                txt_lines.append(f"Lời thoại: {b.get('text', '')}")
+                txt_lines.append("-" * 40)
+            txt_lines.extend([
+                "",
+                "=" * 80,
+                "👉 DUYỆT HOẶC CHỈNH SỬA:",
+                f"- Để chốt kịch bản và tiến hành render: /approve {job_id}",
+                f"- Để hủy bỏ job này: /reject {job_id}",
+                "=" * 80,
+            ])
+            script_txt = project_dir / f"kich_ban_VI_{job_id}.txt"
+            script_txt.write_text("\n".join(txt_lines), encoding="utf-8")
+
             # 4. Set job to WAITING_APPROVAL
             summary_preview = "\n".join(
                 f"• Beat {b['id'] + 1} ({b.get('emotion', 'hype')}): {b.get('text', '')[:65]}..."
@@ -310,15 +335,24 @@ class AutomatedFactory:
                 job_id,
                 status="WAITING_APPROVAL",
                 script_summary=summary_preview[:400],
-                script_file=str(script_md),
+                script_file=str(script_txt),
             )
 
-            # 5. Notify Telegram for Approval
+            # 5. Notify Telegram for Approval & Send Script Document
             if self.notifier.is_configured:
+                self.notifier.send_document(
+                    str(script_txt),
+                    caption=(
+                        f"📜 <b>KỊCH BẢN REVIEW TIẾNG VIỆT TOÀN VĂN - Job {job_id}</b>\n"
+                        f"⏱ Thời lượng: ~{target_duration:.0f}s ({len(script_data.get('beats', []))} beats)\n"
+                        f"👉 <i>Tải về để tra cứu phát cuối trước khi duyệt!</i>"
+                    ),
+                )
                 approval_msg = (
                     f"📝 <b>[MODE 1: CHỜ DUYỆT KỊCH BẢN] Job: {job_id}</b>\n\n"
                     f"📄 <b>Kịch bản voiceover ({len(script_data.get('beats', []))} beats, {target_duration}s):</b>\n"
                     f"<i>{summary_preview}</i>\n\n"
+                    f"📑 <i>File kịch bản toàn văn <code>.txt</code> đã được gửi kèm ở trên.</i>\n\n"
                     f"👉 <b>Hành động duyệt:</b>\n"
                     f"• Gõ: <code>/approve {job_id}</code> để cắt ghép cảnh khớp kịch bản, lồng tiếng Edge-TTS & BGM.\n"
                     f"• Gõ: <code>/reject {job_id}</code> để hủy bỏ job này."
@@ -542,6 +576,7 @@ class AutomatedFactory:
         self,
         youtube_url: str,
         job_id: Optional[str] = None,
+        target_duration: Optional[float] = None,
         custom_script: Optional[str] = None,
         chosen_voice: Optional[str] = None,
         preview_voice_samples: bool = True,
@@ -555,7 +590,7 @@ class AutomatedFactory:
         """
         source_title = probe_youtube_title(youtube_url)
         if not job_id:
-            job_id = self.jq.create_job(mode="remake", url=youtube_url, source_title=source_title)
+            job_id = self.jq.create_job(mode="remake", url=youtube_url, target_duration=target_duration or 180.0, source_title=source_title)
         elif source_title:
             with self.jq._get_conn() as conn:
                 conn.execute("UPDATE factory_jobs SET source_title = ? WHERE id = ? AND (source_title IS NULL OR source_title = '')", (source_title, job_id))
@@ -639,7 +674,11 @@ class AutomatedFactory:
                         sub_segments = stt_res.get("segments", [])
 
                 total_dur = max((float(s.get("end", 0)) for s in (sub_segments or [])), default=180.0)
-                target_shots = max(6, min(24, int(total_dur // 15)))
+                # Determine target duration: if user specified duration, use it;
+                # otherwise match original video duration!
+                effective_duration = float(target_duration) if (target_duration and target_duration > 0) else total_dur
+                # Proportional shot count (5.0s per shot, allowing full narrative coverage up to 180 shots / 15 mins)
+                target_shots = max(6, min(180, int(round(effective_duration / default_shot_duration))))
 
                 vi_scenes, en_scenes = build_dual_scripts_from_transcript(sub_segments or [], target_shots=target_shots)
                 for s in vi_scenes:
@@ -751,11 +790,87 @@ class AutomatedFactory:
                 script_file=str(shots_file),
             )
 
-            # Send voice auditions directly to Telegram
+            # Generate human-readable .txt script files for final user review ("tra phát cuối")
+            est_total_duration = len(shots) * default_shot_duration
+            total_words_vi = sum(len(str(s.get("text", "")).split()) for s in (vi_scenes or shots))
+
+            vi_txt_lines = [
+                "=" * 80,
+                "🎬 KỊCH BẢN PHÂN CẢNH VOICE-OVER TIẾNG VIỆT",
+                f"Job ID: {job_id}",
+                f"Tiêu đề: {source_title or 'Video Documentary'}",
+                f"Tổng số cảnh: {len(shots)} cảnh | Thời lượng dự kiến: ~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)",
+                f"Tổng số từ: {total_words_vi} từ | Tốc độ đọc: ~2.5 - 3.0 từ/giây",
+                f"Giọng đọc đề xuất: {target_voice}",
+                "=" * 80,
+                "",
+            ]
+            for s in (vi_scenes or shots):
+                idx = s.get("index", 1)
+                t_start = (idx - 1) * default_shot_duration
+                t_end = idx * default_shot_duration
+                tag = " [HOOK]" if idx <= 2 else (" [OUTRO/KẾT]" if idx == len(shots) else "")
+                vi_txt_lines.append(f"[CẢNH {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s){tag}")
+                vi_txt_lines.append(f"Lời thoại: {s.get('text', '')}")
+                vi_txt_lines.append(f"Mô tả hình ảnh (AI Prompt): {s.get('prompt', '')}")
+                if s.get("character_ids"):
+                    vi_txt_lines.append(f"Nhân vật: {', '.join(s['character_ids'])}")
+                vi_txt_lines.append("-" * 40)
+
+            vi_txt_lines.extend([
+                "",
+                "=" * 80,
+                "👉 HƯỚNG DẪN KIỂM TRA & DUYỆT (GATE 1):",
+                f"- Muốn sửa câu chữ từng cảnh: /edit_beat {job_id} <cảnh_số> <nội dung mới>",
+                f"- Hoặc tải file .txt này về máy, chỉnh sửa rồi gửi lại file lên chat bot.",
+                f"- Khi đã hoàn toàn ưng ý: bấm [Duyệt Kịch Bản (G1)] hoặc gõ /approve_script {job_id}",
+                "=" * 80,
+            ])
+            kich_ban_vi_file = project_dir / f"kich_ban_VI_{job_id}.txt"
+            kich_ban_vi_file.write_text("\n".join(vi_txt_lines), encoding="utf-8")
+
+            kich_ban_en_file = project_dir / f"kich_ban_EN_{job_id}.txt"
+            if en_scenes:
+                en_txt_lines = [
+                    "=" * 80,
+                    "🎬 ENGLISH VOICE-OVER SCRIPT & SHOT PLAN",
+                    f"Job ID: {job_id}",
+                    f"Title: {source_title or 'Video'}",
+                    f"Total scenes: {len(en_scenes)} scenes | Duration: ~{len(en_scenes) * default_shot_duration:.0f}s",
+                    "=" * 80,
+                    "",
+                ]
+                for s in en_scenes:
+                    idx = s.get("index", 1)
+                    t_start = (idx - 1) * default_shot_duration
+                    t_end = idx * default_shot_duration
+                    en_txt_lines.append(f"[SCENE {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s)")
+                    en_txt_lines.append(f"Narration: {s.get('text', '')}")
+                    en_txt_lines.append(f"Visual Prompt: {s.get('prompt', '')}")
+                    en_txt_lines.append("-" * 40)
+                kich_ban_en_file.write_text("\n".join(en_txt_lines), encoding="utf-8")
+
+            # 1. Send clean script documents directly to Telegram for user inspection ("tra phát cuối")
+            if self.notifier.is_configured:
+                self.notifier.send_document(
+                    str(kich_ban_vi_file),
+                    caption=(
+                        f"📜 <b>KỊCH BẢN TIẾNG VIỆT TOÀN VĂN - Job {job_id}</b>\n"
+                        f"⏱ Thời lượng: <b>~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)</b> ({len(shots)} cảnh) | {total_words_vi} từ\n"
+                        f"👉 <i>Tải về để tra cứu phát cuối trước khi duyệt Gate 1!</i>"
+                    ),
+                )
+                if kich_ban_en_file.exists():
+                    self.notifier.send_document(
+                        str(kich_ban_en_file),
+                        caption=f"📜 <b>KỊCH BẢN TIẾNG ANH (EN) - Job {job_id}</b>",
+                    )
+
+            # 2. Send voice auditions directly to Telegram
             if preview_voice_samples and self.notifier.is_configured:
                 send_voice_previews(self.notifier, job_id, project_dir, target_lang=detected_lang)
 
-            # Notify Telegram with interactive buttons
+            # 3. Notify Telegram with interactive buttons and rich preview
             if self.notifier.is_configured:
                 inline_markup = {
                     "inline_keyboard": [
@@ -771,22 +886,44 @@ class AutomatedFactory:
                         [
                             {"text": "🚀 Duyệt Video (G4)", "callback_data": f"approve_video:{job_id}"},
                             {"text": "🚫 Hủy Job", "callback_data": f"reject:{job_id}"},
-                        ]
+                        ],
                     ]
                 }
-                char_info = f"👤 Nhân vật phát hiện: <b>{', '.join(required_characters) if required_characters else 'Không có (Documentary thiên nhiên/lịch sử chung)'}</b>\n"
+                char_info = f"👤 Nhân vật phát hiện: <b>{', '.join(required_characters) if required_characters else 'Không có (Documentary chung)'}</b>\n"
+
+                # Extract Hook preview (first 2-3 scenes)
+                hook_preview = "\n".join(f"• <b>Cảnh {s['index']}:</b> <i>{s.get('text', '')}</i>" for s in shots[:3])
+                # Extract mid-point milestones
+                mid_preview = ""
+                if len(shots) > 6:
+                    mid_idx_1 = len(shots) // 3
+                    mid_idx_2 = (2 * len(shots)) // 3
+                    mid_shots = [shots[mid_idx_1], shots[mid_idx_2]]
+                    mid_preview = "\n".join(f"• <b>Cảnh {s['index']}:</b> <i>{s.get('text', '')}</i>" for s in mid_shots)
+                outro_preview = f"• <b>Cảnh {shots[-1]['index']} (Kết):</b> <i>{shots[-1].get('text', '')}</i>" if shots else ""
+
                 approval_msg = (
-                    f"🎬 <b>[MODE 2: CHỜ DUYỆT 4 GATE APPROVAL] Job: {job_id}</b>\n\n"
-                    f"📊 Tổng số cảnh: <b>{len(shots)} cảnh</b> ({default_shot_duration}s/cảnh)\n"
+                    f"🎬 <b>[MODE 2: KỊCH BẢN ĐÃ XONG - CHỜ TRA PHÁT CUỐI & DUYỆT G1]</b>\n"
+                    f"🆔 Job: <code>{job_id}</code>\n"
+                    f"📺 Tiêu đề: <b>{source_title or 'Video'}</b>\n\n"
+                    f"⏱ Thời lượng: <b>~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)</b> (dài tương xứng video gốc!)\n"
+                    f"📊 Tổng số cảnh: <b>{len(shots)} cảnh</b> ({default_shot_duration}s/cảnh) | {total_words_vi} từ\n"
                     f"🌟 <b>{key_count} cảnh Veo điện ảnh</b> + 🖼 <b>{broll_count} cảnh Ken Burns</b>\n"
                     f"{char_info}"
                     f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b>\n\n"
-                    f"👉 <b>Quy trình 4 Gate kiểm duyệt:</b>\n"
-                    f"1. <b>Gate 1 (Script):</b> Gõ <code>/approve_script {job_id}</code> để chốt kịch bản.\n"
-                    f"2. <b>Gate 2 (Audio):</b> Nghe duyệt audio (<code>/approve_audio_vi {job_id}</code> & <code>/approve_audio_en {job_id}</code>).\n"
-                    f"3. <b>Gate 3 (Character):</b> Gõ <code>/approve_character {job_id} all</code>.\n"
-                    f"4. <b>Gate 4 (Video):</b> Gõ <code>/approve_video {job_id}</code> để khóa manifest và render.\n"
-                    f"• Gõ <code>/gates {job_id}</code> bất kỳ lúc nào để xem bảng tiến độ chi tiết."
+                    f"🎯 <b>TRÍCH ĐOẠN MỞ ĐẦU (HOOK):</b>\n{hook_preview}\n\n"
+                )
+                if mid_preview:
+                    approval_msg += f"📖 <b>CÁC MỐC CHUYỂN BIẾN CHÍNH:</b>\n{mid_preview}\n\n"
+                if outro_preview:
+                    approval_msg += f"🎬 <b>CẢNH KẾT (OUTRO):</b>\n{outro_preview}\n\n"
+
+                approval_msg += (
+                    f"📑 <i>File kịch bản toàn văn <code>.txt</code> đã được gửi kèm ở trên để bạn tra phát cuối!</i>\n\n"
+                    f"👉 <b>Bạn có thể:</b>\n"
+                    f"• Sửa từng cảnh: <code>/edit_beat {job_id} &lt;cảnh_số&gt; &lt;nội dung mới&gt;</code>\n"
+                    f"• Tải file <code>.txt</code> về máy sửa rồi gửi lại file lên bot.\n"
+                    f"• Bấm <b>[📝 Duyệt Kịch Bản (G1)]</b> hoặc gõ <code>/approve_script {job_id}</code> để chốt kịch bản."
                 )
                 self.notifier.send_message(approval_msg, reply_markup=inline_markup)
 

@@ -525,31 +525,47 @@ def build_dual_scripts_from_transcript(
             })
         return vi_scenes, en_scenes
 
-    step = max(1, len(transcript_segments) // target_shots)
+    total_segs = len(transcript_segments)
     en_scenes = []
     vi_scenes = []
 
     for idx in range(1, target_shots + 1):
-        seg_idx = min((idx - 1) * step, len(transcript_segments) - 1)
-        raw_text = transcript_segments[seg_idx].get("text", "")
+        # Divide transcript into continuous, contiguous chronological chunks
+        start_seg = int((idx - 1) * total_segs / target_shots)
+        end_seg = int(idx * total_segs / target_shots)
+        if start_seg >= total_segs:
+            start_seg = total_segs - 1
+        if end_seg <= start_seg:
+            end_seg = start_seg + 1
+
+        seg_slice = transcript_segments[start_seg:end_seg]
+        raw_text = " ".join(str(s.get("text", "")).strip() for s in seg_slice)
         clean_text = clean_narration_for_tts(raw_text)
 
-        # Enforce narrative pacing (~18 - 25 words)
+        # Enforce narrative pacing (~15 - 26 words per 5-second scene)
         words = clean_text.split()
         if len(words) > 26:
             clean_text = " ".join(words[:25]) + "."
-        elif len(words) < 8 and idx > 1:
-            clean_text = f"As the situation developed, {clean_text.lower()}"
+        elif len(words) < 6 and idx > 1:
+            clean_text = f"As events unfolded, {clean_text.lower()}"
 
-        # If transcript was English, translate/adapt a clean Vietnamese narrative counterpart
+        # Dual-script language mapping
         detected_lang = detect_language(clean_text)
         if detected_lang == "en":
             en_text = clean_text
-            # Basic adaptive mapping for documentary narrative
-            vi_text = _adapt_en_to_vi_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
+            # Attempt translation to Vietnamese, falling back to adaptive documentary phrasing
+            translated_vi = _translate_text(en_text, source_lang="en", target_lang="vi")
+            if translated_vi:
+                vi_text = translated_vi
+            else:
+                vi_text = _adapt_en_to_vi_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
         else:
             vi_text = clean_text
-            en_text = f"Scene {idx}: Historical documentation depicting key regional developments."
+            translated_en = _translate_text(vi_text, source_lang="vi", target_lang="en")
+            if translated_en:
+                en_text = translated_en
+            else:
+                en_text = _adapt_vi_to_en_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
 
         veo_prompt = sanitize_veo_prompt(en_text, scene_idx=idx, total_scenes=target_shots)
 
@@ -557,7 +573,7 @@ def build_dual_scripts_from_transcript(
             "index": idx,
             "text": en_text,
             "prompt": veo_prompt,
-            "duration": 10.0,
+            "duration": 5.0,
             "is_key_scene": True,
         })
 
@@ -565,28 +581,87 @@ def build_dual_scripts_from_transcript(
             "index": idx,
             "text": vi_text,
             "prompt": veo_prompt,
-            "duration": 10.0,
+            "duration": 5.0,
             "is_key_scene": True,
         })
 
     return vi_scenes, en_scenes
 
 
+_ONLINE_TRANSLATE_DISABLED_UNTIL = 0.0
+_TRANSLATION_CACHE: Dict[str, str] = {}
+
+
+def _translate_text(text: str, source_lang: str, target_lang: str) -> Optional[str]:
+    """
+    Lightweight translation helper using MyMemory free API with strict timeout and circuit breaker.
+    Returns None on failure to cleanly fall back to offline documentary adaptation.
+    """
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        # Never perform external network calls during automated test suites
+        return None
+
+    global _ONLINE_TRANSLATE_DISABLED_UNTIL, _TRANSLATION_CACHE
+    import time
+    if time.time() < _ONLINE_TRANSLATE_DISABLED_UNTIL:
+        return None
+
+    cleaned = text.strip()
+    if not cleaned or len(cleaned) < 3:
+        return None
+
+    cache_key = f"{source_lang}_{target_lang}_{cleaned[:100]}"
+    if cache_key in _TRANSLATION_CACHE:
+        return _TRANSLATION_CACHE[cache_key]
+
+    import html
+    import json
+    import urllib.parse
+    import urllib.request
+
+    try:
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(cleaned[:450])}&langpair={source_lang}|{target_lang}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            translated = data.get("responseData", {}).get("translatedText")
+            if translated and not translated.startswith("MYMEMORY WARNING:") and len(translated) > 2:
+                res = html.unescape(translated).strip()
+                _TRANSLATION_CACHE[cache_key] = res
+                return res
+            else:
+                # Rate limit or quota warning from free tier, trip circuit breaker for 60s
+                _ONLINE_TRANSLATE_DISABLED_UNTIL = time.time() + 60.0
+    except Exception as e:
+        logger.debug("Translation service unavailable: %s. Tripping circuit breaker for 60s.", e)
+        _ONLINE_TRANSLATE_DISABLED_UNTIL = time.time() + 60.0
+    return None
+
+
 def _adapt_en_to_vi_documentary(en_text: str, scene_idx: int, total_scenes: int) -> str:
-    """Provides a natural Vietnamese documentary phrasing for a scene."""
-    # Common historical phrase translations
+    """Provides a natural Vietnamese documentary phrasing for a scene when offline."""
     t = en_text.lower()
     if "company" in t or "trillion" in t or "worth" in t:
-        return f"Vào thời kỳ hoàng kim, tổ chức thương mại này sở hữu khối tài sản khổng lồ chưa từng có trong lịch sử."
+        return "Vào thời kỳ hoàng kim, tổ chức thương mại này sở hữu khối tài sản khổng lồ chưa từng có trong lịch sử."
     if "spain" in t or "dutch" in t:
-        return f"Mối quan hệ căng thẳng giữa các thế lực hàng hải phương Tây đã làm thay đổi hoàn toàn cục diện thương mại."
+        return "Mối quan hệ căng thẳng giữa các thế lực hàng hải phương Tây đã làm thay đổi hoàn toàn cục diện thương mại."
     if "price" in t or "creative" in t or "money" in t:
-        return f"Khi giá trị hàng hóa biến động dữ dội, các thương nhân bắt đầu tìm kiếm những phương thức giao thương mới."
+        return "Khi giá trị hàng hóa biến động dữ dội, các thương nhân bắt đầu tìm kiếm những phương thức giao thương mới."
     if "week" in t or "month" in t or "year" in t:
-        return f"Chỉ trong một thời gian ngắn, biến cố liên tiếp diễn ra khiến các bên tham gia phải nhanh chóng thích nghi."
+        return "Chỉ trong một thời gian ngắn, biến cố liên tiếp diễn ra khiến các bên tham gia phải nhanh chóng thích nghi."
     if scene_idx == 1:
         return "Mở đầu câu chuyện là một bước ngoặt lịch sử làm thay đổi cả nền kinh tế thế giới."
     if scene_idx == total_scenes:
         return "Và cái kết đã để lại một bài học sâu sắc cho các thế hệ kinh doanh và phát triển sau này."
 
-    return f"Diễn biến tiếp theo ở cảnh {scene_idx} chứng kiến những chuyển biến chiến lược mang tính quyết định."
+    return f"Diễn biến tiếp theo ở cảnh {scene_idx} chứng kiến những bước ngoặt chiến lược mang tính quyết định."
+
+
+def _adapt_vi_to_en_documentary(vi_text: str, scene_idx: int, total_scenes: int) -> str:
+    """Provides natural English documentary phrasing for a Vietnamese scene when offline."""
+    if scene_idx == 1:
+        return "The story opens with a historic turning point that reshaped the entire landscape."
+    if scene_idx == total_scenes:
+        return "The final chapter leaves a profound lesson for modern development and strategy."
+    return f"Scene {scene_idx}: Critical developments unfold as pivotal events reshape the regional balance."
