@@ -4,7 +4,7 @@
 import streamlit as st
 
 from core.logging_config import get_logger
-from pipeline.llm_client import LLMResponseError, list_models
+from pipeline.llm_client import LLMResponseError, list_models, model_chain, probe_model_chain
 from services.settings_service import (
     DEFAULT_LLM_BASE_URL,
     LLM_BASE_URL_KEY,
@@ -14,11 +14,13 @@ from services.settings_service import (
     PROVIDER_PRESETS,
     VLM_ENABLED_KEY,
     VLM_MODEL_KEY,
+    XKIRO_FALLBACK_MODELS_KEY,
     get_llm_api_key,
     get_llm_base_url,
     get_llm_model,
     get_provider_preset,
     get_vlm_model,
+    get_xkiro_fallback_models,
     is_vlm_enabled,
     mask_secret,
     set_setting,
@@ -186,6 +188,19 @@ with st.form("llm_settings_form"):
         ) if use_manual_vlm else vlm_choice
 
     st.markdown("---")
+    st.markdown("##### 🛡️ Model dự phòng (failover)")
+    saved_fallbacks = get_xkiro_fallback_models()
+    _fallback_options = list(dict.fromkeys([*avail_models, *saved_fallbacks]))
+    _preselected = [m for m in _fallback_options if m in saved_fallbacks]
+    backup_models = st.multiselect(
+        "Model dự phòng khi model chính bị gateway từ chối (409/429/404) hoặc trả JSON cụt",
+        options=_fallback_options,
+        default=_preselected,
+        help="Thứ tự trong ô chọn là thứ tự ưu tiên thử. Hệ thống tự chuyển model khi lỗi, "
+        "mỗi model có circuit breaker riêng nên model nghẽn không chặn được model dự phòng.",
+    )
+
+    st.markdown("---")
     col_save, col_test = st.columns(2)
     with col_save:
         save_btn = st.form_submit_button("💾 Lưu tất cả cài đặt", use_container_width=True)
@@ -202,6 +217,7 @@ if save_btn:
     set_setting(LLM_MODEL_KEY, model.strip())
     set_setting(VLM_MODEL_KEY, vlm_model.strip())
     set_setting(VLM_ENABLED_KEY, "true" if vlm_enabled else "false")
+    set_setting(XKIRO_FALLBACK_MODELS_KEY, ",".join(backup_models))
     st.success("✅ Đã lưu toàn bộ cấu hình Provider, Model và VLM thành công!")
     st.rerun()
 
@@ -229,6 +245,34 @@ if test_btn:
             st.caption(f"Provider có {res['total_models']} models khả dụng: " + ", ".join(res["available_models"][:8]))
     else:
         st.error(f"❌ {res.get('message')}")
+
+st.divider()
+st.subheader("🛡️ Sức khoẻ chuỗi model (chính + dự phòng)")
+
+_chain = model_chain()
+st.caption("Thứ tự gọi khi gặp lỗi: " + " → ".join(_chain))
+
+if st.button("🩺 Probe từng model trong chuỗi", use_container_width=False):
+    try:
+        with st.spinner("Đang ping từng model..."):
+            _probe_results = probe_model_chain()
+    except LLMResponseError as exc:
+        _probe_results = None
+        st.error(str(exc))
+    if _probe_results:
+        for row in _probe_results:
+            if row["ok"]:
+                st.success(
+                    f"✅ `{row['model']}` — {row['latency_ms']}ms "
+                    f"(breaker: {row['breaker']})"
+                )
+            else:
+                st.error(
+                    f"❌ `{row['model']}` — {row['latency_ms']}ms "
+                    f"(breaker: {row['breaker']}): {row['error']}"
+                )
+else:
+    _probe_results = None
 
 st.divider()
 st.subheader("🔒 Bảo mật & Hoạt động Ngoại tuyến (Offline Fallback)")

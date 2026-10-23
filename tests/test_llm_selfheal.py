@@ -60,7 +60,7 @@ def heal_env(monkeypatch):
         "services.settings_service.set_setting",
         lambda key, value: (store.__setitem__(key, value), set_calls.append((key, value))),
     )
-    monkeypatch.setattr(lc, "get_default_breaker", lambda: PassthroughBreaker())
+    monkeypatch.setattr(lc, "get_ai_breaker", lambda model=None: PassthroughBreaker())
     monkeypatch.setattr("services.settings_service.mask_secret", lambda v: "sk-...test")
     return store, set_calls, monkeypatch
 

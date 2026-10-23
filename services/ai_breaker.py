@@ -43,6 +43,10 @@ class AICircuitBreaker:
         self._opened_at = 0.0
         self._half_open_in_flight = 0
 
+    @property
+    def state(self) -> str:
+        return self._state
+
     def _can_try(self, now: float) -> bool:
         if self._state == "CLOSED":
             return True
@@ -86,8 +90,21 @@ class AICircuitBreaker:
         return result
 
 
-_default_breaker = AICircuitBreaker("xkiro")
+_breakers: dict[str, AICircuitBreaker] = {}
+_breakers_lock = threading.Lock()
 
 
-def get_default_breaker() -> AICircuitBreaker:
-    return _default_breaker
+def get_ai_breaker(model: str | None = None) -> AICircuitBreaker:
+    """Breaker for one gateway model.
+
+    Scoped per model so that a throttled primary (the free tier 409s under
+    load) cannot open the circuit for its backups and strand the whole job —
+    which is exactly how every script variant of one run was invalidated.
+    """
+    name = "xkiro" if not model else f"xkiro:{model}"
+    with _breakers_lock:
+        breaker = _breakers.get(name)
+        if breaker is None:
+            breaker = AICircuitBreaker(name)
+            _breakers[name] = breaker
+        return breaker

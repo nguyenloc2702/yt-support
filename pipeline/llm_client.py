@@ -9,15 +9,17 @@ that knows how to talk to the provider.
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from core.logging_config import get_logger
-from services.ai_breaker import get_default_breaker
+from services.ai_breaker import get_ai_breaker
 from services.settings_service import (
     get_llm_api_key,
     get_llm_base_url,
     get_llm_model,
+    get_xkiro_fallback_models,
     get_xkiro_generation_model,
 )
 
@@ -122,6 +124,163 @@ def list_models() -> list[str]:
     except Exception as exc:
         raise LLMResponseError(f"Không lấy được danh sách models: {exc}") from exc
     return sorted(m.id for m in response.data)
+
+
+MAX_IN_MODEL_RECOVERIES = 2
+
+
+def model_chain(model: str | None = None) -> list[str]:
+    """Requested/primary model first, then the configured backups, in order."""
+    # Default to the xKiro generation model: the gateway 404s on
+    # "gemini-2.0-flash", which stranded every call without an explicit model
+    # when the settings DB had no llm_model row.
+    primary = model or get_llm_model() or get_xkiro_generation_model()
+    chain = [primary]
+    for backup in get_xkiro_fallback_models():
+        if backup not in chain:
+            chain.append(backup)
+    return chain
+
+
+def _is_failover_error(exc: Exception) -> bool:
+    """Gateway rejection that another model may serve.
+
+    Auth failures and bare network errors are excluded on purpose: they are
+    gateway-wide, so walking the chain would only burn every backup.
+    """
+    err = str(exc).lower()
+    return any(
+        t in err
+        for t in (
+            "404", "409", "429", "500", "502", "503", "504",
+            "conflict", "rate limit", "overloaded", "unroutable",
+            "model_not_found", "no available model", "does not exist",
+        )
+    )
+
+
+def _rejects_response_format(exc: Exception) -> bool:
+    err = str(exc).lower()
+    return "response_format" in err or "json_schema" in err or "json_object" in err
+
+
+def _chat_completion(
+    messages: list[dict[str, Any]],
+    *,
+    parse: Any,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+    json_schema: dict[str, Any] | None = None,
+    model: str | None = None,
+    description: str = "chat",
+):
+    """Run one completion across the model chain and hand the response to `parse`.
+
+    A model is skipped when the gateway rejects the call or `parse` rejects the
+    output (empty / truncated), so a throttled free-tier primary cannot fail a
+    job that a backup would have served. Raises LLMResponseError only after the
+    whole chain failed.
+    """
+    last_error: Exception | None = None
+    for chain_model in model_chain(model):
+        kwargs: dict[str, Any] = {
+            "model": chain_model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        if json_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "output", "strict": True, "schema": json_schema},
+            }
+        else:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        client = get_llm_client()
+        response = None
+        for _ in range(MAX_IN_MODEL_RECOVERIES):
+            try:
+                response = get_ai_breaker(kwargs["model"]).call(
+                    lambda: client.chat.completions.create(**kwargs), description
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if kwargs.get("response_format") and _rejects_response_format(exc):
+                    # Some OpenAI-compatible providers reject response_format.
+                    kwargs.pop("response_format", None)
+                    continue
+                if _repair_credentials(exc):
+                    client = get_llm_client()
+                    healed = get_llm_model()
+                    if healed:
+                        kwargs["model"] = healed
+                    continue
+                break
+
+        if response is None:
+            if not _is_failover_error(last_error):
+                raise LLMResponseError(f"LLM request failed: {last_error}") from last_error
+            logger.warning(
+                "Model '%s' rejected by gateway (%s); trying next model",
+                kwargs["model"], str(last_error)[:120],
+            )
+            continue
+
+        try:
+            return parse(response)
+        except LLMResponseError as exc:
+            last_error = exc
+            logger.warning(
+                "Model '%s' returned unusable output (%s); trying next model",
+                kwargs["model"], str(exc)[:120],
+            )
+
+    raise LLMResponseError(
+        f"LLM request failed trên mọi model dự phòng ({' -> '.join(model_chain(model))}): "
+        + str(last_error)[:200]
+    ) from last_error
+
+
+PROBE_PROMPT = 'Trả về đúng JSON: {"ok": true}'
+
+
+def probe_model_chain(model: str | None = None) -> list[dict[str, Any]]:
+    """Ping every model of the chain so the operator sees which one is sick.
+
+    Used by the Settings page: latency and breaker state per model is what
+    distinguishes a throttled free tier from a dead model name.
+    """
+    client = get_llm_client()
+    results: list[dict[str, Any]] = []
+    for chain_model in model_chain(model):
+        breaker = get_ai_breaker(chain_model)
+        started = time.perf_counter()
+        entry: dict[str, Any] = {
+            "model": chain_model,
+            "breaker": breaker.state,
+            "latency_ms": 0,
+            "ok": False,
+            "error": None,
+        }
+        try:
+            client.chat.completions.create(
+                model=chain_model,
+                temperature=0.0,
+                max_tokens=32,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "Chỉ trả về JSON."},
+                    {"role": "user", "content": PROBE_PROMPT},
+                ],
+            )
+            entry["ok"] = True
+        except Exception as exc:
+            entry["error"] = str(exc)[:200]
+        entry["latency_ms"] = int((time.perf_counter() - started) * 1000)
+        results.append(entry)
+    return results
 
 
 def chat_json_multimodal(
@@ -254,6 +413,14 @@ def _parse_llm_json(content: str) -> dict[str, Any]:
     )
 
 
+def _parse_completion_json(response: Any) -> dict[str, Any]:
+    """Pull JSON out of a completion, or raise so the chain fails over."""
+    content = response.choices[0].message.content if response.choices else None
+    if not content:
+        raise LLMResponseError("LLM trả về nội dung rỗng.")
+    return _parse_llm_json(content)
+
+
 def chat_json(
     system_prompt: str,
     user_prompt: str,
@@ -271,57 +438,18 @@ def chat_json(
 
     Returns the parsed dict. Raises LLMResponseError on unusable output.
     """
-    client = get_llm_client()
-    # Default to the xKiro generation model: the gateway (default base URL)
-    # 404s on "gemini-2.0-flash", which stranded every call without an
-    # explicit model when the settings DB had no llm_model row.
-    selected_model = model or get_llm_model() or get_xkiro_generation_model()
-
-    kwargs: dict[str, Any] = {
-        "model": selected_model,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "messages": [
+    return _chat_completion(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-    }
-    if json_schema is not None:
-        kwargs["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {"name": "output", "strict": True, "schema": json_schema},
-        }
-    else:
-        kwargs["response_format"] = {"type": "json_object"}
-
-    breaker = get_default_breaker()
-    try:
-        response = breaker.call(lambda: client.chat.completions.create(**kwargs), "chat_json")
-    except Exception as exc:
-        if _repair_credentials(exc):
-            client = get_llm_client()
-            kwargs["model"] = get_llm_model() or kwargs["model"]
-            try:
-                response = breaker.call(lambda: client.chat.completions.create(**kwargs), "chat_json")
-            except Exception as exc2:
-                raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
-        else:
-            # Some OpenAI-compatible providers reject response_format entirely.
-            err = str(exc)
-            if "response_format" in err or "json_schema" in err or "json_object" in err:
-                kwargs.pop("response_format", None)
-                try:
-                    response = breaker.call(lambda: client.chat.completions.create(**kwargs), "chat_json")
-                except Exception as exc2:
-                    raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
-            else:
-                raise LLMResponseError(f"LLM request failed: {exc}") from exc
-
-    content = response.choices[0].message.content if response.choices else None
-    if not content:
-        raise LLMResponseError("LLM trả về nội dung rỗng.")
-
-    return _parse_llm_json(content)
+        parse=_parse_completion_json,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_schema=json_schema,
+        model=model,
+        description="chat_json",
+    )
 
 
 def chat_text(
@@ -337,52 +465,22 @@ def chat_text(
     Used for plain-text generation such as per-block script drafts
     (Phase 8 block-based workflow). Raises LLMResponseError on unusable output.
     """
-    client = get_llm_client()
-    # Default to the xKiro generation model: the gateway (default base URL)
-    # 404s on "gemini-2.0-flash", which stranded every call without an
-    # explicit model when the settings DB had no llm_model row.
-    selected_model = model or get_llm_model() or get_xkiro_generation_model()
+    return _chat_completion(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        parse=_parse_completion_text,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model=model,
+        description="chat_text",
+    )
 
-    breaker = get_default_breaker()
-    try:
-        response = breaker.call(
-            lambda: client.chat.completions.create(
-                model=selected_model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            ),
-            "chat_text",
-        )
-    except LLMResponseError:
-        raise
-    except Exception as exc:
-        if _repair_credentials(exc):
-            client = get_llm_client()
-            selected_model = get_llm_model() or selected_model
-            try:
-                response = breaker.call(
-                    lambda: client.chat.completions.create(
-                        model=selected_model,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                    ),
-                    "chat_text",
-                )
-            except Exception as exc2:
-                raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
-        else:
-            raise LLMResponseError(f"LLM request failed: {exc}") from exc
 
+def _parse_completion_text(response: Any) -> str:
+    """Pull text out of a completion, or raise so the chain fails over."""
     content = response.choices[0].message.content if response.choices else None
     if not content or not content.strip():
         raise LLMResponseError("LLM trả về nội dung rỗng.")
-
     return content.strip()

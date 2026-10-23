@@ -93,3 +93,30 @@ def test_half_open_single_trial_in_flight():
     release.set()
     t.join(timeout=5)
     assert breaker._state == "CLOSED"
+
+
+def test_breakers_are_scoped_per_model():
+    from services.ai_breaker import get_ai_breaker
+
+    primary = get_ai_breaker("qwen/test-primary:free")
+    assert get_ai_breaker("qwen/test-primary:free") is primary
+    assert get_ai_breaker("mistralai/test-backup") is not primary
+    assert get_ai_breaker().name == "xkiro"
+
+
+def test_open_primary_does_not_block_backup():
+    from services.ai_breaker import get_ai_breaker
+
+    def boom():
+        raise RuntimeError("gateway 409")
+
+    primary = get_ai_breaker("qwen/test-throttled:free")
+    primary.failure_threshold = 1
+    with pytest.raises(RuntimeError):
+        primary.call(boom, "desc")
+    assert primary._state == "OPEN"
+
+    backup = get_ai_breaker("openai/test-backup-terra")
+    assert backup.call(lambda: "served", "desc") == "served"
+    with pytest.raises(AIGatewayOpenError):
+        primary.call(boom, "desc")

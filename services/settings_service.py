@@ -123,6 +123,17 @@ DEFAULT_XKIRO_GENERATION_MODEL = "qwen/qwen3.8-omni-flash:free"
 XKIRO_VLM_MODEL_KEY = "xkiro_vlm_model"
 DEFAULT_XKIRO_VLM_MODEL = "qwen/qwen3.8-omni-flash:free"
 
+# Backup generation models, tried in order when the primary is rejected by the
+# gateway (unroutable, 409/429 capacity, truncated output). The free-tier
+# primary throttles hard on long rewrites, so the chain is what keeps a job
+# from dying in the script phase.
+XKIRO_FALLBACK_MODELS_KEY = "xkiro_fallback_models"
+DEFAULT_XKIRO_FALLBACK_MODELS = [
+    "mistralai/mistral-large-4-0",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna",
+]
+
 PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
     "openai": {
         "name": "OpenAI (Chính thức)",
@@ -218,6 +229,35 @@ def get_xkiro_vlm_model() -> str:
 
 def set_xkiro_vlm_model(model: str) -> None:
     set_setting(XKIRO_VLM_MODEL_KEY, model)
+
+
+def _split_model_list(raw: str | None) -> list[str]:
+    """Parse a comma / semicolon / newline separated model list, order kept."""
+    out: list[str] = []
+    for part in (raw or "").replace(";", ",").replace("\n", ",").split(","):
+        model = part.strip()
+        if model and model not in out:
+            out.append(model)
+    return out
+
+
+def get_xkiro_fallback_models() -> list[str]:
+    """Backup generation models, in failover order (primary model excluded).
+
+    An absent row falls back to the built-in list; an explicitly saved empty
+    row means "no backups".
+    """
+    raw = get_setting(XKIRO_FALLBACK_MODELS_KEY)
+    models = (
+        list(DEFAULT_XKIRO_FALLBACK_MODELS)
+        if raw is None
+        else _split_model_list(raw)
+    )
+    return [m for m in models if m != get_xkiro_generation_model()]
+
+
+def set_xkiro_fallback_models(models: list[str]) -> None:
+    set_setting(XKIRO_FALLBACK_MODELS_KEY, ",".join(_split_model_list(",".join(models))))
 
 
 def is_vlm_enabled() -> bool:
