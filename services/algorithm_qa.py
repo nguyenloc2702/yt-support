@@ -34,6 +34,8 @@ PASS_SHORT_PCT = 0.35
 WPM_RANGE = (150.0, 210.0)
 SCENE_DUR_RANGE = (4.0, 8.0)
 MEAN_DUR_RANGE = (4.5, 6.5)
+AUDIO_SYNC_WER_MAX = 0.15
+AUDIO_SYNC_MIN_COVERAGE = 0.90
 
 PHOTO_KEYWORDS = ("photorealistic", "photo of", "4k photo", "hyperrealistic", "dslr")
 CRAYON_KEYWORDS = ("crayon", "hand-drawn", "hand drawn", "sketch", "illustration", "cartoon")
@@ -128,6 +130,13 @@ def _load_json(path: Path) -> Optional[Any]:
     except (OSError, json.JSONDecodeError):
         pass
     return None
+
+
+def _audio_sync_report(pd: Path, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if "audio_sync_vi" not in ctx:
+        data = _load_json(pd / "audio_sync_vi.json")
+        ctx["audio_sync_vi"] = data if isinstance(data, dict) else None
+    return ctx["audio_sync_vi"]
 
 
 def _probe_media(path: Path) -> Optional[Dict[str, Any]]:
@@ -597,6 +606,41 @@ def c_audio_segments(pd: Path, ctx):
     return len(segs) >= len(plan), (len(segs), len(plan)), ">= số cảnh"
 
 
+@_check("T10", "Audio", "Audio khớp lời đọc (WER <= 15%)", "audio")
+def c_audio_sync(pd: Path, ctx):
+    audit = _audio_sync_report(pd, ctx)
+    if audit is None:
+        return True, None, "n/a (chưa có audio audit)"
+    if int(audit.get("asr_words", 0) or 0) <= 0:
+        return False, 0, "ASR phải nhận diện được từ"
+    wer = float(audit.get("wer", 1.0))
+    scenes = [s for s in (audit.get("scenes") or []) if isinstance(s, dict)]
+    matched = sum(1 for s in scenes if not s.get("missing"))
+    coverage = matched / len(scenes) if scenes else 0.0
+    ok = wer <= AUDIO_SYNC_WER_MAX and coverage >= AUDIO_SYNC_MIN_COVERAGE
+    return ok, {"wer": round(wer, 3), "coverage": round(coverage, 2)}, "WER <= 0.15 và >= 90% cảnh khớp"
+
+
+@_check("T11", "Audio", "Audio tự nhiên (atempo >= 0.75, WPM trong band)", "audio")
+def c_audio_natural(pd: Path, ctx):
+    audit = _audio_sync_report(pd, ctx)
+    if audit is None:
+        return True, None, "n/a (chưa có audio audit)"
+    naturalness = audit.get("naturalness") or {}
+    if not naturalness:
+        return True, None, "n/a (chưa có rate-fit)"
+    atempo_ok = bool(naturalness.get("atempo_ok", True))
+    wpm_in_band = bool(naturalness.get("wpm_in_band", True))
+    capped = bool(naturalness.get("slowdown_capped", False))
+    ok = atempo_ok and wpm_in_band and not capped
+    value = {
+        "atempo": audit.get("atempo"),
+        "wpm": audit.get("local_wpm_mean"),
+        "capped": capped,
+    }
+    return ok, value, "atempo >= 0.75, WPM 195-214, không chạm sàn"
+
+
 # ============================================================ VIDEO CHECKS
 
 @_check("V01", "Video", "Video cuối tồn tại", "video")
@@ -794,6 +838,7 @@ ALL_CHECKS = [
     c_prompt_len, c_char_ids, c_key_ratio, c_prompt_composition, c_situation_vi,
     c_audio_vi, c_audio_en, c_audio_vi_probe, c_audio_en_probe, c_audio_vi_dur,
     c_voice_catalog, c_words_per_sec, c_audio_en_dur, c_audio_segments,
+    c_audio_sync, c_audio_natural,
     c_video_exists, c_video_dur, c_video_res, c_video_fps, c_video_audio_stream,
     c_video_lufs, c_no_placeholder, c_video_bitrate, c_audio_bitrate, c_shot_clips,
     c_shot_clips_valid, c_clip_durations, c_bgm,

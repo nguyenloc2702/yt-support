@@ -31,13 +31,14 @@ MAX_WORDS_PER_SHOT = 28
 DEFAULT_TARGET_SHOTS = 24
 
 # Algorithm Mode constants (UNIVERSAL_VIDEO_ALGORITHM)
-# Target: 4.5-5s shots with <=6 words per shot
+# Scenes run 4-8s; at the 210 WPM plan rate (3.5 words/s) that is 14-28 words.
+# Custom scripts keep the historical 12-word floor; generated scripts target 18-24.
 MIN_WORDS_PER_SHOT_ALGORITHM = 12
-RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (12, 24)
-MAX_WORDS_PER_SHOT_ALGORITHM = 24
-TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3 words/s)
+RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (18, 28)
+MAX_WORDS_PER_SHOT_ALGORITHM = 28
+TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
 MIN_SHOT_DURATION_ALGORITHM = 4.0
-MAX_SHOT_DURATION_ALGORITHM = 6.0
+MAX_SHOT_DURATION_ALGORITHM = 8.0
 
 # Voice mapping defaults — xKiro-first (Phase 1). All VI voices and EN narration
 # go through the xKiro gateway (`xkiro-voice` TTS model); edge-tts is only an
@@ -659,8 +660,13 @@ def build_semantic_dual_scripts_from_transcript(
             return None
 
         total_dur = max((s["end"] for s in cleaned_segs), default=180.0)
-        num_blocks = max(1, min(12, int(round(total_dur / 95.0))))
+        # ~6s of finished narration per scene (18-24 words at 3.5 w/s). Blocks are
+        # sized so each call emits a manageable scene count while the whole script
+        # still reaches the requested target_shots.
+        target_scenes = max(6, int(target_shots))
+        num_blocks = max(1, min(16, int(round(total_dur / 75.0))))
         block_dur = total_dur / num_blocks
+        scenes_per_block = max(3, int(round(target_scenes / num_blocks)))
 
         vi_scenes: List[Dict[str, Any]] = []
         en_scenes: List[Dict[str, Any]] = []
@@ -704,11 +710,11 @@ Nội dung:
    - Nền: giấy vẽ off-white khi bình thường; bảng đen chì khi khủng hoảng; sepia đất nung khi hồi ức lịch sử.
 
 Yêu cầu định dạng đầu ra:
-- Tự động băm thành 8 đến 13 cảnh dựa trên sự chuyển biến của tình huống cụ thể.
+- CHIA ĐÚNG {scenes_per_block} CẢNH cho khối này (sai số tối đa ±1), dựa trên sự chuyển biến của tình huống cụ thể. Không gộp nhiều ý vào một cảnh.
 - situation: Mô tả tình huống cụ thể (hành động, bối cảnh diễn ra).
-- voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
-- voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác.
-- estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ 4.5 đến 8.0 giây).
+- voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. MỖI cảnh 18-24 từ (5.1-6.9 giây ở nhịp 210 WPM), đan xen câu ngắn dứt khoát (<= 6 từ). Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
+- voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác, tối đa 16 từ mỗi cảnh.
+- estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ 5.1 đến 6.9 giây).
 - visual_prompt: Prompt tiếng Anh chi tiết theo STYLE BIBLE crayon hand-drawn cho Veo.
 
 Trả về duy nhất JSON array:
@@ -723,22 +729,38 @@ Trả về duy nhất JSON array:
 ]
 Chỉ trả về JSON thuần túy."""
 
-            parsed = chat_json(
-                "Bạn là trợ lý chỉ trả về JSON thuần túy, không giải thích.",
-                prompt,
-                temperature=0.3,
-                model=generation_model,
-            )
             scenes_data = None
-            for key in ("items", "scenes", "data"):
-                if isinstance(parsed.get(key), list):
-                    scenes_data = parsed[key]
+            block_feedback = ""
+            min_acceptable = max(3, int(scenes_per_block * 0.7))
+            for _attempt in range(2):
+                parsed = chat_json(
+                    "Bạn là trợ lý chỉ trả về JSON thuần túy, không giải thích.",
+                    prompt + block_feedback,
+                    temperature=0.3,
+                    model=generation_model,
+                )
+                candidate = None
+                for key in ("items", "scenes", "data"):
+                    if isinstance(parsed.get(key), list):
+                        candidate = parsed[key]
+                        break
+                if candidate is None:
+                    raise ValueError("semantic slicing returned unexpected JSON shape")
+                scenes_data = candidate
+                if len(scenes_data) >= min_acceptable:
                     break
-            if scenes_data is None:
-                raise ValueError("semantic slicing returned unexpected JSON shape")
+                logger.warning(
+                    "Slicer block %d returned %d/%d scenes; retrying with stronger instruction",
+                    b_idx + 1, len(scenes_data), scenes_per_block,
+                )
+                block_feedback = (
+                    f"\n\nLẦN TRƯỚC BẠN CHỈ CHIA {len(scenes_data)} CẢNH. "
+                    f"Khối này PHẢI có đúng {scenes_per_block} cảnh (sai số ±1), "
+                    "mỗi cảnh 18-24 từ, không gộp nhiều ý vào một cảnh."
+                )
             for sc in scenes_data:
-                dur = float(sc.get("estimated_duration", 5.5))
-                dur = max(4.0, min(9.0, dur))
+                dur = float(sc.get("estimated_duration", 6.0))
+                dur = max(4.0, min(8.0, dur))
                 v_vi = sc.get("voiceover_vi", "").strip()
                 v_en = (sc.get("voiceover_en") or v_vi).strip()
                 p = (sc.get("visual_prompt") or sanitize_veo_prompt(v_en, scene_counter, target_shots)).strip()

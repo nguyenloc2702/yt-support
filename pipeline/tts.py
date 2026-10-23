@@ -90,11 +90,15 @@ def is_xkiro_voice(voice_id: str) -> bool:
 
 
 XKIRO_TTS_MAX_CHARS = 4000  # gateway hard limit is 4096 per speech request
-# Skill-pack pacing band. The gateway ignores a speed parameter and its VI
-# voice speaks ~250 WPM, so audio is time-stretched into this band locally.
-TARGET_NARRATION_WPM = 180.0
-MIN_NARRATION_WPM = 160.0
-MAX_NARRATION_WPM = 200.0
+# Skill-pack pacing. The gateway ignores a speed parameter and its VI voices
+# speak 232-300 WPM natively, so audio is fitted locally. Naturalness wins over
+# hitting the exact target: never slow a voice below 0.75x (atempo), even when
+# that leaves it above TARGET_NARRATION_WPM. Remaining timeline time is handled
+# with per-beat pauses by the audio audit, not by stretching the voice further.
+TARGET_NARRATION_WPM = 205.0
+MIN_NARRATION_WPM = 195.0
+MAX_NARRATION_WPM = 214.0
+MIN_ATEMPO = 0.75
 MIN_WORDS_FOR_RATE_FIT = 8
 
 
@@ -201,48 +205,103 @@ def _is_vietnamese_voice(voice_id: str) -> bool:
     return "vietnamese" in v or v.startswith("vi-")
 
 
-def _fit_narration_rate(text: str, audio_path: Path) -> float:
-    """Time-stretch audio into the skill-pack WPM band, in place.
+def rate_fit_sidecar_path(audio_path: Path) -> Path:
+    """Telemetry sidecar written next to a synthesized track."""
+    return Path(audio_path).with_name(f"{Path(audio_path).name}.rate_fit.json")
 
-    Keeps the plan timeline (scenes computed at 3 words/s) aligned with what
-    the TTS actually says. Returns the pre-fit WPM (0.0 when skipped).
+
+def _write_rate_fit_sidecar(audio_path: Path, payload: Dict[str, Any]) -> None:
+    try:
+        rate_fit_sidecar_path(audio_path).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Could not write rate-fit sidecar for %s: %s", audio_path.name, exc
+        )
+
+
+def _fit_narration_rate(text: str, audio_path: Path) -> float:
+    """Fit narration into the pacing band without unnatural slow-down.
+
+    The slowdown is capped at MIN_ATEMPO (0.75x). If the native voice is so fast
+    that reaching TARGET_NARRATION_WPM would require going below the cap, the
+    audio keeps the capped rate and the remaining timeline time is filled with
+    pauses by the audio audit. Returns the pre-fit WPM (0.0 when skipped).
     """
     words = len(text.split())
     if words < MIN_WORDS_FOR_RATE_FIT:
         return 0.0
-    duration = _probe_duration(audio_path)
-    if duration <= 0:
+    old_duration = _probe_duration(audio_path)
+    if old_duration <= 0:
         return 0.0
-    wpm = words / duration * 60.0
-    if MIN_NARRATION_WPM <= wpm <= MAX_NARRATION_WPM:
-        return wpm
-    factor = max(0.5, min(2.0, TARGET_NARRATION_WPM / wpm))
-    tmp = audio_path.with_name(f"{audio_path.stem}.rate.mp3")
-    from pipeline.ffmpeg import run_ffmpeg
 
-    try:
-        run_ffmpeg(
-            [
-                "-i", str(audio_path),
-                "-filter:a", f"atempo={factor:.4f}",
-                "-c:a", "libmp3lame",
-                "-q:a", "2",
-                str(tmp),
-            ]
-        )
-        tmp.replace(audio_path)
-    except Exception as exc:
-        tmp.unlink(missing_ok=True)
-        logging.getLogger(__name__).warning(
-            "Rate fit failed for %s (%.1f WPM, atempo %.2f): %s",
-            audio_path.name, wpm, factor, exc,
-        )
-        return wpm
-    fitted = words / max(_probe_duration(audio_path), 0.001) * 60.0
-    logging.getLogger(__name__).info(
-        "Rate fit %s: %.1f -> %.1f WPM (atempo %.3f)", audio_path.name, wpm, fitted, factor
+    native_wpm = words / old_duration * 60.0
+    desired = TARGET_NARRATION_WPM / native_wpm if native_wpm > 0 else 1.0
+    factor = max(MIN_ATEMPO, min(MAX_TEMPO, desired))
+    slowdown_capped = desired < MIN_ATEMPO
+    action = "in_band"
+    fitted_wpm = native_wpm
+    fitted_duration = old_duration
+
+    if not (MIN_NARRATION_WPM <= native_wpm <= MAX_NARRATION_WPM) and abs(factor - 1.0) >= 0.01:
+        tmp = audio_path.with_name(f"{audio_path.stem}.rate.mp3")
+        from pipeline.ffmpeg import run_ffmpeg
+
+        try:
+            run_ffmpeg(
+                [
+                    "-i", str(audio_path),
+                    "-filter:a", f"atempo={factor:.4f}",
+                    "-c:a", "libmp3lame",
+                    "-q:a", "2",
+                    str(tmp),
+                ]
+            )
+            tmp.replace(audio_path)
+            fitted_duration = _probe_duration(audio_path)
+            fitted_wpm = words / max(fitted_duration, 0.001) * 60.0
+            action = "applied"
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            factor = 1.0
+            action = "failed"
+            logging.getLogger(__name__).warning(
+                "Rate fit failed for %s (%.1f WPM, atempo %.2f): %s",
+                audio_path.name, native_wpm, factor, exc,
+            )
+    else:
+        factor = 1.0
+
+    _write_rate_fit_sidecar(
+        audio_path,
+        {
+            "target_wpm": TARGET_NARRATION_WPM,
+            "band_wpm": [MIN_NARRATION_WPM, MAX_NARRATION_WPM],
+            "min_atempo": MIN_ATEMPO,
+            "native_wpm": round(native_wpm, 1),
+            "fitted_wpm": round(fitted_wpm, 1),
+            "atempo": round(factor, 4),
+            "slowdown_capped": slowdown_capped,
+            "words": words,
+            "native_duration_sec": round(old_duration, 3),
+            "fitted_duration_sec": round(fitted_duration, 3),
+            "action": action,
+        },
     )
-    return wpm
+    logger = logging.getLogger(__name__)
+    if slowdown_capped:
+        logger.warning(
+            "Rate fit %s: native %.1f WPM needs atempo %.2f (< %.2f cap) — "
+            "keeping %.1f WPM for naturalness; use pauses for the remaining time",
+            audio_path.name, native_wpm, desired, MIN_ATEMPO, fitted_wpm,
+        )
+    else:
+        logger.info(
+            "Rate fit %s: %.1f -> %.1f WPM (atempo %.3f)",
+            audio_path.name, native_wpm, fitted_wpm, factor,
+        )
+    return native_wpm
 
 
 def _edge_tts_save(text: str, edge_voice: str, out_path: Path) -> None:

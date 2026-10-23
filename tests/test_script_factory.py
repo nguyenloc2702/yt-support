@@ -1,6 +1,7 @@
 """Unit tests for the Phase 2 best-of-N ScriptFactory (services.script_factory)."""
 
 import json
+import re
 
 import pytest
 
@@ -25,6 +26,23 @@ def _long_vi(index):
     return f"Cảnh cải tiến {index} mở ra bất ngờ về dòng tiền và điều đó thay đổi tất cả."
 
 
+HOOK_VI = " ".join((
+    "Năm 1602 công ty Đông Ấn Hà Lan huy động sáu phẩy năm triệu guilders "
+    "và không ai ngờ điều gì xảy ra tiếp theo sau đó?"
+).split())  # 27 words
+
+CALLBACK_VI = " ".join((
+    "Đây chính là câu trả lời cho nghịch lý năm 1602 khi dòng tiền guilders "
+    "quay lại và thay đổi toàn bộ cục diện."
+).split())  # 24 words
+
+
+def _vi_line(index, words):
+    base = f"Cảnh cải tiến {index} mở ra bất ngờ về dòng tiền và điều đó thay đổi tất cả".split()
+    filler = ["hôm", "nay", "câu", "chuyện", "ấy", "vẫn", "tiếp", "tục", "để", "rồi"]
+    return " ".join((base + filler * 4)[:words])
+
+
 @pytest.fixture
 def factory(tmp_path):
     f = ScriptFactory()
@@ -41,21 +59,52 @@ class Router:
     """Fake chat_json routing rewrite vs judge calls with configurable judge scores."""
 
     def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=(),
-                 short_rewrites=False, fail_chunks_above=None):
+                 short_rewrites=False, fail_chunks_above=None, repair_words=None):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.rewrite_error = rewrite_error
         self.wrong_count_angles = set(wrong_count_angles)
         self.short_rewrites = short_rewrites
         self.fail_chunks_above = fail_chunks_above
+        self.repair_words = repair_words
         self.rewrite_prompts = []
         self.repair_calls = 0
+        self.hook_calls = 0
+        self.callback_calls = 0
         self.judge_calls = 0
         self.rewrite_calls = 0
 
     def __call__(self, system_prompt, user_prompt, **kw):
         import re
 
+        if "(HOOK 30 GIÂY):" in user_prompt:
+            self.hook_calls += 1
+            m = re.search(r"\(HOOK 30 GIÂY\):\n(\[.*?\])\n\n", user_prompt, re.DOTALL)
+            items = json.loads(m.group(1)) if m else []
+            return {
+                "scenes": [
+                    {
+                        "index": item["index"],
+                        "voiceover_vi": HOOK_VI,
+                        "voiceover_en": f"Hook line {item['index']} with a shocking number?",
+                    }
+                    for item in items
+                ]
+            }
+        if "(CALLBACK):" in user_prompt:
+            self.callback_calls += 1
+            m = re.search(r"\(CALLBACK\):\n(\[.*?\])\n\n", user_prompt, re.DOTALL)
+            items = json.loads(m.group(1)) if m else []
+            return {
+                "scenes": [
+                    {
+                        "index": item["index"],
+                        "voiceover_vi": CALLBACK_VI,
+                        "voiceover_en": "The answer returns to the 1602 paradox.",
+                    }
+                    for item in items
+                ]
+            }
         if "DANH SÁCH CẢNH CẦN SỬA NGÂN SÁCH TỪ:" in user_prompt:
             self.repair_calls += 1
             m = re.search(
@@ -67,7 +116,11 @@ class Router:
                 "scenes": [
                     {
                         "index": item["index"],
-                        "voiceover_vi": _long_vi(item["index"]),
+                        "voiceover_vi": (
+                            _vi_line(item["index"], self.repair_words)
+                            if self.repair_words
+                            else _long_vi(item["index"])
+                        ),
                         "voiceover_en": f"Short English line {item['index']} about money.",
                     }
                     for item in items
@@ -76,8 +129,13 @@ class Router:
         if "Chấm kịch bản" in system_prompt:
             round_idx = self.judge_calls // len(self.score_plan)
             self.judge_calls += 1
+            labels = [
+                ("analyst", "Nhà phân tích"),
+                ("dramatist", "Dramatist"),
+                ("teacher", "Người giảng giải"),
+            ]
             angle = next(
-                (a for a in self.score_plan if f"[{a}]" in user_prompt), None
+                (a for a, label in labels if label in user_prompt), None
             )
             if angle is None:
                 angle = next(iter(self.score_plan))
@@ -111,11 +169,11 @@ class Router:
                     "index": i + 1,
                     "situation": f"tình huống {angle} {i+1}",
                     "voiceover_vi": (
-                        f"[{angle}] Cảnh ngắn gọn số {i+1}."
+                        f"Cảnh ngắn gọn số {i+1}."
                         if self.short_rewrites
-                        else f"[{angle}] {_long_vi(i + 1)}"
+                        else _long_vi(i + 1)
                     ),
-                    "voiceover_en": f"[{angle}] Improved scene {i+1} opens a surprise.",
+                    "voiceover_en": f"Improved scene {i+1} opens a surprise.",
                     "estimated_duration": 5.0,
                     "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon",
                 }
@@ -136,13 +194,87 @@ def test_best_variant_chosen_and_result_saved(factory, tmp_path, monkeypatch):
     assert result["chosen_score"] == 9.2
     assert result["total_rounds"] == 1
     assert len(vi) == 3 and len(en) == 3
-    assert vi[0]["text"].startswith("[analyst]")
+    assert vi[0]["situation"].startswith("tình huống analyst")
     assert all(4.0 <= sc["duration"] <= 8.0 for sc in vi)
 
     saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
     assert saved["chosen_angle"] == "analyst"
     assert saved["rounds"][0]["scores"][0]["angle"] == "analyst"
     assert "mechanical_metrics" in saved
+
+
+def test_hook_window_and_callback_repairs_satisfy_qa(factory, monkeypatch):
+    slices_vi = [
+        {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh gốc {i+1} diễn biến quan trọng.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(8)
+    ]
+    slices_en = [
+        {"index": sc["index"], "situation": sc["situation"], "text": f"Base scene {sc['index']}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in slices_vi
+    ]
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=8: (slices_vi, slices_en),
+    )
+    router = Router({"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 60, "text": TRANSCRIPT}], target_shots=8
+    )
+
+    # QA S16: the 30s boundary must be crossed at <= 32s
+    acc = 0.0
+    for sc in vi:
+        acc += sc["duration"]
+        if acc >= 30.0:
+            break
+    assert 30.0 <= acc <= 32.0
+
+    # QA S17: last scene echoes a hook keyword or lands a close phrase
+    first_words = set(re.findall(r"\w{5,}", vi[0]["text"].lower()))
+    last_words = set(re.findall(r"\w{5,}", vi[-1]["text"].lower()))
+    assert first_words & last_words or "câu trả lời" in vi[-1]["text"].lower()
+
+    assert [len(sc["text"].split()) for sc in vi[:4]] == [27, 27, 27, 27]
+    assert result["post_repairs"]["hook"]["ok"] is True
+    assert result["post_repairs"]["callback"]["ok"] is True
+    assert router.hook_calls >= 1 and router.callback_calls >= 1
+
+
+def test_duration_expansion_tops_up_short_script(factory, monkeypatch):
+    slices_vi = [
+        {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh gốc {i+1} diễn biến quan trọng.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(30)
+    ]
+    slices_en = [
+        {"index": sc["index"], "situation": sc["situation"], "text": f"Base scene {sc['index']}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in slices_vi
+    ]
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=30: (slices_vi, slices_en),
+    )
+    router = Router(
+        {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
+        repair_words=24,
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 200, "text": TRANSCRIPT}],
+        target_shots=30,
+        target_duration=250.0,
+    )
+    expansion = result["post_repairs"]["duration_expansion"]
+    assert expansion["applicable"] is True
+    assert expansion["calls"] >= 1
+    assert expansion["final_duration_sec"] > expansion["start_duration_sec"]
+    assert expansion["final_drift"] <= 0.28
 
 
 def test_regen_round_feeds_back_and_stops(factory, tmp_path, monkeypatch):
@@ -219,14 +351,15 @@ def test_mechanical_metrics_recorded(factory, monkeypatch):
     )
     m = result["mechanical_metrics"]
     assert m["scene_count"] == 3
-    # Word-derived durations: 19 words / 3 wps = 6.33s per scene
-    assert m["total_duration_sec"] == 19.0
+    # 18-word scenes at 3.5 w/s plus the 24-word callback close on the last scene:
+    # 2 * 5.14s + 6.86s = 17.14s
+    assert m["total_duration_sec"] == 17.1
     assert 0.0 <= m["short_sentence_pct"] <= 1.0
     assert m["estimated_wpm"] > 0
     assert "wpm_in_range" in m
 
 
-def test_word_budget_repair_enforces_12_24_and_passes_audit(factory, monkeypatch):
+def test_word_budget_repair_enforces_18_24_and_passes_audit(factory, monkeypatch):
     slices_vi = [
         {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh gốc {i+1} diễn biến quan trọng.",
          "prompt": "p", "duration": 5.0, "is_key_scene": True}
@@ -251,8 +384,9 @@ def test_word_budget_repair_enforces_12_24_and_passes_audit(factory, monkeypatch
         [{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=6
     )
     assert router.repair_calls > 0
-    assert all(12 <= len(sc["text"].split()) <= 24 for sc in vi)
+    assert all(18 <= len(sc["text"].split()) <= 28 for sc in vi)
     assert all(len(sc["text"].split()) <= 16 for sc in en)
+    assert [len(sc["text"].split()) for sc in vi[:4]] == [27, 27, 27, 27]
 
     from services.script_auditor import ScriptAuditor
     audit = ScriptAuditor(algorithm_mode=True).audit_script(

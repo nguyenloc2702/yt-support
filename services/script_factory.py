@@ -21,6 +21,7 @@ No silent fallbacks: slicing or all-invalid variants raise ScriptFactoryError.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,22 +37,35 @@ MAX_REGEN_ROUNDS = 2
 VARIANT_CHUNK = 20  # scenes per rewrite call (keeps output under max_tokens)
 SPLIT_MIN_CHUNK = 5  # smallest sub-chunk when a rewrite response is unusable
 # Skill-pack pacing anchor: scene duration is computed in code from the VI word
-# count (180 WPM) instead of trusting the LLM's duration guess — keeps the plan
-# timeline consistent with real TTS output (xKiro VI voice ~3.6 w/s).
-WORDS_PER_SECOND = 3.0
+# count (210 WPM) instead of trusting the LLM's duration guess. The audio stage
+# targets 205 WPM with pauses; 3.5 words/s is the plan ceiling (QA S08 <=210).
+WORDS_PER_SECOND = 3.5
 
 # Skill-pack mechanical targets (mirrors scripts/apply_video_algorithm.py)
 TARGET_SHORT_SENTENCE_PCT = 0.54
-MIN_WPM = 160.0
-MAX_WPM = 200.0
-TARGET_WPM = 184.8
+MIN_WPM = 195.0
+MAX_WPM = 214.0
+TARGET_WPM = 205.0
 MIN_SCENE_DURATION = 4.0
 MAX_SCENE_DURATION = 8.0
-VI_MIN_WORDS = 12
+VI_MIN_WORDS = 18
 VI_MAX_WORDS = 24
 EN_MAX_WORDS = 16
+# Hook window: QA S16 allows <=32s. Four hook scenes of 24-28 words land at
+# 27.4-32.0s at 3.5 w/s; the repair targets 105-112 words so the 30s boundary
+# falls inside scene 4 and the scene never overflows the 32s tolerance.
+HOOK_SCENE_COUNT = 4
+HOOK_MIN_WORDS = 24
+HOOK_MAX_WORDS = 28
+HOOK_TARGET_WORDS = (105, 112)
+# QA S16 walks scenes until the cumulative run time crosses 30s and demands
+# <=32s at that boundary. Aim at 30.6s so rounding on either side still passes.
+HOOK_BOUNDARY_SEC = 30.6
 REPAIR_BATCH = 10
 MAX_REPAIR_ROUNDS = 3
+EXPANSION_BATCHES = 4
+EXPANSION_DRIFT_THRESHOLD = 0.28
+EXPANSION_TARGET_WORDS = (23, 24)
 
 VARIANT_ANGLES = [
     {
@@ -87,7 +101,7 @@ JUDGE_RUBRIC = """Bạn là tổng biên tập khắt khe nhất đài documenta
 1. HOOK (2.0đ): 30 giây đầu có [số liệu khủng / nghịch lý] + [so sánh bất ngờ] + [câu hỏi treo]. Không chào hỏi, không giới thiệu lan man.
 2. OPEN LOOPS (2.0đ): ít nhất 4 vòng tò mò; vòng mới mở TRƯỚC khi vòng cũ đóng hoàn toàn; có câu bắc cầu ("Nhưng đó chưa phải điều bất ngờ nhất...").
 3. NHỊP 54/46 (1.5đ): đan xen câu ngắn dứt khoát (<= 6 từ) làm dramatic pause — mục tiêu ~54% số câu ngắn.
-4. TỐC ĐỘ ĐỌC (1.0đ): WPM tổng thể trong khoảng 160-200 (dựa vào độ dài lời thoại và thời lượng từng cảnh).
+4. TỐC ĐỘ ĐỌC (1.0đ): WPM tổng thể trong khoảng 195-214 (dựa vào độ dài lời thoại và thời lượng từng cảnh).
 5. GROUNDED (1.5đ): mọi sự kiện, tên riêng, con số phải có trong transcript nguồn. Bịa bất kỳ chi tiết nào là lỗi nặng.
 6. THUẬT NGỮ (1.0đ): thuật ngữ tài chính chính xác, nhất quán (tiền gốc, lãi suất, cung tiền, ngân hàng trung ương...).
 7. CALLBACK (1.0đ): cảnh cuối quay lại giải tỏa câu hỏi/nghịch lý đã gieo ở hook.
@@ -142,6 +156,7 @@ class ScriptFactory:
         transcript_segments: List[Dict[str, Any]],
         target_shots: int,
         project_dir: Optional[Path] = None,
+        target_duration: Optional[float] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
         """Slice -> best-of-N rewrite -> judge -> regenerate. Returns (vi, en, result)."""
         started = time.time()
@@ -207,6 +222,11 @@ class ScriptFactory:
         if best is None or not best.valid:
             raise ScriptFactoryError("All script variants were invalid across all rounds")
 
+        # Post-selection repairs fix the structural checks the judge scores but
+        # cannot enforce (hook window, callback echo) and top up a script that is
+        # still far short of the requested duration.
+        post_repairs = self._post_process_best(best, transcript_text, target_duration)
+
         result = {
             "engine": "script_factory_best_of_n",
             "chosen_angle": best.angle["id"],
@@ -219,6 +239,7 @@ class ScriptFactory:
             "mechanical_metrics": best.metrics,
             "judge_breakdown": best.breakdown,
             "judge_feedback": best.judge_feedback,
+            "post_repairs": post_repairs,
             "duration_sec": round(time.time() - started, 1),
         }
         if project_dir is not None:
@@ -307,6 +328,373 @@ class ScriptFactory:
                 offenders.append(int(vi.get("index", 0)))
         return offenders
 
+    # -------------------------------------------------- post-selection repairs
+
+    def _post_process_best(
+        self,
+        best: Variant,
+        transcript_text: str,
+        target_duration: Optional[float],
+    ) -> Dict[str, Any]:
+        vi, en = best.scenes_vi, best.scenes_en
+        hook = self._repair_hook(best.angle, vi, en, transcript_text)
+        callback = self._repair_callback(best.angle, vi, en, transcript_text)
+        expansion = self._expand_toward_target(
+            best.angle, vi, en, transcript_text, target_duration
+        )
+        best.metrics = self._mechanical_metrics(vi)
+        logger.info(
+            "Post-repairs: hook=%s callback=%s expansion=%s",
+            {k: hook.get(k) for k in ("word_counts", "duration_acc", "ok")},
+            {k: callback.get(k) for k in ("ok", "has_close")},
+            {k: expansion.get(k) for k in ("calls", "final_duration_sec", "final_drift")},
+        )
+        return {"hook": hook, "callback": callback, "duration_expansion": expansion}
+
+    @staticmethod
+    def _hook_counts(scenes_vi: List[Dict[str, Any]]) -> List[int]:
+        return [
+            len(str(sc.get("text", "")).split())
+            for sc in scenes_vi[:HOOK_SCENE_COUNT]
+        ]
+
+    @classmethod
+    def _hook_compliant(cls, scenes_vi: List[Dict[str, Any]]) -> bool:
+        if len(scenes_vi) < HOOK_SCENE_COUNT:
+            return True
+        counts = cls._hook_counts(scenes_vi)
+        total = sum(counts)
+        return (
+            all(HOOK_MIN_WORDS <= c <= HOOK_MAX_WORDS for c in counts)
+            and HOOK_TARGET_WORDS[0] <= total <= HOOK_TARGET_WORDS[1]
+        )
+
+    @staticmethod
+    def _callback_compliant(scenes_vi: List[Dict[str, Any]]) -> bool:
+        if len(scenes_vi) < 2:
+            return True
+        first_words = set(re.findall(r"\w{5,}", str(scenes_vi[0].get("text", "")).lower()))
+        last_text = str(scenes_vi[-1].get("text", "")).lower()
+        last_words = set(re.findall(r"\w{5,}", last_text))
+        has_close = any(
+            w in last_text
+            for w in ("quay lại", "câu trả lời", "bài học", "như vậy", "chính là")
+        )
+        return bool(first_words & last_words) or has_close
+
+    def _repair_hook(
+        self,
+        angle: Dict[str, str],
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        transcript_text: str,
+    ) -> Dict[str, Any]:
+        """Force the four opening scenes to cover the 30s hook (QA S16)."""
+        if len(scenes_vi) < HOOK_SCENE_COUNT:
+            return {"applicable": False}
+        from pipeline.llm_client import chat_json
+
+        feedback = ""
+        calls = 0
+        for _ in range(MAX_REPAIR_ROUNDS):
+            if self._hook_compliant(scenes_vi):
+                break
+            items = [
+                {
+                    "index": int(scenes_vi[i].get("index", i + 1)),
+                    "situation": str(scenes_vi[i].get("situation", ""))[:300],
+                    "voiceover_vi": str(scenes_vi[i].get("text", "")),
+                    "voiceover_en": str(scenes_en[i].get("text", "")),
+                }
+                for i in range(HOOK_SCENE_COUNT)
+            ]
+            user_prompt = (
+                f"{feedback}"
+                f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
+                f"TRANSCRIPT NGUỒN (chỉ dùng sự kiện từ đây):\n\"\"\"{transcript_text[:4000]}\"\"\"\n\n"
+                "BỐN CẢNH MỞ ĐẦU CẦN VIẾT LẠI (HOOK 30 GIÂY):\n"
+                f"{json.dumps(items, ensure_ascii=False, indent=1)}\n\n"
+                f"Yêu cầu: giữ nguyên index và thứ tự. MỖI voiceover_vi {HOOK_MIN_WORDS}-{HOOK_MAX_WORDS} từ; "
+                f"TỔNG 4 cảnh {HOOK_TARGET_WORDS[0]}-{HOOK_TARGET_WORDS[1]} từ. "
+                "Cảnh 1 phải mở bằng số liệu khủng hoặc nghịch lý và kết bằng câu hỏi treo. "
+                "Đan xen câu ngắn dứt khoát (<= 6 từ), không chào hỏi, chỉ dùng số liệu có trong transcript. "
+                f"voiceover_en tối đa {EN_MAX_WORDS} từ, khớp ý từng cảnh.\n"
+                "Trả về duy nhất JSON object: "
+                '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}]}'
+            )
+            try:
+                parsed = chat_json(
+                    REPAIR_SYSTEM_PROMPT, user_prompt,
+                    temperature=0.4, max_tokens=3000, model=self.model,
+                )
+                calls += 1
+            except Exception as exc:
+                logger.warning("Hook repair call failed: %s", exc)
+                break
+            repaired = parsed.get("scenes") if isinstance(parsed, dict) else None
+            if not isinstance(repaired, list):
+                continue
+            by_index = {int(scenes_vi[i].get("index", i + 1)): i for i in range(HOOK_SCENE_COUNT)}
+            for rec in repaired:
+                if not isinstance(rec, dict):
+                    continue
+                try:
+                    pos = by_index.get(int(rec.get("index")))
+                except (TypeError, ValueError):
+                    continue
+                if pos is None:
+                    continue
+                text_vi = str(rec.get("voiceover_vi", "")).strip()
+                text_en = str(rec.get("voiceover_en", "")).strip()
+                if text_vi:
+                    scenes_vi[pos]["text"] = text_vi
+                    dur = max(
+                        MIN_SCENE_DURATION,
+                        min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
+                    )
+                    scenes_vi[pos]["duration"] = dur
+                    scenes_en[pos]["duration"] = dur
+                if text_en:
+                    scenes_en[pos]["text"] = text_en
+            counts = self._hook_counts(scenes_vi)
+            feedback = (
+                f"LẦN TRƯỚC CHƯA ĐẠT: số từ từng cảnh {counts} (tổng {sum(counts)}). "
+                f"Cần {HOOK_MIN_WORDS}-{HOOK_MAX_WORDS} từ mỗi cảnh và tổng "
+                f"{HOOK_TARGET_WORDS[0]}-{HOOK_TARGET_WORDS[1]}.\n\n"
+            )
+
+        if not self._hook_compliant(scenes_vi):
+            logger.warning(
+                "Hook repair left counts %s (target %s, total %s)",
+                self._hook_counts(scenes_vi), (HOOK_MIN_WORDS, HOOK_MAX_WORDS), HOOK_TARGET_WORDS,
+            )
+        acc = self._fit_hook_window(scenes_vi, scenes_en)
+        return {
+            "applicable": True,
+            "calls": calls,
+            "word_counts": self._hook_counts(scenes_vi),
+            "duration_acc": round(acc, 2),
+            "ok": self._hook_compliant(scenes_vi) and acc <= 32.0,
+        }
+
+    @staticmethod
+    def _fit_hook_window(
+        scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
+    ) -> float:
+        """Nudge durations so the 30s boundary lands at HOOK_BOUNDARY_SEC."""
+        acc = 0.0
+        crossing = None
+        for i, sc in enumerate(scenes_vi):
+            acc += float(sc.get("duration", 0.0))
+            if acc >= HOOK_BOUNDARY_SEC:
+                crossing = i
+                break
+        if crossing is None:
+            return acc
+        delta = acc - HOOK_BOUNDARY_SEC
+        for i in range(crossing, -1, -1):
+            if abs(delta) < 0.05:
+                break
+            current = float(scenes_vi[i].get("duration", 0.0))
+            if delta > 0:
+                new_dur = max(MIN_SCENE_DURATION, current - delta)
+            else:
+                new_dur = min(MAX_SCENE_DURATION, current - delta)
+            delta -= current - new_dur
+            scenes_vi[i]["duration"] = round(new_dur, 3)
+            scenes_en[i]["duration"] = round(new_dur, 3)
+        return sum(float(sc.get("duration", 0.0)) for sc in scenes_vi[: crossing + 1])
+
+    def _repair_callback(
+        self,
+        angle: Dict[str, str],
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        transcript_text: str,
+    ) -> Dict[str, Any]:
+        """Make the last scene echo the hook scene or land an explicit close (QA S17)."""
+        if len(scenes_vi) < 2:
+            return {"applicable": False, "ok": True}
+        if self._callback_compliant(scenes_vi):
+            return {"applicable": True, "rewritten": False, "ok": True}
+        from pipeline.llm_client import chat_json
+
+        hook_text = " ".join(str(sc.get("text", "")) for sc in scenes_vi[:HOOK_SCENE_COUNT])
+        last = scenes_vi[-1]
+        feedback = ""
+        calls = 0
+        for _ in range(MAX_REPAIR_ROUNDS):
+            user_prompt = (
+                f"{feedback}"
+                f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
+                f"TRANSCRIPT NGUỒN (chỉ dùng sự kiện từ đây):\n\"\"\"{transcript_text[:4000]}\"\"\"\n\n"
+                "CẢNH KẾT CẦN VIẾT LẠI (CALLBACK):\n"
+                f"{json.dumps([{ 'index': int(last.get('index', len(scenes_vi))), 'situation': str(last.get('situation', ''))[:300], 'voiceover_vi': str(last.get('text', '')), 'voiceover_en': str(scenes_en[-1].get('text', '')) }], ensure_ascii=False, indent=1)}\n\n"
+                f"HOOK MỞ ĐẦU (phải được giải tỏa / nhắc lại):\n\"\"\"{hook_text[:1200]}\"\"\"\n\n"
+                f"Yêu cầu: viết lại CHỈ cảnh cuối thành câu chốt {VI_MIN_WORDS}-{VI_MAX_WORDS} từ. "
+                "BẮT BUỘC lặp lại một từ khóa dài (>= 5 ký tự) đã xuất hiện ở cảnh 1, "
+                "hoặc dùng đúng một cụm chốt: 'quay lại', 'câu trả lời', 'bài học', 'như vậy', 'chính là'. "
+                "Câu chốt phải trả lời trực tiếp câu hỏi treo của hook, không mở vòng tò mò mới. "
+                f"voiceover_en tối đa {EN_MAX_WORDS} từ.\n"
+                "Trả về duy nhất JSON object: "
+                '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}]}'
+            )
+            try:
+                parsed = chat_json(
+                    REPAIR_SYSTEM_PROMPT, user_prompt,
+                    temperature=0.4, max_tokens=1200, model=self.model,
+                )
+                calls += 1
+            except Exception as exc:
+                logger.warning("Callback repair call failed: %s", exc)
+                break
+            repaired = parsed.get("scenes") if isinstance(parsed, dict) else None
+            rec = repaired[0] if isinstance(repaired, list) and repaired else None
+            if isinstance(rec, dict):
+                text_vi = str(rec.get("voiceover_vi", "")).strip()
+                text_en = str(rec.get("voiceover_en", "")).strip()
+                if text_vi:
+                    last["text"] = text_vi
+                    dur = max(
+                        MIN_SCENE_DURATION,
+                        min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
+                    )
+                    last["duration"] = dur
+                    scenes_en[-1]["duration"] = dur
+                if text_en:
+                    scenes_en[-1]["text"] = text_en
+            if self._callback_compliant(scenes_vi):
+                break
+            feedback = (
+                "LẦN TRƯỚC CHƯA ĐẠT CALLBACK: cảnh cuối không lặp từ khóa nào của cảnh 1 "
+                "và không có cụm chốt. Viết lại đúng yêu cầu.\n\n"
+            )
+        ok = self._callback_compliant(scenes_vi)
+        if not ok:
+            logger.warning("Callback repair still non-compliant after %d calls", calls)
+        last_text = str(scenes_vi[-1].get("text", "")).lower()
+        return {
+            "applicable": True,
+            "calls": calls,
+            "rewritten": calls > 0,
+            "ok": ok,
+            "has_close": any(
+                w in last_text
+                for w in ("quay lại", "câu trả lời", "bài học", "như vậy", "chính là")
+            ),
+        }
+
+    def _expand_toward_target(
+        self,
+        angle: Dict[str, str],
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        transcript_text: str,
+        target_duration: Optional[float],
+    ) -> Dict[str, Any]:
+        """Top up short scripts by rewriting the leanest scenes to 23-24 words."""
+        if not target_duration or target_duration <= 0:
+            return {"applicable": False}
+        target = float(target_duration)
+        start_total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
+        calls = 0
+        for _ in range(EXPANSION_BATCHES):
+            total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
+            drift = abs(total - target) / target
+            if drift <= EXPANSION_DRIFT_THRESHOLD or total > target:
+                break
+            candidates = [
+                i
+                for i in range(HOOK_SCENE_COUNT, len(scenes_vi) - 1)
+                if len(str(scenes_vi[i].get("text", "")).split()) < EXPANSION_TARGET_WORDS[0]
+            ]
+            if not candidates:
+                break
+            candidates.sort(key=lambda i: len(str(scenes_vi[i].get("text", "")).split()))
+            batch = candidates[:REPAIR_BATCH]
+            calls += self._rewrite_scene_indices(
+                angle, scenes_vi, scenes_en, batch, transcript_text,
+                f"Nâng MỖI cảnh trên lên {EXPANSION_TARGET_WORDS[0]}-{EXPANSION_TARGET_WORDS[1]} từ "
+                "(6.6-6.9 giây) bằng chi tiết grounded từ transcript; giữ nguyên ý, số liệu, tên riêng, index. "
+                f"voiceover_en tối đa {EN_MAX_WORDS} từ.",
+            )
+        final_total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
+        return {
+            "applicable": True,
+            "calls": calls,
+            "target_sec": round(target, 1),
+            "start_duration_sec": round(start_total, 1),
+            "final_duration_sec": round(final_total, 1),
+            "final_drift": round(abs(final_total - target) / target, 3),
+        }
+
+    def _rewrite_scene_indices(
+        self,
+        angle: Dict[str, str],
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        indices: List[int],
+        transcript_text: str,
+        instruction: str,
+    ) -> int:
+        from pipeline.llm_client import chat_json
+
+        items = [
+            {
+                "index": int(scenes_vi[i].get("index", i + 1)),
+                "situation": str(scenes_vi[i].get("situation", ""))[:300],
+                "voiceover_vi": str(scenes_vi[i].get("text", "")),
+                "voiceover_en": str(scenes_en[i].get("text", "")),
+            }
+            for i in indices
+        ]
+        if not items:
+            return 0
+        user_prompt = (
+            f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
+            f"TRANSCRIPT NGUỒN (chỉ dùng sự kiện từ đây):\n\"\"\"{transcript_text[:4000]}\"\"\"\n\n"
+            "DANH SÁCH CẢNH CẦN SỬA NGÂN SÁCH TỪ:\n"
+            f"{json.dumps(items, ensure_ascii=False, indent=1)}\n\n"
+            f"{instruction} Trả về duy nhất JSON object: "
+            '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}]}'
+        )
+        try:
+            parsed = chat_json(
+                REPAIR_SYSTEM_PROMPT, user_prompt,
+                temperature=0.3, max_tokens=6000, model=self.model,
+            )
+        except Exception as exc:
+            logger.warning("Scene expansion call failed: %s", exc)
+            return 0
+        repaired = parsed.get("scenes") if isinstance(parsed, dict) else None
+        if not isinstance(repaired, list):
+            return 0
+        by_index = {int(scenes_vi[i].get("index", i + 1)): i for i in indices}
+        updated = 0
+        for rec in repaired:
+            if not isinstance(rec, dict):
+                continue
+            try:
+                pos = by_index.get(int(rec.get("index")))
+            except (TypeError, ValueError):
+                continue
+            if pos is None:
+                continue
+            text_vi = str(rec.get("voiceover_vi", "")).strip()
+            text_en = str(rec.get("voiceover_en", "")).strip()
+            if text_vi:
+                scenes_vi[pos]["text"] = text_vi
+                dur = max(
+                    MIN_SCENE_DURATION,
+                    min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
+                )
+                scenes_vi[pos]["duration"] = dur
+                scenes_en[pos]["duration"] = dur
+                updated += 1
+            if text_en:
+                scenes_en[pos]["text"] = text_en
+        return updated
+
     def _repair_word_budget(
         self,
         angle: Dict[str, str],
@@ -314,7 +702,7 @@ class ScriptFactory:
         scenes_en: List[Dict[str, Any]],
         transcript_text: str,
     ) -> None:
-        """Rewrite out-of-budget scenes in place until VI 12-24 words / EN <=16."""
+        """Rewrite out-of-budget scenes in place until VI 18-24 words / EN <=16."""
         from pipeline.llm_client import chat_json
 
         by_index = {
@@ -477,13 +865,13 @@ class ScriptFactory:
             f"{json.dumps(compact_base, ensure_ascii=False, indent=1)}\n\n"
             "Yêu cầu: viết lại TỪNG cảnh đúng thứ tự, GIỮ NGUYÊN SỐ LƯỢNG CẢNH. Với mỗi cảnh:\n"
             "- voiceover_vi: lời thoại mượt mà trọn câu theo góc kể và bộ quy tắc; câu ngắn dứt khoát "
-            "(<= 6 từ) xen kẽ tạo nhịp; không lặp từ, không cụt lủn. MỖI cảnh chỉ 12-24 từ "
-            "(khung cảnh 4-8 giây tại nhịp 180 WPM) — ý dài phải viết cô đọng, TUYỆT ĐỐI KHÔNG dồn "
-            "quá 24 từ vào một cảnh.\n"
+            "(<= 6 từ) xen kẽ tạo nhịp; không lặp từ, không cụt lủn. MỖI cảnh 18-24 từ "
+            "(5.1-6.9 giây tại nhịp 210 WPM) — ý dài phải viết cô đọng, TUYỆT ĐỐI KHÔNG dồn "
+            "quá 24 từ vào một cảnh. Ưu tiên 20-22 từ để tổng kịch bản đủ dài.\n"
             "- voiceover_en: bản EN đối chiếu chuẩn xác, giữ nguyên số liệu, diễn lại NGẮN GỌN theo "
             "nguyên ý (không dịch word-by-word): tối đa 16 từ mỗi cảnh vì giọng đọc EN của gateway "
             "chỉ ~110 wpm (chậm gần gấp đôi giọng VI ~200 wpm) — vượt budget sẽ lệch timeline.\n"
-            "- estimated_duration: 4.5-8.0 giây, tự nhiên theo độ dài lời thoại.\n"
+            "- estimated_duration: 5.1-6.9 giây, tự nhiên theo độ dài lời thoại.\n"
             "- situation: tình huống cụ thể để dựng hình.\n"
             "- visual_prompt: prompt tiếng Anh theo STYLE BIBLE crayon.\n\n"
             "Trả về duy nhất JSON object:\n"
@@ -538,6 +926,7 @@ class ScriptFactory:
         )
         user_prompt = (
             (f"{feedback_brief}\n\n" if feedback_brief else "")
+            + f"GÓC KỂ: {variant.angle['label']} — {variant.angle['brief']}\n\n"
             + f"TRANSCRIPT NGUỒN (để kiểm tra GROUNDED):\n\"\"\"{transcript_text[:5000]}\"\"\"\n\n"
             f"KỊCH BẢN CẦN CHẤM:\n{script_lines[:9000]}"
         )

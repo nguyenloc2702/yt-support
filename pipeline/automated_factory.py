@@ -687,14 +687,16 @@ class AutomatedFactory:
                 # Determine target duration: if user specified duration, use it;
                 # otherwise match original video duration!
                 effective_duration = float(target_duration) if (target_duration and target_duration > 0) else total_dur
-                # Proportional shot count (5.0s per shot, allowing full narrative coverage up to 180 shots / 15 mins)
-                target_shots = max(6, min(180, int(round(effective_duration / default_shot_duration))))
+                # Planned scenes average ~6s (18-24 words at 3.5 words/s), so divide
+                # by 6 rather than 5 to land the script on the requested duration.
+                target_shots = max(6, min(180, int(round(effective_duration / 6.0))))
 
                 # Phase 2: best-of-N grounded rewrite with LLM judging.
                 # Fails loudly (ScriptFactoryError) when the xKiro gateway is unusable.
                 from services.script_factory import ScriptFactory
                 vi_scenes, en_scenes, algo_result = ScriptFactory().run(
-                    sub_segments or [], target_shots=target_shots, project_dir=project_dir
+                    sub_segments or [], target_shots=target_shots, project_dir=project_dir,
+                    target_duration=effective_duration,
                 )
                 # Record the user-facing target so the QA scorecard can score drift
                 algo_result["target_duration_sec"] = round(effective_duration, 1)
@@ -831,7 +833,7 @@ class AutomatedFactory:
                 f"Job ID: {job_id}",
                 f"Tiêu đề: {source_title or 'Video Documentary'}",
                 f"Tổng số cảnh: {len(shots)} cảnh | Thời lượng dự kiến: ~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)",
-                f"Tổng số từ: {total_words_vi} từ | Tốc độ đọc: ~2.5 - 3.0 từ/giây",
+                f"Tổng số từ: {total_words_vi} từ | Tốc độ đọc: ~3.4 - 3.5 từ/giây (205-210 WPM)",
                 f"Giọng đọc đề xuất: {target_voice}",
                 "=" * 80,
                 "",
@@ -1087,6 +1089,12 @@ class AutomatedFactory:
             f_en.result()
             f_char.result()
 
+        audit_reports = self._audit_gate2_audio(job_id, project_dir, asm)
+        audit_block = (
+            "\n\n" + "\n\n".join(report.summary_vi() for report in audit_reports.values())
+            if audit_reports else ""
+        )
+
         logger.info("Finished parallel generation of Gate 2 & Gate 3 artifacts for %s", job_id)
         if self.notifier.is_configured:
             summary_markup = {
@@ -1100,9 +1108,91 @@ class AutomatedFactory:
             self.notifier.send_message(
                 f"🎉 <b>[GATE 2 & GATE 3 ĐÃ TẠO XONG]:</b> Job <code>{job_id}</code>\n"
                 f"Các bản Audio VI, Audio EN và Character Sheets đã được chuẩn bị.\n"
-                f"👉 Hãy nghe duyệt audio và duyệt nhân vật để mở Gate 4 (Video)!",
+                f"👉 Hãy nghe duyệt audio và duyệt nhân vật để mở Gate 4 (Video)!{audit_block}",
                 reply_markup=summary_markup
             )
+
+    def _audit_gate2_audio(self, job_id: str, project_dir: Path, asm) -> Dict[str, Any]:
+        """Run the deterministic narration audit for each synthesized language.
+
+        Advisory only: results are saved as audio_sync_<lang>.json, the active
+        plan gets audio-first durations, and the human Gate 2 approval stays in
+        charge. Any audit failure is logged, never fatal.
+        """
+        from pipeline.audio_audit import audit_audio, save_audio_audit
+
+        plan_files = {
+            "vi": project_dir / "shots_plan_vi.json",
+            "en": project_dir / "shots_plan_en.json",
+        }
+        plans: Dict[str, List[Dict[str, Any]]] = {}
+        for lang, path in plan_files.items():
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Unreadable %s plan for audit: %s", lang, exc)
+                continue
+            if isinstance(data, list) and data:
+                plans[lang] = data
+
+        reports: Dict[str, Any] = {}
+        for lang in ("vi", "en"):
+            audio_path = project_dir / f"audio_{lang}_full.mp3"
+            plan = plans.get(lang)
+            if not audio_path.is_file() or not plan:
+                continue
+            try:
+                report = audit_audio(audio_path, plan, lang)
+            except Exception as exc:
+                logger.error("Audio audit crashed for %s/%s: %s", job_id, lang, exc)
+                continue
+            save_audio_audit(report, project_dir / f"audio_sync_{lang}.json")
+            reports[lang] = report
+            logger.info(
+                "Audio audit %s %s: WER %.1f%%, drift %+.1f%%, WPM %.0f, errors=%d, warnings=%d",
+                job_id, lang, report.wer * 100, report.duration_drift * 100,
+                report.local_wpm_mean, len(report.errors), len(report.warnings),
+            )
+
+        def _apply_timing(plan: List[Dict[str, Any]], report) -> None:
+            by_index = {
+                int(sc.get("index", i + 1)): sc for i, sc in enumerate(plan)
+            }
+            for entry in report.timing_map:
+                sc = by_index.get(int(entry["index"]))
+                if sc is not None:
+                    sc["duration"] = float(entry["duration_sec"])
+
+        for lang, report in reports.items():
+            if lang not in plans:
+                continue
+            _apply_timing(plans[lang], report)
+            plan_files[lang].write_text(
+                json.dumps(plans[lang], indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+        voice_file = project_dir / "voice.txt"
+        voice = voice_file.read_text(encoding="utf-8").strip() if voice_file.is_file() else ""
+        active_lang = "en" if (voice and "vietnamese" not in voice) else "vi"
+        active_report = reports.get(active_lang)
+        active_path = project_dir / "shots_plan.json"
+        if active_report and active_path.is_file():
+            try:
+                active_plan = json.loads(active_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                active_plan = plans.get(active_lang)
+            if isinstance(active_plan, list) and active_plan:
+                _apply_timing(active_plan, active_report)
+                active_path.write_text(
+                    json.dumps(active_plan, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                setter = getattr(asm, "set_shots_plan", None)
+                if setter:
+                    setter(active_plan)
+
+        return reports
 
     def _generate_character_image(self, prompt: str, ref_path: Path) -> None:
         """Generate a real crayon-style character reference image.

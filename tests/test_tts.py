@@ -183,11 +183,13 @@ def test_long_xkiro_failure_falls_back_whole_track(tmp_path, monkeypatch):
 
 
 def test_rate_fit_slows_fast_narration_in_place(tmp_path, monkeypatch):
+    import json
+
     import pipeline.tts as tts
 
     audio = tmp_path / "fast.mp3"
     audio.write_bytes(b"fast")
-    # 60 words in 15s = 240 WPM -> atempo 0.75 -> 20s
+    # 60 words in 15s = 240 WPM -> target 205 WPM -> atempo 0.8542
     monkeypatch.setattr(tts, "_probe_duration", lambda p: 15.0)
     calls = []
 
@@ -200,8 +202,38 @@ def test_rate_fit_slows_fast_narration_in_place(tmp_path, monkeypatch):
     wpm = tts._fit_narration_rate("từ " * 60, audio)
 
     assert wpm == pytest.approx(240.0)
-    assert "atempo=0.7500" in calls[0]
+    assert "atempo=0.8542" in calls[0]
     assert audio.read_bytes() == b"slow"
+    sidecar = json.loads(tts.rate_fit_sidecar_path(audio).read_text(encoding="utf-8"))
+    assert sidecar["native_wpm"] == pytest.approx(240.0)
+    assert sidecar["atempo"] == pytest.approx(0.8542)
+    assert sidecar["slowdown_capped"] is False
+
+
+def test_rate_fit_caps_slowdown_at_min_atempo(tmp_path, monkeypatch):
+    import json
+
+    import pipeline.tts as tts
+
+    audio = tmp_path / "very_fast.mp3"
+    audio.write_bytes(b"fast")
+    # 60 words in 12s = 300 WPM -> target would need 0.683x; cap at 0.75x.
+    monkeypatch.setattr(tts, "_probe_duration", lambda p: 12.0)
+    calls = []
+
+    def fake_ffmpeg(args):
+        calls.append(args)
+        Path(args[-1]).write_bytes(b"slow")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", fake_ffmpeg)
+
+    wpm = tts._fit_narration_rate("từ " * 60, audio)
+
+    assert wpm == pytest.approx(300.0)
+    assert f"atempo={tts.MIN_ATEMPO:.4f}" in calls[0]
+    sidecar = json.loads(tts.rate_fit_sidecar_path(audio).read_text(encoding="utf-8"))
+    assert sidecar["slowdown_capped"] is True
+    assert sidecar["atempo"] == pytest.approx(tts.MIN_ATEMPO)
 
 
 def test_rate_fit_leaves_in_band_audio_untouched(tmp_path, monkeypatch):
@@ -209,14 +241,15 @@ def test_rate_fit_leaves_in_band_audio_untouched(tmp_path, monkeypatch):
 
     audio = tmp_path / "ok.mp3"
     audio.write_bytes(b"ok")
-    monkeypatch.setattr(tts, "_probe_duration", lambda p: 20.0)
+    # 60 words in 17s = 211.8 WPM -> inside the 195-214 band.
+    monkeypatch.setattr(tts, "_probe_duration", lambda p: 17.0)
 
     def boom(args):
         raise AssertionError("ffmpeg must not run for in-band audio")
 
     monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", boom)
 
-    assert tts._fit_narration_rate("từ " * 60, audio) == pytest.approx(180.0)
+    assert tts._fit_narration_rate("từ " * 60, audio) == pytest.approx(211.7647, abs=0.01)
     assert audio.read_bytes() == b"ok"
 
 

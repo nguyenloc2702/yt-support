@@ -136,8 +136,8 @@ def test_factory_mode2_custom_duration_and_telegram_dispatch(test_factory: Autom
     # User specifies custom target_duration = 300.0s (5 minutes)
     job_id = test_factory.run_ai_genesis("https://youtube.com/watch?v=doc_5min", target_duration=300.0)
     summary = test_factory.jq.get_job_summary(job_id)
-    # 300s / 5s = 60 shots
-    assert summary["total"] == 60
+    # 300s / 6s mean planned scene = 50 shots
+    assert summary["total"] == 50
 
     # Ensure document was sent to Telegram for user final review
     mock_notifier.send_document.assert_called()
@@ -149,7 +149,7 @@ def test_factory_mode2_custom_duration_and_telegram_dispatch(test_factory: Autom
     sent_msgs = [call[0][0] for call in mock_notifier.send_message.call_args_list]
     approval_msg = next(m for m in sent_msgs if "KỊCH BẢN ĐÃ XONG" in m)
     assert "TRÍCH ĐOẠN MỞ ĐẦU (HOOK)" in approval_msg
-    assert "60 cảnh" in approval_msg
+    assert "50 cảnh" in approval_msg
 
 
 
@@ -213,6 +213,98 @@ def test_gate2_sends_audio_previews_to_telegram(tmp_path, monkeypatch):
     assert set(sent["audio"]) == {"audio_vi_full.mp3", "audio_en_full.mp3"}
     assert (project_dir / "audio_vi_full.mp3").is_file()
     assert (project_dir / "audio_en_full.mp3").is_file()
+
+
+def test_gate2_audio_audit_applies_audio_first_timing(tmp_path, monkeypatch):
+    import pipeline.audio_audit as audit_mod
+    from pipeline.audio_audit import AudioAuditResult
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    def _plan(prefix):
+        return [
+            {"index": 1, "text": f"{prefix} cảnh một", "duration": 5.0},
+            {"index": 2, "text": f"{prefix} cảnh hai", "duration": 5.0},
+        ]
+
+    for name in ("shots_plan_vi.json", "shots_plan_en.json", "shots_plan.json"):
+        (project_dir / name).write_text(json.dumps(_plan("x")), encoding="utf-8")
+    (project_dir / "voice.txt").write_text("vi-VN-NamMinhTri", encoding="utf-8")
+    (project_dir / "audio_vi_full.mp3").write_bytes(b"ID3")
+    (project_dir / "audio_en_full.mp3").write_bytes(b"ID3")
+
+    timing_map = [
+        {"index": 1, "start_sec": 0.0, "duration_sec": 6.2, "hold_sec": 6.2},
+        {"index": 2, "start_sec": 6.2, "duration_sec": 4.4, "hold_sec": 4.4},
+    ]
+
+    def fake_audit(audio_path, plan, language, **kw):
+        return AudioAuditResult(
+            language=language,
+            audio_path=str(audio_path),
+            audio_duration_sec=10.6,
+            plan_duration_sec=10.0,
+            duration_drift=0.06,
+            wer=0.0,
+            word_accuracy=1.0,
+            matched_words=8,
+            expected_words=8,
+            asr_words=8,
+            local_wpm_mean=206.0,
+            local_wpm_std=4.0,
+            global_wpm=206.0,
+            pause_count=2,
+            pause_total_sec=0.6,
+            pause_ratio=0.06,
+            pause_histogram={},
+            timing_map=[dict(entry) for entry in timing_map],
+        )
+
+    monkeypatch.setattr(audit_mod, "audit_audio", fake_audit)
+
+    class FakeASM:
+        def __init__(self):
+            self.shots = None
+
+        def set_shots_plan(self, shots):
+            self.shots = shots
+
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs", db_path=tmp_path / "jobs.sqlite3"
+    )
+    asm = FakeASM()
+
+    reports = factory._audit_gate2_audio("job1", project_dir, asm)
+
+    assert set(reports) == {"vi", "en"}
+    for lang in ("vi", "en"):
+        assert (project_dir / f"audio_sync_{lang}.json").is_file()
+        saved = json.loads(
+            (project_dir / f"shots_plan_{lang}.json").read_text(encoding="utf-8")
+        )
+        assert [sc["duration"] for sc in saved] == [6.2, 4.4]
+        assert "AUDIO AUDIT" in reports[lang].summary_vi()
+
+    active = json.loads((project_dir / "shots_plan.json").read_text(encoding="utf-8"))
+    assert [sc["duration"] for sc in active] == [6.2, 4.4]
+    assert asm.shots is not None
+    assert [sc["duration"] for sc in asm.shots] == [6.2, 4.4]
+
+
+def test_gate2_audio_audit_skips_missing_audio(tmp_path):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "shots_plan_vi.json").write_text("[]", encoding="utf-8")
+
+    class FakeASM:
+        def set_shots_plan(self, shots):  # pragma: no cover - must not be called
+            raise AssertionError("no audio means no timing to apply")
+
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs", db_path=tmp_path / "jobs.sqlite3"
+    )
+    assert factory._audit_gate2_audio("job1", project_dir, FakeASM()) == {}
 
 
 def test_deduplicate_vtt_segments():

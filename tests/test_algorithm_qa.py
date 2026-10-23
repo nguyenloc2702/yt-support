@@ -50,8 +50,8 @@ def _seed_project(tmp_path: Path, plan=None, algo=None, characters=None):
     return plan
 
 
-def test_exactly_60_criteria():
-    assert count_criteria() == 60
+def test_exactly_62_criteria():
+    assert count_criteria() == 62
     ids = [fn._qa_id for fn in ALL_CHECKS]
     assert len(ids) == len(set(ids)), "duplicate check ids"
 
@@ -135,6 +135,62 @@ def test_audio_stage_skips_gracefully_without_files(tmp_path):
     assert not t01.passed  # audio file missing -> check fails at audio stage
     t07 = next(r for r in card.results if r.id == "T07")
     assert t07.passed and t07.value is None  # n/a when no audio file
+    t10 = next(r for r in card.results if r.id == "T10")
+    t11 = next(r for r in card.results if r.id == "T11")
+    assert t10.passed and t10.value is None and "n/a" in t10.target
+    assert t11.passed and t11.value is None and "n/a" in t11.target
+
+
+def _audio_sync_payload(wer=0.04, missing_scenes=0, atempo=0.92, capped=False,
+                        wpm=205.0, wpm_in_band=True):
+    scenes = [
+        {"index": i + 1, "missing": i < missing_scenes}
+        for i in range(10)
+    ]
+    return {
+        "language": "vi",
+        "wer": wer,
+        "asr_words": 180,
+        "local_wpm_mean": wpm,
+        "atempo": atempo,
+        "naturalness": {
+            "atempo_ok": atempo is None or atempo >= 0.75,
+            "wpm_in_band": wpm_in_band,
+            "slowdown_capped": capped,
+        },
+        "scenes": scenes,
+    }
+
+
+def test_audio_sync_checks_pass_on_clean_audit(tmp_path):
+    _seed_project(tmp_path)
+    (tmp_path / "audio_sync_vi.json").write_text(
+        json.dumps(_audio_sync_payload()), encoding="utf-8"
+    )
+    card = compute_scorecard(tmp_path, stage="audio")
+    t10 = next(r for r in card.results if r.id == "T10")
+    t11 = next(r for r in card.results if r.id == "T11")
+    assert t10.passed, t10.value
+    assert t11.passed, t11.value
+
+
+def test_audio_sync_checks_flag_bad_audio(tmp_path):
+    _seed_project(tmp_path)
+    (tmp_path / "audio_sync_vi.json").write_text(
+        json.dumps(_audio_sync_payload(
+            wer=0.42, missing_scenes=2, atempo=0.70, capped=True, wpm=300.0,
+            wpm_in_band=False,
+        )),
+        encoding="utf-8",
+    )
+    card = compute_scorecard(tmp_path, stage="audio")
+    t10 = next(r for r in card.results if r.id == "T10")
+    t11 = next(r for r in card.results if r.id == "T11")
+    assert not t10.passed
+    assert t10.value["wer"] == 0.42
+    assert t10.value["coverage"] == 0.8  # 8/10 scenes matched, below the 90% floor
+    assert not t11.passed
+    assert t11.value["capped"] is True
 
 
 def test_video_stage_with_real_render(tmp_path):
