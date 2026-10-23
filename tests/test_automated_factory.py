@@ -15,6 +15,64 @@ def test_factory(tmp_path: Path):
     return AutomatedFactory(output_dir=out_dir, db_path=db_file)
 
 
+@pytest.fixture
+def mock_xkiro_stubs(monkeypatch):
+    """Stub xKiro gateway calls (script factory + character detection) for pipeline tests."""
+    monkeypatch.setattr(
+        "pipeline.character_manager.detect_characters_in_text_llm",
+        lambda text: [],
+    )
+
+    def fake_slice(self, transcript_segments, target_shots):
+        n = max(1, int(target_shots))
+        slices = [
+            {
+                "index": i + 1,
+                "situation": f"tình huống {i + 1}",
+                "text": f"Cảnh gốc số {i + 1} diễn biến quan trọng.",
+                "prompt": "Whimsical hand-drawn crayon cartoon, base slice",
+                "duration": 5.0,
+                "is_key_scene": True,
+            }
+            for i in range(n)
+        ]
+        import json as _json
+        en = _json.loads(_json.dumps(slices))
+        for sc in en:
+            sc["text"] = f"Base scene number {sc['index']} with dramatic developments."
+        return slices, en
+
+    monkeypatch.setattr("services.script_factory.ScriptFactory._slice", fake_slice)
+
+    def fake_chat_json(system_prompt, user_prompt, **kw):
+        import json as _json
+        import re as _re
+        if "Chấm kịch bản" in system_prompt:
+            return {
+                "score": 9.0,
+                "breakdown": {"hook": 2.0, "open_loops": 2.0},
+                "feedback": "Ổn, giữ nguyên nhịp.",
+            }
+        import re as _re
+        m = _re.search(r"trên tổng \d+\):\n(\[.*?\])\n\n", user_prompt, _re.DOTALL)
+        n = len(_json.loads(m.group(1))) if m else 0
+        return {
+            "scenes": [
+                {
+                    "index": i + 1,
+                    "situation": f"tình huống cải tiến {i + 1}",
+                    "voiceover_vi": f"Cảnh cải tiến số {i + 1} mở ra diễn biến bất ngờ.",
+                    "voiceover_en": f"Improved scene {i + 1} opens with a surprise turn.",
+                    "estimated_duration": 5.0,
+                    "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D",
+                }
+                for i in range(n)
+            ]
+        }
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", fake_chat_json)
+
+
 def test_factory_job_creation(test_factory: AutomatedFactory):
     jq = test_factory.jq
     job_id = jq.create_job(mode="reup", url="https://youtube.com/watch?v=demo123", target_duration=120.0)
@@ -25,7 +83,7 @@ def test_factory_job_creation(test_factory: AutomatedFactory):
     assert job["target_duration"] == 120.0
 
 
-def test_factory_mode2_dynamic_shots(test_factory: AutomatedFactory, monkeypatch):
+def test_factory_mode2_dynamic_shots(test_factory: AutomatedFactory, mock_xkiro_stubs, monkeypatch):
     # Mock download_video and try_extract_subtitles
     monkeypatch.setattr("pipeline.automated_factory.download_video", lambda url, p, **kw: p / "download.mp4")
     
@@ -59,7 +117,7 @@ def test_factory_mode2_dynamic_shots(test_factory: AutomatedFactory, monkeypatch
     assert "KỊCH BẢN PHÂN CẢNH VOICE-OVER TIẾNG VIỆT" in txt_script.read_text(encoding="utf-8")
 
 
-def test_factory_mode2_custom_duration_and_telegram_dispatch(test_factory: AutomatedFactory, monkeypatch):
+def test_factory_mode2_custom_duration_and_telegram_dispatch(test_factory: AutomatedFactory, mock_xkiro_stubs, monkeypatch):
     from unittest.mock import MagicMock
     mock_notifier = MagicMock()
     mock_notifier.is_configured = True

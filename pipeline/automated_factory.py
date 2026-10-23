@@ -599,7 +599,7 @@ class AutomatedFactory:
         project_dir.mkdir(parents=True, exist_ok=True)
         self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
 
-        from services.script_auditor import ScriptAuditor, build_dual_scripts_from_transcript, detect_language, VOICE_MAP
+        from services.script_auditor import ScriptAuditor, detect_language, VOICE_MAP
 
         logger.info("=== STARTING FULL AI GENESIS PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
@@ -680,31 +680,48 @@ class AutomatedFactory:
                 # Proportional shot count (5.0s per shot, allowing full narrative coverage up to 180 shots / 15 mins)
                 target_shots = max(6, min(180, int(round(effective_duration / default_shot_duration))))
 
-                vi_scenes, en_scenes = build_dual_scripts_from_transcript(sub_segments or [], target_shots=target_shots)
-                for s in vi_scenes:
-                    s["duration"] = default_shot_duration
-                for s in en_scenes:
-                    s["duration"] = default_shot_duration
+                # Phase 2: best-of-N grounded rewrite with LLM judging.
+                # Fails loudly (ScriptFactoryError) when the xKiro gateway is unusable.
+                from services.script_factory import ScriptFactory
+                vi_scenes, en_scenes, algo_result = ScriptFactory().run(
+                    sub_segments or [], target_shots=target_shots, project_dir=project_dir
+                )
+                # Record the user-facing target so the QA scorecard can score drift
+                algo_result["target_duration_sec"] = round(effective_duration, 1)
+                (project_dir / "algorithm_result.json").write_text(
+                    json.dumps(algo_result, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                logger.info(
+                    "Script factory chose angle '%s' (score %.1f/%.1f, %d rounds, metrics: %s)",
+                    algo_result["chosen_angle"],
+                    algo_result["chosen_score"],
+                    algo_result["min_score"],
+                    algo_result["total_rounds"],
+                    {
+                        k: algo_result["mechanical_metrics"][k]
+                        for k in ("short_sentence_pct", "estimated_wpm", "total_duration_sec")
+                    },
+                )
 
-                # Persist both scripts
-                shots_vi_file = project_dir / "shots_plan_vi.json"
-                shots_vi_file.write_text(json.dumps(vi_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
-
-                shots_en_file = project_dir / "shots_plan_en.json"
-                shots_en_file.write_text(json.dumps(en_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
-
-                if chosen_voice and chosen_voice.startswith("en-"):
+                if chosen_voice and "vietnamese" not in chosen_voice:
                     shots = en_scenes
                 else:
                     shots = vi_scenes
 
+                # Persist both scripts for downstream tooling
+                shots_vi_file = project_dir / "shots_plan_vi.json"
+                shots_vi_file.write_text(json.dumps(vi_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
+                shots_en_file = project_dir / "shots_plan_en.json"
+                shots_en_file.write_text(json.dumps(en_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
+
                 from services.script_auditor import ScriptAuditor
                 audit_res = ScriptAuditor(algorithm_mode=True).audit_script("\n".join(s.get("text", "") for s in shots))
 
-            # Character detection across scripts
-            from pipeline.character_manager import detect_characters_in_text
+            # Character detection across scripts — LLM-based (replaces regex that
+            # flooded fake characters). Raises on gateway failure (no silent fakes).
+            from pipeline.character_manager import detect_characters_in_text_llm
             combined_script_text = " ".join(s.get("text", "") for s in vi_scenes) + " " + " ".join(s.get("text", "") for s in en_scenes)
-            detected_chars = detect_characters_in_text(combined_script_text)
+            detected_chars = detect_characters_in_text_llm(combined_script_text)
             required_characters = [d["name"] for d in detected_chars]
 
             # Assign character_ids to shots
@@ -763,10 +780,14 @@ class AutomatedFactory:
             for d in detected_chars:
                 cid = d["name"].lower().replace(" ", "_")
                 char_shots = [s["index"] for s in shots if cid in s.get("character_ids", [])]
+                descriptor = d.get("descriptor", "")
+                description = d.get("context", f"Nhân vật trong kịch bản: {d['name']}")
+                if descriptor:
+                    description = f"{description}. Ngoại hình: {descriptor}"
                 asm.register_character(
                     char_id=cid,
                     name=d["name"],
-                    description=d.get("context", f"Nhân vật trong kịch bản: {d['name']}"),
+                    description=description,
                     shot_ids=char_shots,
                 )
 
@@ -791,7 +812,7 @@ class AutomatedFactory:
             )
 
             # Generate human-readable .txt script files for final user review ("tra phát cuối")
-            est_total_duration = len(shots) * default_shot_duration
+            est_total_duration = sum(float(s.get("duration") or default_shot_duration) for s in shots)
             total_words_vi = sum(len(str(s.get("text", "")).split()) for s in (vi_scenes or shots))
 
             vi_txt_lines = [
@@ -805,10 +826,12 @@ class AutomatedFactory:
                 "=" * 80,
                 "",
             ]
+            cum_t = 0.0
             for s in (vi_scenes or shots):
                 idx = s.get("index", 1)
-                t_start = (idx - 1) * default_shot_duration
-                t_end = idx * default_shot_duration
+                sc_dur = float(s.get("duration") or default_shot_duration)
+                t_start, t_end = cum_t, cum_t + sc_dur
+                cum_t += sc_dur
                 tag = " [HOOK]" if idx <= 2 else (" [OUTRO/KẾT]" if idx == len(shots) else "")
                 vi_txt_lines.append(f"[CẢNH {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s){tag}")
                 vi_txt_lines.append(f"Lời thoại: {s.get('text', '')}")
@@ -836,14 +859,16 @@ class AutomatedFactory:
                     "🎬 ENGLISH VOICE-OVER SCRIPT & SHOT PLAN",
                     f"Job ID: {job_id}",
                     f"Title: {source_title or 'Video'}",
-                    f"Total scenes: {len(en_scenes)} scenes | Duration: ~{len(en_scenes) * default_shot_duration:.0f}s",
+                    f"Total scenes: {len(en_scenes)} scenes | Duration: ~{sum(float(s.get('duration') or 5.0) for s in en_scenes):.0f}s",
                     "=" * 80,
                     "",
                 ]
+                cum_t_en = 0.0
                 for s in en_scenes:
                     idx = s.get("index", 1)
-                    t_start = (idx - 1) * default_shot_duration
-                    t_end = idx * default_shot_duration
+                    sc_dur = float(s.get("duration") or default_shot_duration)
+                    t_start, t_end = cum_t_en, cum_t_en + sc_dur
+                    cum_t_en += sc_dur
                     en_txt_lines.append(f"[SCENE {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s)")
                     en_txt_lines.append(f"Narration: {s.get('text', '')}")
                     en_txt_lines.append(f"Visual Prompt: {s.get('prompt', '')}")
@@ -875,9 +900,12 @@ class AutomatedFactory:
                 inline_markup = {
                     "inline_keyboard": [
                         [
-                            {"text": "🎙 Nam Minh (VN)", "callback_data": f"voice:{job_id}:vi-VN-NamMinhNeural"},
-                            {"text": "🎙 Hoài My (VN)", "callback_data": f"voice:{job_id}:vi-VN-HoaiMyNeural"},
-                            {"text": "🎙 Guy (US)", "callback_data": f"voice:{job_id}:en-US-GuyNeural"},
+                            {"text": "🎙 Nam Dõng Dạc (xKiro VN)", "callback_data": f"voice:{job_id}:confident-male-vietnamese"},
+                            {"text": "🎙 Nữ Ngọt Ngào (xKiro VN)", "callback_data": f"voice:{job_id}:sweet-female-vietnamese"},
+                        ],
+                        [
+                            {"text": "🎙 Nam Documentary (xKiro EN)", "callback_data": f"voice:{job_id}:male-voice"},
+                            {"text": "🎙 Nam Minh (edge VN)", "callback_data": f"voice:{job_id}:vi-VN-NamMinhNeural"},
                         ],
                         [
                             {"text": "📝 Duyệt Kịch Bản (G1)", "callback_data": f"approve_script:{job_id}"},
@@ -943,11 +971,9 @@ class AutomatedFactory:
         2. Generation / establishment of canonical reference images for required characters.
         3. Updates state machine and notifies user on Telegram with audio & character sheet previews.
         """
-        import asyncio
         from concurrent.futures import ThreadPoolExecutor
         from services.approval_state_machine import ApprovalStateMachine
-        from pipeline.tts import _synthesize_one, _probe_duration
-
+        from pipeline.tts import _probe_duration
         project_dir = Path(project_dir)
         asm = ApprovalStateMachine(project_dir, job_id)
         if not asm.is_script_gate_passed():
@@ -956,18 +982,90 @@ class AutomatedFactory:
 
         logger.info("Starting parallel generation of Gate 2 (Audio VI/EN) & Gate 3 (Characters) for %s", job_id)
 
+        def _generate_character_image(prompt: str, ref_path: Path) -> None:
+            """Generate a real crayon-style character reference image.
+
+            Chain: Imagen (gemini-webapi via account pool session) -> DALL-E 3
+            (OPENAI_API_KEY). Raises when no provider succeeds — no placeholder
+            images are ever written (zero-fake policy).
+            """
+            session_file: Optional[Path] = None
+            try:
+                account = self.account_pool.get_available_account(reserve=False)
+                if account and Path(account.session_file).exists():
+                    session_file = Path(account.session_file)
+            except Exception as exc:
+                logger.warning("Account pool unavailable for character image: %s", exc)
+
+            if session_file:
+                try:
+                    import asyncio
+
+                    from gemini_webapi import GeminiClient
+                    from services.gemini_webapi_provider import extract_cookies_from_file
+
+                    psid, psidts = extract_cookies_from_file(session_file)
+                    if psid:
+                        async def _gen_img():
+                            c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
+                            await c.init(timeout=60, auto_refresh=True, verbose=False)
+                            out = await c.generate_content(prompt)
+                            if out.images:
+                                await out.images[0].save(path=str(ref_path.parent), filename=ref_path.name)
+                            await c.close()
+
+                        asyncio.run(asyncio.wait_for(_gen_img(), timeout=120.0))
+                        if ref_path.exists() and ref_path.stat().st_size > 1000:
+                            logger.info("Character reference generated via Imagen: %s", ref_path)
+                            return
+                except Exception as exc:
+                    logger.warning("Imagen character image failed (%s). Trying DALL-E.", exc)
+
+            import os
+
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if openai_key:
+                try:
+                    import base64
+
+                    from openai import OpenAI
+
+                    client = OpenAI(api_key=openai_key, timeout=90.0)
+                    resp = client.images.generate(
+                        model="dall-e-3",
+                        prompt=prompt[:300],
+                        n=1,
+                        size="1024x1024",
+                        response_format="b64_json",
+                    )
+                    if resp.data and resp.data[0].b64_json:
+                        ref_path.parent.mkdir(parents=True, exist_ok=True)
+                        ref_path.write_bytes(base64.b64decode(resp.data[0].b64_json))
+                        logger.info("Character reference generated via DALL-E: %s", ref_path)
+                        return
+                except Exception as exc:
+                    logger.warning("DALL-E character image failed: %s", exc)
+
+            raise RuntimeError(
+                "No image provider available for character reference "
+                "(Imagen session + OPENAI_API_KEY both unavailable)"
+            )
+
         def _generate_audio_vi():
             try:
+                from pipeline.tts import _probe_duration, synthesize_one_xkiro_with_fallback
+                from services.script_auditor import VOICE_MAP
+
                 voice_file = project_dir / "voice.txt"
-                voice_vi = voice_file.read_text(encoding="utf-8").strip() if voice_file.exists() else "vi-VN-NamMinhNeural"
-                if not voice_vi.startswith("vi-"):
-                    voice_vi = "vi-VN-NamMinhNeural"
+                voice_vi = voice_file.read_text(encoding="utf-8").strip() if voice_file.exists() else ""
+                if not voice_vi:
+                    voice_vi = VOICE_MAP["vi"]["default"]
                 out_vi = project_dir / "audio_vi.mp3"
                 txt_vi = asm.script_vi_text
                 if txt_vi:
-                    asyncio.run(_synthesize_one(txt_vi, voice_vi, rate="+0%", volume="+0%", out_path=out_vi))
+                    used_voice = synthesize_one_xkiro_with_fallback(txt_vi, voice_vi, out_vi)
                     dur = _probe_duration(out_vi)
-                    asm.set_audio_generated(language="vi", file_path=out_vi, duration=dur, voice_id=voice_vi)
+                    asm.set_audio_generated(language="vi", file_path=out_vi, duration=dur, voice_id=used_voice)
                     if self.notifier.is_configured:
                         markup = {
                             "inline_keyboard": [[
@@ -976,22 +1074,29 @@ class AutomatedFactory:
                         }
                         self.notifier.send_message(
                             f"🎙 <b>[GATE 2 - AUDIO VI XONG]:</b> Job <code>{job_id}</code>\n"
-                            f"• Thời lượng: <b>{dur:.1f}s</b> | Giọng: <code>{voice_vi}</code>\n"
+                            f"• Thời lượng: <b>{dur:.1f}s</b> | Giọng: <code>{used_voice}</code>\n"
                             f"👉 Gõ <code>/approve_audio_vi {job_id}</code> hoặc bấm nút bên dưới:",
                             reply_markup=markup
                         )
             except Exception as e:
                 logger.error("Failed to generate audio VI for %s: %s", job_id, e)
+                if self.notifier.is_configured:
+                    self.notifier.send_message(
+                        f"⚠️ <b>[GATE 2 - LỖI TẠO AUDIO VI - {job_id}]:</b> <code>{str(e)[:200]}</code>"
+                    )
 
         def _generate_audio_en():
             try:
-                voice_en = "en-US-GuyNeural"
+                from pipeline.tts import _probe_duration, synthesize_one_xkiro_with_fallback
+                from services.script_auditor import VOICE_MAP
+
+                voice_en = VOICE_MAP["en"]["default"]
                 out_en = project_dir / "audio_en.mp3"
                 txt_en = asm.script_en_text
                 if txt_en:
-                    asyncio.run(_synthesize_one(txt_en, voice_en, rate="+0%", volume="+0%", out_path=out_en))
+                    used_voice = synthesize_one_xkiro_with_fallback(txt_en, voice_en, out_en)
                     dur = _probe_duration(out_en)
-                    asm.set_audio_generated(language="en", file_path=out_en, duration=dur, voice_id=voice_en)
+                    asm.set_audio_generated(language="en", file_path=out_en, duration=dur, voice_id=used_voice)
                     if self.notifier.is_configured:
                         markup = {
                             "inline_keyboard": [[
@@ -1000,32 +1105,67 @@ class AutomatedFactory:
                         }
                         self.notifier.send_message(
                             f"🎙 <b>[GATE 2 - AUDIO EN XONG]:</b> Job <code>{job_id}</code>\n"
-                            f"• Duration: <b>{dur:.1f}s</b> | Voice: <code>{voice_en}</code>\n"
+                            f"• Duration: <b>{dur:.1f}s</b> | Voice: <code>{used_voice}</code>\n"
                             f"👉 Gõ <code>/approve_audio_en {job_id}</code> hoặc bấm nút bên dưới:",
                             reply_markup=markup
                         )
             except Exception as e:
                 logger.error("Failed to generate audio EN for %s: %s", job_id, e)
+                if self.notifier.is_configured:
+                    self.notifier.send_message(
+                        f"⚠️ <b>[GATE 2 - LỖI TẠO AUDIO EN - {job_id}]:</b> <code>{str(e)[:200]}</code>"
+                    )
 
         def _generate_character_sheets():
             try:
                 asm.load()
+                char_prompt_style = (
+                    "Whimsical hand-drawn editorial cartoon character reference, "
+                    "rough wax crayon and colored pencil sketch strokes, grainy paper texture, "
+                    "flat 2D minimalist composition, generous negative space, "
+                    "plain off-white textured sketchbook paper background, "
+                    "no gradients, no 3D shading, no photorealism. Character: "
+                )
                 for cid, char in asm.characters.items():
                     char_dir = project_dir / "characters" / cid
                     char_dir.mkdir(parents=True, exist_ok=True)
                     ref_path = char_dir / "reference.png"
+                    style_verdict = None
                     if not ref_path.exists() or ref_path.stat().st_size < 100:
-                        try:
-                            from PIL import Image, ImageDraw
-                            img = Image.new("RGB", (512, 512), color=(30, 45, 65))
-                            draw = ImageDraw.Draw(img)
-                            draw.text((40, 240), f"Character: {char.name}", fill=(255, 255, 255))
-                            img.save(ref_path)
-                        except Exception:
-                            ref_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 500)
+                        prompt = f"{char_prompt_style}{char.name}. {char.description}"
+
+                        def _gen_style_checked(gen_prompt: str, out_path: Path) -> None:
+                            _generate_character_image(gen_prompt, out_path)
+
+                        from services.style_checker import (
+                            generate_with_style_check,
+                            save_style_report,
+                        )
+
+                        # Phase 3: AI verifies its own art — regenerate once with
+                        # judge issues folded back before showing the human gate.
+                        style_verdict = generate_with_style_check(
+                            _gen_style_checked,
+                            prompt,
+                            ref_path,
+                            subject=f"{char.name}. Ngoại hình: {char.description}",
+                            max_attempts=2,
+                        )
+                        save_style_report(char_dir, char.name, style_verdict)
+                        if not style_verdict["ok"]:
+                            logger.warning(
+                                "Character %s style still below bar after retry (score %.1f): %s",
+                                cid, style_verdict["score"], style_verdict["issues"],
+                            )
 
                     asm.set_character_reference(cid, ref_path)
                     if self.notifier.is_configured:
+                        style_note = ""
+                        if style_verdict is not None and not style_verdict["ok"]:
+                            style_note = (
+                                f"\n⚠️ AI tự chấm style: {style_verdict['score']:.1f}/10 — "
+                                f"{'; '.join(style_verdict['issues'][:2])}"
+                            )
                         markup = {
                             "inline_keyboard": [[
                                 {"text": f"👤 Duyệt {char.name}", "callback_data": f"approve_char:{job_id}:{cid}"}
@@ -1033,12 +1173,19 @@ class AutomatedFactory:
                         }
                         self.notifier.send_message(
                             f"👤 <b>[GATE 3 - CHARACTER SHEET XONG]:</b> <b>{char.name}</b> (ID: <code>{cid}</code>)\n"
-                            f"• Xuất hiện ở cảnh: {char.shot_ids}\n"
+                            f"• Xuất hiện ở cảnh: {char.shot_ids}"
+                            f"{style_note}\n"
                             f"👉 Gõ <code>/approve_character {job_id} {cid}</code> hoặc duyệt tất cả: <code>/approve_character {job_id} all</code>",
                             reply_markup=markup
                         )
             except Exception as e:
                 logger.error("Failed to generate character sheets for %s: %s", job_id, e)
+                if self.notifier.is_configured:
+                    self.notifier.send_message(
+                        f"⚠️ <b>[GATE 3 - LỖI TẠO CHARACTER SHEET - {job_id}]:</b> "
+                        f"<code>{str(e)[:200]}</code>\n"
+                        f"Không tạo ảnh placeholder — cần session Gemini hoạt động hoặc OPENAI_API_KEY rồi bấm 📊 Tiến Độ để thử lại."
+                    )
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_vi = pool.submit(_generate_audio_vi)

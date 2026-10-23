@@ -112,7 +112,7 @@ def test_audit_valid_script():
     res = auditor.audit_script(raw)
     assert res.is_valid is True
     assert res.language == "vi"
-    assert "NamMinh" in res.recommended_voice
+    assert res.recommended_voice == "confident-male-vietnamese"
     assert len(res.scenes) == 3
 
 
@@ -131,20 +131,52 @@ def test_audit_too_long_scene():
     assert "Lỗi 1:" in feedback
 
 
-def test_build_dual_scripts_from_transcript():
+def test_build_dual_scripts_from_transcript(monkeypatch):
     transcript = [
         {"start": 0.0, "end": 10.0, "text": "Kind: captions Language: en This company was worth 7.9 trillion"},
         {"start": 10.0, "end": 20.0, "text": "And Spain hated the Dutch because of trade rivalry"},
     ]
+
+    captured = {}
+
+    def fake_translate_batch(items, source_lang, target_lang, model=None):
+        captured["items"] = list(items)
+        captured["source_lang"] = source_lang
+        captured["target_lang"] = target_lang
+        return [f"BẢN_DỊCH_{i}" for i, _ in items]
+
+    monkeypatch.setattr("services.xkiro_translator.translate_batch", fake_translate_batch)
+
     vi_scenes, en_scenes = build_dual_scripts_from_transcript(transcript, target_shots=2)
     assert len(vi_scenes) == 2
     assert len(en_scenes) == 2
     # Ensure VTT metadata stripped
     assert "Kind:" not in vi_scenes[0]["text"]
     assert "Kind:" not in en_scenes[0]["text"]
-    # Check language separation
-    assert detect_language(vi_scenes[0]["text"]) == "vi"
+    # EN base script translated to VI via one batched xKiro pass
+    assert captured["source_lang"] == "en"
+    assert captured["target_lang"] == "vi"
+    assert len(captured["items"]) == 2
+    assert vi_scenes[0]["text"] == "BẢN_DỊCH_0"
     assert detect_language(en_scenes[0]["text"]) == "en"
+
+
+def test_build_dual_scripts_raises_on_translation_failure(monkeypatch):
+    from services.xkiro_translator import TranslationError
+
+    transcript = [
+        {"start": 0.0, "end": 10.0, "text": "This company was worth 7.9 trillion"},
+        {"start": 10.0, "end": 20.0, "text": "And Spain hated the Dutch because of trade rivalry"},
+    ]
+
+    def failing_translate_batch(items, source_lang, target_lang, model=None):
+        raise TranslationError("xKiro gateway down")
+
+    monkeypatch.setattr("services.xkiro_translator.translate_batch", failing_translate_batch)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="Dịch VI/EN qua xKiro thất bại"):
+        build_dual_scripts_from_transcript(transcript, target_shots=2)
 
 
 def test_audit_algorithm_mode_pacing_and_duration():

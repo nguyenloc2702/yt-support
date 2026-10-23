@@ -210,7 +210,7 @@ def assemble_documentary(
                 # Resolve target voice (prioritize Male per user requirement)
                 from services.script_auditor import detect_language, VOICE_MAP
                 from services.prompt_sanitizer import clean_narration_for_tts
-                from pipeline.tts import is_xkiro_voice, synthesize_one_xkiro
+                from pipeline.tts import is_xkiro_voice, synthesize_one_xkiro_with_fallback
 
                 target_voice = voice
                 if not target_voice:
@@ -229,7 +229,7 @@ def assemble_documentary(
 
                 async def _synth_shot_with_retry(text: str, out_p: Path):
                     if is_xkiro_voice(target_voice):
-                        synthesize_one_xkiro(text, target_voice, out_p)
+                        synthesize_one_xkiro_with_fallback(text, target_voice, out_p)
                         return
 
                     for attempt in range(2):

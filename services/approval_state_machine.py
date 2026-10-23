@@ -1036,6 +1036,11 @@ class ApprovalStateMachine:
         if not ready:
             return False, errors
 
+        # Phase 5 hard gate: AI-genesis jobs must clear the QA scorecard first.
+        qa_ok, qa_errors = self._run_qa_hard_gate()
+        if not qa_ok:
+            return False, errors + qa_errors
+
         # If already locked and script_version matches, keep current immutable manifest
         if self.active_manifest and self.active_manifest.locked and self.active_manifest.script_version == self.script_version:
             self.video_status = VideoReadinessStatus.APPROVED
@@ -1047,6 +1052,47 @@ class ApprovalStateMachine:
         self.save()
         logger.info("Gate 4 (Video Generation) APPROVED for job %s with manifest %s", self.job_id, manifest.manifest_id)
         return True, []
+
+    def _run_qa_hard_gate(self) -> Tuple[bool, List[str]]:
+        """Scorecard hard gate for /remake (AI genesis) jobs.
+
+        Enforced only when algorithm_result.json exists (marker of the remake
+        pipeline) so legacy reup jobs are unaffected. Fail-closed: any error
+        computing the scorecard blocks approval.
+        """
+        if not (self.project_dir / "algorithm_result.json").is_file():
+            return True, []
+        try:
+            from services.algorithm_qa import QA_GATE_MIN_SCORE, compute_scorecard
+
+            card = compute_scorecard(self.project_dir, stage="final")
+            card.save(self.project_dir)
+            failed_ids = [r.id for r in card.failed()]
+            logger.info(
+                "QA hard gate for %s: score %.2f/%.1f (%d/%d passed, failed: %s)",
+                self.job_id, card.score, QA_GATE_MIN_SCORE,
+                card.passed_count, len(card.results), ",".join(failed_ids) or "none",
+            )
+            if card.score < QA_GATE_MIN_SCORE:
+                top = "; ".join(f"{r.id} {r.name}" for r in card.failed()[:5])
+                return False, [
+                    f"QA scorecard {card.score:.1f}/10 < {QA_GATE_MIN_SCORE:.1f} — không cho phép render video. "
+                    f"Lỗi chính: {top}. Chi tiết: qa_scorecard.json"
+                ]
+            return True, []
+        except Exception as exc:
+            logger.error("QA hard gate crashed for %s: %s", self.job_id, exc)
+            return False, [f"QA hard gate lỗi (fail-closed): {exc}"]
+
+    def get_qa_report(self) -> Optional[str]:
+        """Telegram-formatted QA scorecard report from the last saved run, if any."""
+        try:
+            from services.algorithm_qa import Scorecard
+
+            card = Scorecard.load(self.project_dir)
+            return card.format_telegram_report() if card else None
+        except Exception:
+            return None
 
     def mark_generating(self):
         """Transitions state to GENERATING when worker begins generating shots."""

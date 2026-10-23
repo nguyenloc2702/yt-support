@@ -48,4 +48,33 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+
+def _load_env_into_os_environ() -> None:
+    """Expose .env entries to os.environ (pydantic only reads them into Settings).
+
+    The settings DB lives on Google Drive and its rows can be reverted by a
+    stale cloud sync; callers fall back to os.environ (e.g. XKIRO_API_KEY), so
+    the .env values must actually be present there at runtime.
+    """
+    import os
+
+    env_file = Path(".env")
+    if not env_file.is_file():
+        return
+    try:
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
+_load_env_into_os_environ()
+
 settings = Settings()

@@ -1,0 +1,61 @@
+{
+  "engine": "script_factory_best_of_n",
+  "chosen_angle": "dramatist",
+  "chosen_score": 8.3,
+  "min_score": 8.0,
+  "rounds": [
+    {
+      "round": 1,
+      "scores": [
+        {
+          "angle": "analyst",
+          "score": 6.2,
+          "valid": true,
+          "invalid_reason": ""
+        },
+        {
+          "angle": "dramatist",
+          "score": 8.3,
+          "valid": true,
+          "invalid_reason": ""
+        },
+        {
+          "angle": "teacher",
+          "score": 6.8,
+          "valid": true,
+          "invalid_reason": ""
+        }
+      ],
+      "best_angle": "dramatist",
+      "best_score": 8.3
+    }
+  ],
+  "total_rounds": 1,
+  "scene_count": 8,
+  "expected_scene_count": 8,
+  "mechanical_metrics": {
+    "scene_count": 8,
+    "total_duration_sec": 54.3,
+    "mean_scene_duration": 6.79,
+    "min_scene_duration": 5.67,
+    "max_scene_duration": 7.67,
+    "sentence_count": 31,
+    "short_sentence_pct": 0.71,
+    "target_short_sentence_pct": 0.54,
+    "estimated_wpm": 180.0,
+    "wpm_in_range": true,
+    "question_count": 0,
+    "total_words": 163
+  },
+  "judge_breakdown": {
+    "hook": 1.8,
+    "open_loops": 1.6,
+    "pacing_54_46": 1.4,
+    "wpm": 0.9,
+    "grounded": 1.5,
+    "terminology": 0.8,
+    "callback": 0.3
+  },
+  "judge_feedback": "Hook mạnh nhờ số liệu nhưng thiếu câu hỏi treo rõ ràng để tạo tò mò ngay lập tức. Callback yếu vì cảnh cuối chỉ tóm tắt bài học chung mà không trực tiếp giải tỏa nghịch lý 'biến rủi ro thành dòng tiền' hay kết nối lại hình ảnh người thợ rèn ở đầu. Thuật ngữ 'thanh khoản hóa nỗi sợ hãi' là sáng tạo văn chương chứ không chuẩn xác tài chính như yêu cầu.",
+  "duration_sec": 114.9
+}

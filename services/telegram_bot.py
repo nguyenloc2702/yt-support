@@ -13,6 +13,7 @@ Allows controlling the pipeline directly from a smartphone via Telegram:
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import os
 from pathlib import Path
@@ -536,7 +537,9 @@ class TelegramCommandBot:
                 "• <code>/status</code>\n"
                 "  ➔ <i>Kiểm tra tài nguyên VPS, quota tài khoản & tiến độ.</i>\n\n"
                 "• <code>/pause</code> | <code>/resume</code>\n"
-                "  ➔ <i>Tạm dừng hoặc kích hoạt lại sau kill-switch.</i>"
+                "  ➔ <i>Tạm dừng hoặc kích hoạt lại sau kill-switch.</i>\n\n"
+                "• <code>/feedback &lt;job_id&gt; &lt;điểm 0-10&gt; [ghi chú]</code>\n"
+                "  ➔ <i>Chấm retention video đã đăng; AI học bài cho các video sau.</i>"
             )
             self.notifier.send_message(help_msg, reply_markup=get_default_keyboard())
 
@@ -787,6 +790,43 @@ class TelegramCommandBot:
             asm = ApprovalStateMachine(p_dir, job_id)
             self.notifier.send_message(asm.format_telegram_status())
 
+        elif cmd == "/feedback":
+            if len(parts) < 3:
+                self.notifier.send_message(
+                    "⚠️ Cú pháp: <code>/feedback &lt;job_id&gt; &lt;điểm 0-10&gt; [ghi chú]</code>\n"
+                    "Ví dụ: <code>/feedback abc123 8</code> hoặc <code>/feedback abc123 4 hook yếu, góc kể hơi khô</code>"
+                )
+                return
+            job_id = parts[1]
+            try:
+                rating = float(parts[2])
+            except ValueError:
+                self.notifier.send_message("⚠️ Điểm phải là số trong khoảng 0-10.")
+                return
+            note = " ".join(parts[3:]).strip()
+            job = self.jq.get_job(job_id)
+            p_dir = str(Path(job.get("project_dir") or f"data/automated_runs/{job_id}")) if job else ""
+            angle = ""
+            if p_dir:
+                try:
+                    algo = json.loads((Path(p_dir) / "algorithm_result.json").read_text(encoding="utf-8"))
+                    angle = str(algo.get("chosen_angle", ""))
+                except Exception:
+                    angle = ""
+            from services.feedback_store import add_feedback
+            try:
+                rec = add_feedback(job_id, rating, note=note, angle=angle, project_dir=p_dir)
+            except ValueError as e:
+                self.notifier.send_message(f"⚠️ {e}")
+                return
+            self.notifier.send_message(
+                f"📝 <b>[RETENTION FEEDBACK ĐÃ LƯU]:</b> Job <code>{job_id}</code>\n"
+                f"• Điểm: <b>{rec['rating']:.1f}/10</b>\n"
+                f"• Góc kể: <code>{rec['angle'] or 'unknown'}</code>\n"
+                f"• Ghi chú: {rec['note'] or '(không)'}\n"
+                f"Bài học này sẽ được fold vào các lần sinh kịch bản tiếp theo."
+            )
+
         elif cmd == "/approve_script":
             if len(parts) < 2:
                 self.notifier.send_message("⚠️ Vui lòng chỉ định mã Job: <code>/approve_script &lt;job_id&gt;</code>")
@@ -980,6 +1020,9 @@ class TelegramCommandBot:
                         f"🔒 Manifest: <code>{asm.active_manifest.manifest_id if asm.active_manifest else 'locked'}</code>\n"
                         f"Dây chuyền worker bắt đầu sinh shot hình ảnh/video..."
                     )
+                    qa_report = asm.get_qa_report()
+                    if qa_report:
+                        self.notifier.send_message(qa_report)
                 else:
                     self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code> (Job không ở trạng thái WAITING_APPROVAL hoặc đã kết thúc).")
             else:
@@ -1043,6 +1086,9 @@ class TelegramCommandBot:
                         f"✅ <b>[4 GATES HOÀN TẤT - BẮT ĐẦU GENERATE VIDEO] Job: {job_id}!</b>\n"
                         f"🚀 Manifest đã khóa an toàn. Dây chuyền worker đang tiến hành sinh và ráp các cảnh tự động..."
                     )
+                    qa_report = asm.get_qa_report()
+                    if qa_report:
+                        self.notifier.send_message(qa_report)
                 else:
                     self.notifier.send_message(f"⚠️ Không thể duyệt Job <code>{job_id}</code>.")
                 return

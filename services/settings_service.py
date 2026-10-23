@@ -115,6 +115,14 @@ LLM_PROVIDER_PRESET_KEY = "llm_provider_preset"
 VLM_MODEL_KEY = "vlm_model"
 VLM_ENABLED_KEY = "vlm_enabled"
 
+# Role-specific xKiro models (Phase 1: xKiro-first generation stack).
+# Generation model handles translation, script rewrite, judging, character
+# extraction. VLM model handles image understanding / style checks.
+XKIRO_GENERATION_MODEL_KEY = "xkiro_generation_model"
+DEFAULT_XKIRO_GENERATION_MODEL = "qwen/qwen3.8-omni-flash:free"
+XKIRO_VLM_MODEL_KEY = "xkiro_vlm_model"
+DEFAULT_XKIRO_VLM_MODEL = "qwen/qwen3.8-omni-flash:free"
+
 PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
     "openai": {
         "name": "OpenAI (Chính thức)",
@@ -192,6 +200,24 @@ def get_vlm_model() -> str:
 
 def set_vlm_model(model: str) -> None:
     set_setting(VLM_MODEL_KEY, model)
+
+
+def get_xkiro_generation_model() -> str:
+    """Model used for /remake content generation (translate, rewrite, judge, characters)."""
+    return get_setting(XKIRO_GENERATION_MODEL_KEY) or DEFAULT_XKIRO_GENERATION_MODEL
+
+
+def set_xkiro_generation_model(model: str) -> None:
+    set_setting(XKIRO_GENERATION_MODEL_KEY, model)
+
+
+def get_xkiro_vlm_model() -> str:
+    """Vision model used for image/clip style checks on the xKiro gateway."""
+    return get_setting(XKIRO_VLM_MODEL_KEY) or DEFAULT_XKIRO_VLM_MODEL
+
+
+def set_xkiro_vlm_model(model: str) -> None:
+    set_setting(XKIRO_VLM_MODEL_KEY, model)
 
 
 def is_vlm_enabled() -> bool:

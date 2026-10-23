@@ -1,0 +1,66 @@
+[
+  {
+    "index": 1,
+    "situation": "Logo VOC khổng lồ đè lên bản đồ Hà Lan thế kỷ 17. Con số 6,5 triệu guilders sáng rực, so sánh trực quan với nước Anh nhỏ bé.",
+    "text": "Năm 1602. Hà Lan khai sinh VOC. Sáu phẩy năm triệu guilders vốn hóa. Gấp mười lần cả nước Anh.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Giant VOC logo crushing a small map of England. Number '6.5M' glowing in gold wax crayon. No photorealism.",
+    "duration": 6.666666666666667,
+    "is_key_scene": true
+  },
+  {
+    "index": 2,
+    "situation": "Hình ảnh trừu tượng: một tờ giấy cổ phần bay ra khỏi công ty, rơi vào tay nhiều người lạ mặt thay vì chỉ giới quý tộc.",
+    "text": "Công ty cổ phần đầu tiên thế giới. Trái phiếu, cổ phiếu phát hành cho công chúng. Không còn độc quyền tư nhân.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Paper shares flying from a building to diverse hands. Crayon strokes showing distribution lines. Flat colors.",
+    "duration": 7.666666666666667,
+    "is_key_scene": true
+  },
+  {
+    "index": 3,
+    "situation": "Đám đông hỗn loạn nhưng trật tự ở Amsterdam. Thương nhân lụa là bên cạnh thợ rèn bụi bặm cùng cầm vé mua cổ phần.",
+    "text": "Amsterdam xếp hàng dài. Thương nhân giàu có. Thợ rèn nghèo khó. Tất cả săn lợi nhuận đại dương.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Long line of people holding tickets. Contrast between rich clothes and dirty aprons via crayon texture. Expressive faces.",
+    "duration": 6.333333333333333,
+    "is_key_scene": true
+  },
+  {
+    "index": 4,
+    "situation": "Biển đen ngòm. Sóng cao như núi. Bóng ma cướp biển và cơn bão xé nát con tàu. Sự bất định bao trùm.",
+    "text": "Biển đầy rủi ro. Bão tố hung tàn. Cướp biển khát máu. Chuyến đi vài năm. Trở về? Chưa chắc.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Dark blue sea with jagged waves. Silhouette of pirate ship. Storm clouds drawn with rough black crayon scribbles.",
+    "duration": 6.666666666666667,
+    "is_key_scene": true
+  },
+  {
+    "index": 5,
+    "situation": "Từ đống đổ nát của rủi ro, một cây cầu tài chính mọc lên. Cổ phiếu chuyển từ tay này sang tay khác liên tục.",
+    "text": "Rủi ro sinh phát minh mới. Thị trường thứ cấp. Mua đi bán lại. Thanh khoản hóa nỗi sợ hãi.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. A bridge made of stock certificates connecting two cliffs. Arrows showing circular flow of buying/selling. Warm yellow tones.",
+    "duration": 6.666666666666667,
+    "is_key_scene": true
+  },
+  {
+    "index": 6,
+    "situation": "Sàn giao dịch Amsterdam hiện ra như một ngôi đền kiến trúc. Hình ảnh siêu thực: nó nối thẳng đến tòa nhà Phố Wall tương lai.",
+    "text": "Sàn Amsterdam ra đời. Năm 1602. Tổ tiên Phố Wall. Bước nhảy vọt văn minh tài chính.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Classical Dutch exchange building fading into modern skyscraper silhouette. Dotted line connection. Blue and grey crayon palette.",
+    "duration": 5.666666666666667,
+    "is_key_scene": true
+  },
+  {
+    "index": 7,
+    "situation": "Đồng hồ cát chảy ngược hoặc bánh xe thời gian quay tròn. Số 196 xuất hiện nổi bật giữa dòng tiền cổ tức không ngừng nghỉ.",
+    "text": "VOC sống hai thế kỷ. Trả cổ tức một trăm chín mươi sáu năm liền. Kỳ tích bền vững đáng kinh ngạc.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Hourglass with coins falling instead of sand. Big number '196' written in bold red crayon. Circular motion implied.",
+    "duration": 7.333333333333333,
+    "is_key_scene": true
+  },
+  {
+    "index": 8,
+    "situation": "Quốc gia nhỏ bé biến thành cỗ máy bơm tiền. Rủi ro (đầu vào) được xử lý thành Dòng tiền (đầu ra). Callback hình ảnh con tàu từ cảnh 4.",
+    "text": "Bài học nguyên giá trị. Quốc gia nhỏ biến rủi ro thành dòng tiền. Kinh tế hiện đại vẫn vận hành vậy.",
+    "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, textured paper background. Tiny landmass acting as an engine. Input arrow labeled 'Risk', output arrow labeled '$'. Stylized ship icon echoing scene 4.",
+    "duration": 7.333333333333333,
+    "is_key_scene": true
+  }
+]

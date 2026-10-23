@@ -260,6 +260,7 @@ class VideoAutomationWorker:
                         out_path=target_out_path,
                         session_file=session_path,
                         ref_image=ref_images[0] if ref_images else None,
+                        duration=float(shot.get("duration") or 5.0),
                     )
                 duration = time.time() - start_time
 

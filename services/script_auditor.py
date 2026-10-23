@@ -39,19 +39,41 @@ TARGET_SHOT_DURATION_ALGORITHM = 4.75  # seconds (4.5-5s range)
 MIN_SHOT_DURATION_ALGORITHM = 4.0
 MAX_SHOT_DURATION_ALGORITHM = 6.0
 
-# Voice mapping defaults (User requirement: prioritize Male voices)
+# Voice mapping defaults — xKiro-first (Phase 1). All VI voices and EN narration
+# go through the xKiro gateway (`xkiro-voice` TTS model); edge-tts is only an
+# explicit availability fallback (see pipeline.tts.XKIRO_TO_EDGE).
 VOICE_MAP = {
     "vi": {
-        "male": "vi-VN-NamMinhNeural",
-        "female": "vi-VN-HoaiMyNeural",
-        "default": "vi-VN-NamMinhNeural",
+        "male": "confident-male-vietnamese",
+        "female": "sweet-female-vietnamese",
+        "default": "confident-male-vietnamese",
     },
     "en": {
-        "male": "en-US-GuyNeural",
-        "female": "en-US-JennyNeural",
-        "default": "en-US-GuyNeural",
+        "male": "male-voice",
+        "female": "female-voice",
+        "default": "male-voice",
     },
 }
+
+
+def _voice_display_name(voice: str) -> str:
+    """Human-readable voice label for Telegram feedback."""
+    v = (voice or "").lower()
+    if "vietnamese" in v:
+        if "confident-male" in v:
+            return "Nam Dõng Dạc (xKiro VN)"
+        if "sweet-female" in v:
+            return "Nữ Ngọt Ngào (xKiro VN)"
+        if "gentle-female" in v:
+            return "Nữ Nhẹ Nhàng (xKiro VN)"
+        return "Giọng Việt (xKiro)"
+    if v in ("male-voice", "deep-male", "expressive-male"):
+        return "Nam Documentary (xKiro EN)"
+    if v == "female-voice":
+        return "Nữ Documentary (xKiro EN)"
+    if "NamMinh" in voice:
+        return "Nam Minh (Nam, edge-tts)"
+    return f"{voice} (edge-tts)"
 
 
 def detect_language(text: str) -> str:
@@ -90,7 +112,7 @@ class ScriptAuditResult:
         job_tag = f" [Job {job_id}]" if job_id else ""
         if self.is_valid:
             lang_label = "Tiếng Việt 🇻🇳" if self.language == "vi" else "English 🇺🇸"
-            voice_name = "Nam Minh (Nam)" if "NamMinh" in self.recommended_voice else "Guy (Nam US)"
+            voice_name = _voice_display_name(self.recommended_voice)
             lines = [
                 f"✅ <b>KỊCH BẢN ĐẠT CHUẨN XUẤT SẮC!{job_tag}</b>\n",
                 f"📊 <b>Số lượng cảnh:</b> {self.total_scenes} cảnh (10s/cảnh = {self.total_scenes * 10}s)",
@@ -393,7 +415,7 @@ class ScriptAuditor:
             return ScriptAuditResult(
                 is_valid=False,
                 language="vi",
-                recommended_voice="vi-VN-NamMinhNeural",
+                recommended_voice=VOICE_MAP["vi"]["default"],
                 total_scenes=0,
                 issues=["Nội dung kịch bản rỗng hoặc không trích xuất được câu văn nào."],
                 suggestions=["Vui lòng gửi lại file .txt hoặc dán nội dung kịch bản có ít nhất vài câu kể chuyện."],
@@ -534,6 +556,7 @@ def build_dual_scripts_from_transcript(
     en_scenes = []
     vi_scenes = []
 
+    clean_texts: List[str] = []
     for idx in range(1, target_shots + 1):
         # Divide transcript into continuous, contiguous chronological chunks
         start_seg = int((idx - 1) * total_segs / target_shots)
@@ -555,24 +578,31 @@ def build_dual_scripts_from_transcript(
             clean_text = " ".join(words[:25]) + "."
         elif len(words) < 6 and idx > 1:
             clean_text = f"As events unfolded, {clean_text.lower()}"
+        clean_texts.append(clean_text)
 
-        # Dual-script language mapping
-        detected_lang = detect_language(clean_text)
-        if detected_lang == "en":
+    # Dual-script language mapping — ONE batched xKiro translation pass.
+    # No silent fallbacks: a gateway failure fails the job loudly.
+    from services.xkiro_translator import TranslationError, translate_batch
+
+    base_lang = detect_language(" ".join(clean_texts))
+    other_lang = "vi" if base_lang == "en" else "en"
+    try:
+        translations = translate_batch(
+            [(str(i), t) for i, t in enumerate(clean_texts)], base_lang, other_lang
+        )
+    except TranslationError as exc:
+        raise RuntimeError(
+            f"Dịch VI/EN qua xKiro thất bại (không còn fallback dịch cứng): {exc}"
+        ) from exc
+
+    for idx, clean_text in enumerate(clean_texts, 1):
+        translated = translations[idx - 1]
+        if base_lang == "en":
             en_text = clean_text
-            # Attempt translation to Vietnamese, falling back to adaptive documentary phrasing
-            translated_vi = _translate_text(en_text, source_lang="en", target_lang="vi")
-            if translated_vi:
-                vi_text = _clean_rolling_stutter(translated_vi)
-            else:
-                vi_text = _adapt_en_to_vi_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
+            vi_text = _clean_rolling_stutter(translated)
         else:
             vi_text = clean_text
-            translated_en = _translate_text(vi_text, source_lang="vi", target_lang="en")
-            if translated_en:
-                en_text = _clean_rolling_stutter(translated_en)
-            else:
-                en_text = _adapt_vi_to_en_documentary(clean_text, scene_idx=idx, total_scenes=target_shots)
+            en_text = _clean_rolling_stutter(translated)
 
         veo_prompt = sanitize_veo_prompt(en_text, scene_idx=idx, total_scenes=target_shots)
 
@@ -607,17 +637,13 @@ def build_semantic_dual_scripts_from_transcript(
     import os
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
-    api_key = os.environ.get("XKIRO_API_KEY")
-    if not api_key:
-        return None
-
     try:
-        from openai import OpenAI
-        client = OpenAI(
-            api_key=api_key,
-            base_url=os.environ.get("LLM_BASE_URL", "https://api.xkiro.com/v1"),
-            timeout=45,
-        )
+        from pipeline.llm_client import chat_json
+        from services.settings_service import get_xkiro_generation_model
+
+        generation_model = get_xkiro_generation_model()
+        if not generation_model:
+            return None
 
         # 1. Clean subtitle stutters and chronological stitching
         cleaned_segs = []
@@ -670,10 +696,12 @@ Nội dung:
    - Biến các khái niệm tài chính trừu tượng thành đồ vật đời thường và hành động có xung đột gay gắt (như chiếc xe hơi vô hình, bàn phím gõ ra tiền).
 6. NGUYÊN TẮC CALLBACK (Nếu là khối kết thúc / Outro):
    - Lời thoại kết thúc video BẮT BUỘC phải quay lại giải tỏa và trả lời câu hỏi/nghịch lý đã đặt ra ở phần Hook mở đầu.
-7. ĐIỆN ẢNH VEO PROMPT (STYLE BIBLE):
-   - Cinematic 4K, 35mm master lens, photorealistic atmospheric depth.
+7. ĐIỆN ẢNH VEO PROMPT (STYLE BIBLE — CRAYON HAND-DRAWN):
+   - Whimsical hand-drawn editorial cartoon: nét sáp crayon / bút chì màu thô, texture giấy vẽ sần, flat 2D minimalist.
+   - TUYỆT ĐỐI KHÔNG: photorealistic, 3D render, gradient shading, glossy, photo.
    - Bố cục 60-70% Negative Space, 1-3 tiêu điểm rõ ràng (không rối rắm).
-   - Mood lighting: Sáng ngà tự nhiên khi phân tích khách quan; chuyển sang tông lạnh, u ám hoặc tương phản gắt khi bóc trần khủng hoảng hoặc bất công hệ thống.
+   - Màu nhấn crayon: vàng sáp cho tiền bạc/ý tưởng, đỏ cảnh báo cho khủng hoảng, xanh dương sáp cho đồ vật trung tính.
+   - Nền: giấy vẽ off-white khi bình thường; bảng đen chì khi khủng hoảng; sepia đất nung khi hồi ức lịch sử.
 
 Yêu cầu định dạng đầu ra:
 - Tự động băm thành 8 đến 13 cảnh dựa trên sự chuyển biến của tình huống cụ thể.
@@ -681,7 +709,7 @@ Yêu cầu định dạng đầu ra:
 - voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
 - voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác.
 - estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ 4.5 đến 8.0 giây).
-- visual_prompt: Prompt tiếng Anh chi tiết chuẩn điện ảnh 4K cho Veo/Cinematic documentary.
+- visual_prompt: Prompt tiếng Anh chi tiết theo STYLE BIBLE crayon hand-drawn cho Veo.
 
 Trả về duy nhất JSON array:
 [
@@ -690,24 +718,24 @@ Trả về duy nhất JSON array:
     "voiceover_vi": "...",
     "voiceover_en": "...",
     "estimated_duration": 6.0,
-    "visual_prompt": "Cinematic 4K, professional documentary cinematography..."
+    "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon illustration of..."
   }}
 ]
 Chỉ trả về JSON thuần túy."""
 
-            resp = client.chat.completions.create(
-                model=os.environ.get("LLM_MODEL", "qwen/qwen3.5-flash:free"),
-                messages=[{"role": "user", "content": prompt}],
+            parsed = chat_json(
+                "Bạn là trợ lý chỉ trả về JSON thuần túy, không giải thích.",
+                prompt,
                 temperature=0.3,
-                timeout=45,
+                model=generation_model,
             )
-            raw = resp.choices[0].message.content.strip()
-            if "```json" in raw:
-                raw = raw.split("```json")[1].split("```")[0].strip()
-            elif "```" in raw:
-                raw = raw.split("```")[1].split("```")[0].strip()
-
-            scenes_data = json.loads(raw)
+            scenes_data = None
+            for key in ("items", "scenes", "data"):
+                if isinstance(parsed.get(key), list):
+                    scenes_data = parsed[key]
+                    break
+            if scenes_data is None:
+                raise ValueError("semantic slicing returned unexpected JSON shape")
             for sc in scenes_data:
                 dur = float(sc.get("estimated_duration", 5.5))
                 dur = max(4.0, min(9.0, dur))
@@ -743,10 +771,6 @@ Chỉ trả về JSON thuần túy."""
     return None
 
 
-_ONLINE_TRANSLATE_DISABLED_UNTIL = 0.0
-_TRANSLATION_CACHE: Dict[str, str] = {}
-
-
 def _clean_rolling_stutter(text: str) -> str:
     """Removes rolling caption duplicate phrases common in YouTube auto-generated VTT subtitles."""
     words = text.split()
@@ -760,95 +784,3 @@ def _clean_rolling_stutter(text: str) -> str:
             else:
                 i += 1
     return " ".join(words)
-
-
-def _translate_text(text: str, source_lang: str, target_lang: str) -> Optional[str]:
-    """
-    High-reliability translation helper.
-    1. Uses Google Translate clients5 endpoint (no API key, unlimited, instant).
-    2. Falls back to MyMemory.
-    3. Returns None on failure to cleanly fall back to offline documentary adaptation.
-    """
-    import os
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        # Never perform external network calls during automated test suites
-        return None
-
-    global _ONLINE_TRANSLATE_DISABLED_UNTIL, _TRANSLATION_CACHE
-    import time
-    if time.time() < _ONLINE_TRANSLATE_DISABLED_UNTIL:
-        return None
-
-    cleaned = text.strip()
-    if not cleaned or len(cleaned) < 3:
-        return None
-
-    cache_key = f"{source_lang}_{target_lang}_{cleaned[:100]}"
-    if cache_key in _TRANSLATION_CACHE:
-        return _TRANSLATION_CACHE[cache_key]
-
-    import html
-    import json
-    import urllib.parse
-    import urllib.request
-
-    # Strategy 1: Google Translate endpoint (clients5)
-    try:
-        url = f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={source_lang}&tl={target_lang}&q={urllib.parse.quote(cleaned[:450])}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=2.5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if isinstance(data, list) and data and isinstance(data[0], str) and len(data[0].strip()) > 2:
-                res = html.unescape(data[0]).strip()
-                _TRANSLATION_CACHE[cache_key] = res
-                return res
-            elif isinstance(data, str) and len(data.strip()) > 2:
-                res = html.unescape(data).strip()
-                _TRANSLATION_CACHE[cache_key] = res
-                return res
-    except Exception as e:
-        logger.debug("Google translate client error: %s", e)
-
-    # Strategy 2: MyMemory free fallback
-    try:
-        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(cleaned[:450])}&langpair={source_lang}|{target_lang}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            translated = data.get("responseData", {}).get("translatedText")
-            if translated and not translated.startswith("MYMEMORY WARNING:") and len(translated) > 2:
-                res = html.unescape(translated).strip()
-                _TRANSLATION_CACHE[cache_key] = res
-                return res
-    except Exception as e:
-        logger.debug("MyMemory fallback error: %s", e)
-
-    return None
-
-
-def _adapt_en_to_vi_documentary(en_text: str, scene_idx: int, total_scenes: int) -> str:
-    """Provides a natural Vietnamese documentary phrasing for a scene when offline."""
-    t = en_text.lower()
-    if "company" in t or "trillion" in t or "worth" in t:
-        return "Vào thời kỳ hoàng kim, tổ chức thương mại này sở hữu khối tài sản khổng lồ chưa từng có trong lịch sử."
-    if "spain" in t or "dutch" in t:
-        return "Mối quan hệ căng thẳng giữa các thế lực hàng hải phương Tây đã làm thay đổi hoàn toàn cục diện thương mại."
-    if "price" in t or "creative" in t or "money" in t:
-        return "Khi giá trị hàng hóa biến động dữ dội, các thương nhân bắt đầu tìm kiếm những phương thức giao thương mới."
-    if "week" in t or "month" in t or "year" in t:
-        return "Chỉ trong một thời gian ngắn, biến cố liên tiếp diễn ra khiến các bên tham gia phải nhanh chóng thích nghi."
-    if scene_idx == 1:
-        return "Mở đầu câu chuyện là một bước ngoặt lịch sử làm thay đổi cả nền kinh tế thế giới."
-    if scene_idx == total_scenes:
-        return "Và cái kết đã để lại một bài học sâu sắc cho các thế hệ kinh doanh và phát triển sau này."
-
-    return f"Diễn biến tiếp theo ở cảnh {scene_idx} chứng kiến những bước ngoặt chiến lược mang tính quyết định."
-
-
-def _adapt_vi_to_en_documentary(vi_text: str, scene_idx: int, total_scenes: int) -> str:
-    """Provides natural English documentary phrasing for a Vietnamese scene when offline."""
-    if scene_idx == 1:
-        return "The story opens with a historic turning point that reshaped the entire landscape."
-    if scene_idx == total_scenes:
-        return "The final chapter leaves a profound lesson for modern development and strategy."
-    return f"Scene {scene_idx}: Critical developments unfold as pivotal events reshape the regional balance."

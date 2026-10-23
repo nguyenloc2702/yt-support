@@ -1,10 +1,13 @@
 """Image Ken Burns Provider (B-roll & Graceful Fallback).
 
-Generates a still image (via Imagen 3 or creates a gradient/title card) and applies
-a cinematic 10-second Ken Burns pan/zoom effect using FFmpeg.
+Generates a still image (via Imagen 3 or DALL-E 3, crayon Style Bible) and applies
+a Ken Burns pan/zoom effect sized to the shot's planned duration using FFmpeg.
 Used for:
 1. Secondary B-roll shots in Mode 2.
 2. Graceful fallback when a Veo video shot fails 3 times, allowing the documentary to complete.
+
+No placeholder images: when no image provider succeeds the generation FAILS
+loudly (zero-fake policy) instead of rendering a caption card.
 """
 
 import logging
@@ -20,6 +23,15 @@ from services.prompt_sanitizer import sanitize_veo_prompt
 
 logger = logging.getLogger("image_kenburns_provider")
 
+# Crayon Style Bible prefix for every generated still (matches the Veo prompt style).
+CRAYON_STYLE_PREFIX = (
+    "Whimsical hand-drawn editorial cartoon illustration, rough wax crayon and "
+    "colored pencil sketch strokes, grainy paper texture, flat 2D minimalist "
+    "composition, generous negative space around subject, limited muted color "
+    "palette with vibrant yellow and red crayon accents, off-white textured "
+    "sketchbook paper background, no gradients, no 3D shading, no photorealism. "
+)
+
 
 class ImageKenBurnsProvider(VideoProvider):
     def __init__(self, fallback_provider: Optional[GeminiWebApiProvider] = None):
@@ -34,16 +46,17 @@ class ImageKenBurnsProvider(VideoProvider):
         out_path: Path,
         session_file: Optional[Path] = None,
         ref_image: Optional[Path] = None,
+        duration: float = 10.0,
         **kwargs,
     ) -> ProviderResult:
         start_time = time.time()
         safe_prompt = sanitize_veo_prompt(prompt)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         img_path = out_path.with_suffix(".jpg")
+        kb_duration = max(2.0, min(float(duration or 10.0), 15.0))
 
         # Step 1: Generate or obtain high-res image
         has_image = False
-        is_placeholder = False
 
         # Priority 0: Use canonical character reference image if provided
         if ref_image and Path(ref_image).is_file():
@@ -66,7 +79,7 @@ class ImageKenBurnsProvider(VideoProvider):
                     async def _gen_img():
                         c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
                         await c.init(timeout=60, auto_refresh=True, verbose=False)
-                        out = await c.generate_content(f"High-quality 4k photorealistic image for documentary: {safe_prompt}")
+                        out = await c.generate_content(f"{CRAYON_STYLE_PREFIX}{safe_prompt}")
                         if out.images:
                             await out.images[0].save(path=str(img_path.parent), filename=img_path.name)
                         await c.close()
@@ -88,7 +101,7 @@ class ImageKenBurnsProvider(VideoProvider):
                     client = OpenAI(api_key=openai_key, timeout=60.0)
                     resp = client.images.generate(
                         model="dall-e-3",
-                        prompt=f"Cinematic historical documentary scene, atmospheric 4k: {prompt[:300]}",
+                        prompt=f"{CRAYON_STYLE_PREFIX}{prompt[:300]}",
                         n=1,
                         size="1024x1024",
                         response_format="b64_json",
@@ -99,48 +112,28 @@ class ImageKenBurnsProvider(VideoProvider):
                 except Exception as err:
                     logger.warning("DALL-E image generation fallback failed: %s", err)
 
-        # Tertiary fallback: create cinematic vignette card with PIL / FFmpeg
         if not has_image or not img_path.exists():
-            is_placeholder = True
-            logger.warning("Ken Burns using generated cinematic placeholder card for shot: %s", prompt[:60])
-            try:
-                # Use PIL to render dark vignette card with prompt text snippet
-                from PIL import Image, ImageDraw, ImageFont
-                img = Image.new("RGB", (1280, 720), color=(15, 23, 42))
-                draw = ImageDraw.Draw(img)
-                # Subtle border and scene prompt caption
-                draw.rectangle([(20, 20), (1260, 700)], outline=(30, 41, 59), width=2)
-                caption = prompt[:80] + ("..." if len(prompt) > 80 else "")
-                draw.text((640, 360), caption, fill=(148, 163, 184), anchor="mm")
-                img.save(img_path, "JPEG", quality=95)
-            except Exception:
-                # Fallback to FFmpeg color if PIL fails
-                cmd_img = [
-                    "ffmpeg", "-y",
-                    "-f", "lavfi",
-                    "-i", "color=c=0x0f172a:s=1280x720:d=1,vignette=PI/4",
-                    "-frames:v", "1",
-                    str(img_path),
-                ]
-                try:
-                    subprocess.run(cmd_img, check=True, capture_output=True, timeout=30)
-                except Exception as e:
-                    return ProviderResult(
-                        ok=False,
-                        error_kind=ErrorKind.FATAL,
-                        error_message=f"Failed to generate base image: {e}",
-                        duration_sec=time.time() - start_time,
-                    )
+            logger.error(
+                "Ken Burns FAIL (zero-fake): không có image provider nào thành công cho shot: %s",
+                prompt[:60],
+            )
+            return ProviderResult(
+                ok=False,
+                error_kind=ErrorKind.FATAL,
+                error_message="No image provider available (Imagen session + OPENAI_API_KEY both unavailable/failed)",
+                duration_sec=time.time() - start_time,
+            )
 
-        # Step 2: Apply Ken Burns Zoom/Pan animation (10 seconds, 25fps = 250 frames, 1280x720) with timeout (P1.6)
+        # Step 2: Apply Ken Burns Zoom/Pan animation sized to kb_duration (25fps, 1280x720) with timeout (P1.6)
         try:
-            # Subtle zoom from 1.0 to 1.15 centered
+            # Subtle zoom from 1.0 to 1.15 centered across the whole clip
+            kb_frames = max(1, int(kb_duration * 25))
             cmd_kb = [
                 "ffmpeg", "-y",
                 "-loop", "1",
                 "-i", str(img_path),
-                "-vf", "zoompan=z='min(zoom+0.0006,1.15)':d=250:s=1280x720:fps=25",
-                "-t", "10",
+                "-vf", f"zoompan=z='min(zoom+{0.15 / kb_frames:.6f},1.15)':d={kb_frames}:s=1280x720:fps=25",
+                "-t", f"{kb_duration:.2f}",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 str(out_path),
@@ -153,7 +146,6 @@ class ImageKenBurnsProvider(VideoProvider):
                     video_path=out_path,
                     thumbnail_path=img_path,
                     duration_sec=time.time() - start_time,
-                    extra={"placeholder": is_placeholder},
                 )
             else:
                 return ProviderResult(

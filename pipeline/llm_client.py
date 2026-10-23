@@ -8,10 +8,12 @@ that knows how to talk to the provider.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from core.logging_config import get_logger
+from services.ai_breaker import get_default_breaker
 from services.settings_service import (
     get_llm_api_key,
     get_llm_base_url,
@@ -22,6 +24,10 @@ logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 120
 
+# Known-good free model on the xKiro gateway; used to self-heal a settings DB
+# row that a stale Google Drive sync reverted to an unroutable model.
+PREFERRED_XKIRO_MODEL = "qwen/qwen3.8-omni-flash:free"
+
 
 class LLMNotConfiguredError(RuntimeError):
     """Raised when no API key is available (DB or env)."""
@@ -29,6 +35,61 @@ class LLMNotConfiguredError(RuntimeError):
 
 class LLMResponseError(RuntimeError):
     """Raised when the provider returns an unusable response."""
+
+
+def _env_llm_key() -> str | None:
+    return os.environ.get("XKIRO_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    err = str(exc).lower()
+    return any(
+        t in err
+        for t in ("authentication_error", "invalid or disabled clientapikey", "401", "403", "unauthorized")
+    )
+
+
+def _is_model_routing_error(exc: Exception) -> bool:
+    err = str(exc).lower()
+    return any(
+        t in err
+        for t in ("503", "unroutable", "model_not_found", "no available model", "does not exist or is not routable")
+    )
+
+
+def _repair_credentials(exc: Exception) -> bool:
+    """Self-heal stale settings-DB rows before giving up.
+
+    The settings DB lives on Google Drive and a delayed cloud sync can revert
+    the llm_api_key/llm_model rows to dead values. On an auth rejection, if the
+    environment (.env, loaded into os.environ) holds a different key, persist
+    it back to the DB. On a model-routing rejection, restore the preferred
+    gateway model. Returns True when something was re-paired and a retry is
+    worth one attempt.
+    """
+    from services.settings_service import LLM_KEY, LLM_MODEL_KEY, get_setting, mask_secret, set_setting
+
+    repaired = False
+    if _is_auth_error(exc):
+        env_key = _env_llm_key()
+        db_key = get_setting(LLM_KEY)
+        if env_key and db_key and env_key != db_key:
+            set_setting(LLM_KEY, env_key)
+            logger.warning(
+                "LLM API key rejected by provider — re-paired settings DB from environment key (%s)",
+                mask_secret(env_key),
+            )
+            repaired = True
+    if _is_model_routing_error(exc):
+        db_model = get_setting(LLM_MODEL_KEY)
+        if db_model and db_model != PREFERRED_XKIRO_MODEL:
+            set_setting(LLM_MODEL_KEY, PREFERRED_XKIRO_MODEL)
+            logger.warning(
+                "LLM model '%s' not routable — restored '%s' in settings DB",
+                db_model, PREFERRED_XKIRO_MODEL,
+            )
+            repaired = True
+    return repaired
 
 
 def get_llm_client():
@@ -126,6 +187,12 @@ def chat_json_multimodal(
                 response = client.chat.completions.create(**kwargs)
             except Exception as exc2:
                 raise LLMResponseError(f"VLM request failed: {exc2}") from exc2
+        elif _repair_credentials(exc):
+            client = get_llm_client()
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as exc2:
+                raise LLMResponseError(f"VLM request failed: {exc2}") from exc2
         else:
             raise LLMResponseError(f"VLM request failed: {exc}") from exc
 
@@ -192,6 +259,7 @@ def chat_json(
     json_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """
     Send a chat completion and parse the response as JSON.
@@ -203,10 +271,10 @@ def chat_json(
     Returns the parsed dict. Raises LLMResponseError on unusable output.
     """
     client = get_llm_client()
-    model = get_llm_model() or "gemini-2.0-flash"
+    selected_model = model or get_llm_model() or "gemini-2.0-flash"
 
     kwargs: dict[str, Any] = {
-        "model": model,
+        "model": selected_model,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "messages": [
@@ -222,19 +290,28 @@ def chat_json(
     else:
         kwargs["response_format"] = {"type": "json_object"}
 
+    breaker = get_default_breaker()
     try:
-        response = client.chat.completions.create(**kwargs)
+        response = breaker.call(lambda: client.chat.completions.create(**kwargs), "chat_json")
     except Exception as exc:
-        # Some OpenAI-compatible providers reject response_format entirely.
-        err = str(exc)
-        if "response_format" in err or "json_schema" in err or "json_object" in err:
-            kwargs.pop("response_format", None)
+        if _repair_credentials(exc):
+            client = get_llm_client()
+            kwargs["model"] = get_llm_model() or kwargs["model"]
             try:
-                response = client.chat.completions.create(**kwargs)
+                response = breaker.call(lambda: client.chat.completions.create(**kwargs), "chat_json")
             except Exception as exc2:
                 raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
         else:
-            raise LLMResponseError(f"LLM request failed: {exc}") from exc
+            # Some OpenAI-compatible providers reject response_format entirely.
+            err = str(exc)
+            if "response_format" in err or "json_schema" in err or "json_object" in err:
+                kwargs.pop("response_format", None)
+                try:
+                    response = breaker.call(lambda: client.chat.completions.create(**kwargs), "chat_json")
+                except Exception as exc2:
+                    raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
+            else:
+                raise LLMResponseError(f"LLM request failed: {exc}") from exc
 
     content = response.choices[0].message.content if response.choices else None
     if not content:
@@ -248,6 +325,7 @@ def chat_text(
     user_prompt: str,
     temperature: float = 0.7,
     max_tokens: int = 2048,
+    model: str | None = None,
 ) -> str:
     """
     Send a chat completion and return the raw text response (no JSON parsing).
@@ -256,22 +334,45 @@ def chat_text(
     (Phase 8 block-based workflow). Raises LLMResponseError on unusable output.
     """
     client = get_llm_client()
-    model = get_llm_model() or "gemini-2.0-flash"
+    selected_model = model or get_llm_model() or "gemini-2.0-flash"
 
+    breaker = get_default_breaker()
     try:
-        response = client.chat.completions.create(
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+        response = breaker.call(
+            lambda: client.chat.completions.create(
+                model=selected_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            ),
+            "chat_text",
         )
     except LLMResponseError:
         raise
     except Exception as exc:
-        raise LLMResponseError(f"LLM request failed: {exc}") from exc
+        if _repair_credentials(exc):
+            client = get_llm_client()
+            selected_model = get_llm_model() or selected_model
+            try:
+                response = breaker.call(
+                    lambda: client.chat.completions.create(
+                        model=selected_model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    ),
+                    "chat_text",
+                )
+            except Exception as exc2:
+                raise LLMResponseError(f"LLM request failed: {exc2}") from exc2
+        else:
+            raise LLMResponseError(f"LLM request failed: {exc}") from exc
 
     content = response.choices[0].message.content if response.choices else None
     if not content or not content.strip():

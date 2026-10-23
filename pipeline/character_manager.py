@@ -399,16 +399,16 @@ class CharacterManager:
         for key, value in character.visual_features.items():
             prompt_parts.append(f"{key.replace('_', ' ').title()}: {value}")
         
-        # Add style requirements
+        # Add style requirements (crayon Style Bible — matches Veo/image prompts)
         prompt_parts.extend([
             "Style: Consistent appearance across all shots",
-            "Quality: 4K, photorealistic, professional",
+            "Quality: whimsical hand-drawn editorial cartoon, rough wax crayon and colored pencil sketch strokes, grainy paper texture, flat 2D minimalist",
             "Pose: Front-facing portrait for reference",
             "Lighting: Even, neutral lighting",
-            "Background: Plain white or transparent",
-            "Expression: Neutral, suitable for various contexts"
+            "Background: Plain off-white textured sketchbook paper",
+            "Expression: Neutral, suitable for various contexts",
         ])
-        
+
         return " | ".join(prompt_parts)
     
     def validate_consistency(self, char_id: str, new_image_path: Path) -> Tuple[bool, str]:
@@ -535,6 +535,73 @@ def detect_characters_in_text(text: str) -> List[Dict[str, str]]:
             unique_characters.append(char)
     
     return unique_characters
+
+
+def detect_characters_in_text_llm(text: str) -> List[Dict[str, str]]:
+    """
+    LLM-based character extraction (Phase 1: replaces the regex approach that
+    flooded Gate 3 with fake characters on English scripts).
+
+    Returns a list of {"name", "context", "descriptor"} dicts. Empty list means
+    the script has no real recurring characters (Gate 3 then auto-passes).
+    Raises RuntimeError when the xKiro gateway is unavailable — callers must
+    surface that instead of guessing characters with heuristics.
+    """
+    import os
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        # Never call the gateway during automated test suites; callers mock this.
+        raise RuntimeError("LLM character detection disabled under pytest")
+
+    from pipeline.llm_client import chat_json
+    from services.settings_service import get_xkiro_generation_model
+
+    system_prompt = (
+        "Bạn là chuyên gia phân tích kịch bản. Trích xuất danh sách NHÂN VẬT THỰC "
+        "(người hoặc thực thể được kể chuyện một cách rõ ràng, xuất hiện lặp lại hoặc "
+        "đóng vai trò trung tâm) từ kịch bản. KHÔNG bịa nhân vật, KHÔNG tính đại từ, "
+        "tên quốc gia, công ty trừ khi công ty đó được nhân cách hóa như nhân vật chính. "
+        "Tối đa 6 nhân vật. Nếu không có nhân vật thực nào, trả về danh sách rỗng."
+    )
+    user_prompt = (
+        f"KỊCH BẢN:\n\"\"\"{cleaned[:8000]}\"\"\"\n\n"
+        "Trả về duy nhất JSON object:\n"
+        '{"characters": [{"name": "Tên nhân vật", "context": "vai trò trong truyện", '
+        '"descriptor": "mô tả ngoại hình tiếng Anh để vẽ minh họa cartoon crayon: '
+        'đặc điểm khuôn mặt, tóc, trang phục, biểu cảm chủ đạo"}]}\n'
+        "Nếu không có nhân vật: {\"characters\": []}"
+    )
+
+    try:
+        parsed = chat_json(
+            system_prompt,
+            user_prompt,
+            temperature=0.1,
+            max_tokens=2000,
+            model=get_xkiro_generation_model(),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"LLM character extraction failed: {exc}") from exc
+
+    characters: List[Dict[str, str]] = []
+    seen = set()
+    for item in parsed.get("characters") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        characters.append({
+            "name": name,
+            "context": str(item.get("context") or f"Nhân vật trong kịch bản: {name}"),
+            "descriptor": str(item.get("descriptor") or name),
+        })
+    return characters[:6]
 
 
 def extract_visual_features(text: str) -> Dict[str, str]:

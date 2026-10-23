@@ -12,12 +12,15 @@ Timing model:
 
 import asyncio
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.exceptions import RenderError
+
+logger = logging.getLogger(__name__)
 
 # Limit TTS speed-up so speech stays intelligible.
 MAX_TEMPO = 1.6
@@ -47,11 +50,32 @@ EMOTION_TTS_STYLE = {
     "neutral": ("+0%", "+0Hz"),
 }
 
+# xKiro voice catalog (verified via GET /v1/audio/voices on 2026-10-22):
+# 4 Vietnamese voices + generic English-capable voices.
 XKIRO_VOICES = {
     "confident-male-vietnamese",
     "sweet-female-vietnamese",
     "gentle-female-vietnamese",
     "standard-female-vietnamese",
+    "male-voice",
+    "female-voice",
+    "deep-male",
+    "expressive-male",
+    "announcer",
+}
+
+# Explicit availability fallback: xKiro voice -> nearest edge-tts neural voice.
+# Used ONLY when the xKiro gateway TTS call fails, and the swap is logged.
+XKIRO_TO_EDGE = {
+    "confident-male-vietnamese": "vi-VN-NamMinhNeural",
+    "sweet-female-vietnamese": "vi-VN-HoaiMyNeural",
+    "gentle-female-vietnamese": "vi-VN-HoaiMyNeural",
+    "standard-female-vietnamese": "vi-VN-HoaiMyNeural",
+    "male-voice": "en-US-GuyNeural",
+    "female-voice": "en-US-JennyNeural",
+    "deep-male": "en-US-ChristopherNeural",
+    "expressive-male": "en-US-GuyNeural",
+    "announcer": "en-US-GuyNeural",
 }
 
 
@@ -60,7 +84,9 @@ def is_xkiro_voice(voice_id: str) -> bool:
     if not voice_id:
         return False
     v = voice_id.lower().strip()
-    return v in XKIRO_VOICES or "xkiro" in v
+    return v in XKIRO_VOICES or v.startswith("xkiro:") or (
+        "vietnamese" in v and not v.startswith("vi-")
+    )
 
 
 def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Optional[str] = None) -> float:
@@ -68,9 +94,17 @@ def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Opti
     import os
     import requests
 
-    key = api_key or os.environ.get("XKIRO_API_KEY")
-    if not key:
-        raise RenderError("XKIRO_API_KEY is not configured.")
+    if not api_key:
+        try:
+            from services.settings_service import get_llm_api_key
+
+            api_key = get_llm_api_key()
+        except Exception:
+            api_key = None
+    if not api_key:
+        api_key = os.environ.get("XKIRO_API_KEY")
+    if not api_key:
+        raise RenderError("xKiro API key is not configured (DB or XKIRO_API_KEY).")
 
     url = os.environ.get("XKIRO_TTS_URL", "https://api.xkiro.com/v1/audio/speech")
     payload = {
@@ -79,7 +113,7 @@ def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Opti
         "voice": voice_id,
     }
     headers = {
-        "Authorization": f"Bearer {key}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -90,6 +124,34 @@ def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Opti
     out_path.write_bytes(resp.content)
     return float(len(resp.content))
 
+
+def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path) -> str:
+    """xKiro-first synthesis with an explicit edge-tts fallback.
+
+    Returns the voice id actually used. The xKiro->edge swap is always logged
+    (never silent) and the fallback edge voice is the mapped neural equivalent.
+    """
+    try:
+        synthesize_one_xkiro(text, voice_id, out_path)
+        return voice_id
+    except Exception as exc:
+        edge_voice = XKIRO_TO_EDGE.get(voice_id)
+        if not edge_voice:
+            raise
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "xKiro TTS failed for voice '%s' (%s) — falling back to edge-tts '%s'",
+            voice_id, exc, edge_voice,
+        )
+
+        async def _edge() -> None:
+            import edge_tts
+
+            comm = edge_tts.Communicate(text, edge_voice)
+            await comm.save(str(out_path))
+
+        asyncio.run(_edge())
+        return edge_voice
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -269,56 +331,6 @@ async def _synthesize_one_pitch(
 
     communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume, pitch=pitch)
     await communicate.save(str(out_path))
-
-
-XKIRO_VOICES = {
-    "confident-male-vietnamese",
-    "sweet-female-vietnamese",
-    "gentle-female-vietnamese",
-    "standard-female-vietnamese",
-}
-
-
-def is_xkiro_voice(voice: str) -> bool:
-    if not voice:
-        return False
-    v = voice.lower()
-    return v in XKIRO_VOICES or v.startswith("xkiro:") or ("vietnamese" in v and not v.startswith("vi-"))
-
-
-def synthesize_one_xkiro(text: str, voice: str, out_path: Path) -> None:
-    """Synthesize text using xKiro TTS API."""
-    import json
-    import urllib.request
-    from services.settings_service import get_llm_api_key
-
-    api_key = get_llm_api_key()
-    if not api_key:
-        raise RenderError("xKiro API key không tồn tại. Vui lòng cấu hình API key trong Cài đặt.")
-
-    actual_voice = voice.replace("xkiro:", "")
-    payload = {
-        "model": "xkiro-voice",
-        "voice": actual_voice,
-        "input": text,
-    }
-    req = urllib.request.Request(
-        "https://api.xkiro.com/v1/audio/speech",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            audio_bytes = resp.read()
-            if not audio_bytes:
-                raise RenderError(f"xKiro TTS trả về audio rỗng cho giọng '{actual_voice}'")
-            out_path.write_bytes(audio_bytes)
-    except Exception as exc:
-        raise RenderError(f"Lỗi khi gọi xKiro TTS API ({actual_voice}): {exc}") from exc
 
 
 def synthesize_narration(
