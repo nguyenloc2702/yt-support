@@ -22,6 +22,17 @@ logger = get_logger(__name__)
 
 MAX_SIDE_PX = 768
 
+# The primary free VLM refuses some historical-figure likenesses at the
+# provider safety layer. That is a judge limitation, not a style failure, so a
+# refused image is re-judged by an alternate vision model instead of blocking
+# the human gate. Every switch is logged.
+STYLE_JUDGE_FALLBACKS = ("cohere/command-a-vision", "openai/gpt-6.1-sol")
+
+
+def _is_safety_rejection(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "safety policy" in msg or "rejected by the provider" in msg
+
 STYLE_JUDGE_SYSTEM = """Bạn là Art Director kiểm duyệt phong cách hình ảnh cho series documentary vẽ tay.
 Chấm ảnh theo CRAYON STYLE BIBLE, trả về duy nhất JSON object:
 {"ok": <true nếu ĐẠT>, "score": <0-10 một chữ số thập phân>, "issues": ["các lỗi cụ thể cần sửa khi vẽ lại"], "summary": "<mô tả ngắn ảnh>"}
@@ -80,17 +91,35 @@ def check_image_style(
     if subject:
         user_text += f"\nChủ đề ảnh phải là: {subject}"
 
-    try:
-        parsed = chat_json_multimodal(
-            STYLE_JUDGE_SYSTEM,
-            user_text,
-            images=[payload],
-            model=model or get_xkiro_vlm_model(),
-            temperature=0.1,
-            max_tokens=600,
-        )
-    except LLMResponseError as exc:
-        raise StyleCheckError(f"VLM style check failed: {exc}") from exc
+    primary = model or get_xkiro_vlm_model()
+    candidates = [primary]
+    if not model:
+        candidates.extend(m for m in STYLE_JUDGE_FALLBACKS if m != primary)
+
+    parsed = None
+    last_exc: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            parsed = chat_json_multimodal(
+                STYLE_JUDGE_SYSTEM,
+                user_text,
+                images=[payload],
+                model=candidate,
+                temperature=0.1,
+                max_tokens=600,
+            )
+            if candidate != primary:
+                logger.warning(
+                    "Style judge '%s' refused the image (%s) — verdict from '%s'",
+                    primary, last_exc, candidate,
+                )
+            break
+        except LLMResponseError as exc:
+            last_exc = exc
+            if not _is_safety_rejection(exc):
+                break
+    if parsed is None:
+        raise StyleCheckError(f"VLM style check failed: {last_exc}") from last_exc
 
     try:
         score = float(parsed.get("score", 0.0))

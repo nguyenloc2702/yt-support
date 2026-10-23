@@ -64,6 +64,50 @@ def test_check_image_style_vlm_failure_raises(sample_image, monkeypatch):
         check_image_style(sample_image)
 
 
+def test_check_image_style_falls_back_when_primary_judge_refuses(sample_image, monkeypatch):
+    from pipeline.llm_client import LLMResponseError
+
+    monkeypatch.setattr(
+        "services.settings_service.get_xkiro_vlm_model", lambda: "primary/vision"
+    )
+    calls = []
+
+    def fake_multimodal(system_prompt, user_text, images=None, **kw):
+        calls.append(kw.get("model"))
+        if len(calls) == 1:
+            raise LLMResponseError(
+                "Error code: 400 - An attached image was rejected by the provider's safety policy."
+            )
+        return {"ok": True, "score": 8.5, "issues": [], "summary": "ok"}
+
+    import pipeline.llm_client as llm
+    monkeypatch.setattr(llm, "chat_json_multimodal", fake_multimodal)
+
+    res = check_image_style(sample_image)
+    assert res["ok"] is True and res["score"] == 8.5
+    assert calls == ["primary/vision", "cohere/command-a-vision"]
+
+
+def test_check_image_style_non_safety_error_does_not_fall_back(sample_image, monkeypatch):
+    from pipeline.llm_client import LLMResponseError
+
+    monkeypatch.setattr(
+        "services.settings_service.get_xkiro_vlm_model", lambda: "primary/vision"
+    )
+    calls = []
+
+    def fake_multimodal(system_prompt, user_text, images=None, **kw):
+        calls.append(kw.get("model"))
+        raise LLMResponseError("gateway down")
+
+    import pipeline.llm_client as llm
+    monkeypatch.setattr(llm, "chat_json_multimodal", fake_multimodal)
+
+    with pytest.raises(StyleCheckError, match="VLM style check failed"):
+        check_image_style(sample_image)
+    assert calls == ["primary/vision"]
+
+
 def test_check_image_style_missing_image_raises(tmp_path, monkeypatch):
     with pytest.raises(StyleCheckError, match="image not found"):
         check_image_style(tmp_path / "nope.png")

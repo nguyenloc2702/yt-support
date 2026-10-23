@@ -992,75 +992,6 @@ class AutomatedFactory:
 
         logger.info("Starting parallel generation of Gate 2 (Audio VI/EN) & Gate 3 (Characters) for %s", job_id)
 
-        def _generate_character_image(prompt: str, ref_path: Path) -> None:
-            """Generate a real crayon-style character reference image.
-
-            Chain: Imagen (gemini-webapi via account pool session) -> DALL-E 3
-            (OPENAI_API_KEY). Raises when no provider succeeds — no placeholder
-            images are ever written (zero-fake policy).
-            """
-            session_file: Optional[Path] = None
-            try:
-                account = self.account_pool.get_available_account(reserve=False)
-                if account and Path(account.session_file).exists():
-                    session_file = Path(account.session_file)
-            except Exception as exc:
-                logger.warning("Account pool unavailable for character image: %s", exc)
-
-            if session_file:
-                try:
-                    import asyncio
-
-                    from gemini_webapi import GeminiClient
-                    from services.gemini_webapi_provider import extract_cookies_from_file
-
-                    psid, psidts = extract_cookies_from_file(session_file)
-                    if psid:
-                        async def _gen_img():
-                            c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
-                            await c.init(timeout=60, auto_refresh=True, verbose=False)
-                            out = await c.generate_content(prompt)
-                            if out.images:
-                                await out.images[0].save(path=str(ref_path.parent), filename=ref_path.name)
-                            await c.close()
-
-                        asyncio.run(asyncio.wait_for(_gen_img(), timeout=120.0))
-                        if ref_path.exists() and ref_path.stat().st_size > 1000:
-                            logger.info("Character reference generated via Imagen: %s", ref_path)
-                            return
-                except Exception as exc:
-                    logger.warning("Imagen character image failed (%s). Trying DALL-E.", exc)
-
-            import os
-
-            openai_key = os.environ.get("OPENAI_API_KEY")
-            if openai_key:
-                try:
-                    import base64
-
-                    from openai import OpenAI
-
-                    client = OpenAI(api_key=openai_key, timeout=90.0)
-                    resp = client.images.generate(
-                        model="dall-e-3",
-                        prompt=prompt[:300],
-                        n=1,
-                        size="1024x1024",
-                        response_format="b64_json",
-                    )
-                    if resp.data and resp.data[0].b64_json:
-                        ref_path.parent.mkdir(parents=True, exist_ok=True)
-                        ref_path.write_bytes(base64.b64decode(resp.data[0].b64_json))
-                        logger.info("Character reference generated via DALL-E: %s", ref_path)
-                        return
-                except Exception as exc:
-                    logger.warning("DALL-E character image failed: %s", exc)
-
-            raise RuntimeError(
-                "No image provider available for character reference "
-                "(Imagen session + OPENAI_API_KEY both unavailable)"
-            )
-
         def _generate_audio_vi():
             try:
                 from pipeline.tts import _probe_duration, synthesize_one_xkiro_with_fallback
@@ -1128,73 +1059,14 @@ class AutomatedFactory:
 
         def _generate_character_sheets():
             try:
-                asm.load()
-                char_prompt_style = (
-                    "Whimsical hand-drawn editorial cartoon character reference, "
-                    "rough wax crayon and colored pencil sketch strokes, grainy paper texture, "
-                    "flat 2D minimalist composition, generous negative space, "
-                    "plain off-white textured sketchbook paper background, "
-                    "no gradients, no 3D shading, no photorealism. Character: "
-                )
-                for cid, char in asm.characters.items():
-                    char_dir = project_dir / "characters" / cid
-                    char_dir.mkdir(parents=True, exist_ok=True)
-                    ref_path = char_dir / "reference.png"
-                    style_verdict = None
-                    if not ref_path.exists() or ref_path.stat().st_size < 100:
-                        prompt = f"{char_prompt_style}{char.name}. {char.description}"
-
-                        def _gen_style_checked(gen_prompt: str, out_path: Path) -> None:
-                            _generate_character_image(gen_prompt, out_path)
-
-                        from services.style_checker import (
-                            generate_with_style_check,
-                            save_style_report,
-                        )
-
-                        # Phase 3: AI verifies its own art — regenerate once with
-                        # judge issues folded back before showing the human gate.
-                        style_verdict = generate_with_style_check(
-                            _gen_style_checked,
-                            prompt,
-                            ref_path,
-                            subject=f"{char.name}. Ngoại hình: {char.description}",
-                            max_attempts=2,
-                        )
-                        save_style_report(char_dir, char.name, style_verdict)
-                        if not style_verdict["ok"]:
-                            logger.warning(
-                                "Character %s style still below bar after retry (score %.1f): %s",
-                                cid, style_verdict["score"], style_verdict["issues"],
-                            )
-
-                    asm.set_character_reference(cid, ref_path)
-                    if self.notifier.is_configured:
-                        style_note = ""
-                        if style_verdict is not None and not style_verdict["ok"]:
-                            style_note = (
-                                f"\n⚠️ AI tự chấm style: {style_verdict['score']:.1f}/10 — "
-                                f"{'; '.join(style_verdict['issues'][:2])}"
-                            )
-                        markup = {
-                            "inline_keyboard": [[
-                                {"text": f"👤 Duyệt {char.name}", "callback_data": f"approve_char:{job_id}:{cid}"}
-                            ]]
-                        }
-                        self.notifier.send_message(
-                            f"👤 <b>[GATE 3 - CHARACTER SHEET XONG]:</b> <b>{char.name}</b> (ID: <code>{cid}</code>)\n"
-                            f"• Xuất hiện ở cảnh: {char.shot_ids}"
-                            f"{style_note}\n"
-                            f"👉 Gõ <code>/approve_character {job_id} {cid}</code> hoặc duyệt tất cả: <code>/approve_character {job_id} all</code>",
-                            reply_markup=markup
-                        )
+                self.generate_character_sheets(job_id, project_dir)
             except Exception as e:
                 logger.error("Failed to generate character sheets for %s: %s", job_id, e)
                 if self.notifier.is_configured:
                     self.notifier.send_message(
                         f"⚠️ <b>[GATE 3 - LỖI TẠO CHARACTER SHEET - {job_id}]:</b> "
                         f"<code>{str(e)[:200]}</code>\n"
-                        f"Không tạo ảnh placeholder — cần session Gemini hoạt động hoặc OPENAI_API_KEY rồi bấm 📊 Tiến Độ để thử lại."
+                        f"Không tạo ảnh placeholder — lỗi image provider (xKiro/Imagen/DALL-E), bấm 📊 Tiến Độ để thử lại."
                     )
 
         with ThreadPoolExecutor(max_workers=3) as pool:
@@ -1221,4 +1093,154 @@ class AutomatedFactory:
                 f"👉 Hãy nghe duyệt audio và duyệt nhân vật để mở Gate 4 (Video)!",
                 reply_markup=summary_markup
             )
+
+    def _generate_character_image(self, prompt: str, ref_path: Path) -> None:
+        """Generate a real crayon-style character reference image.
+
+        Chain: xKiro image API (openai/gpt-image-2.5 -> free Sensenova) ->
+        Imagen (gemini-webapi via account pool session) -> DALL-E 3
+        (OPENAI_API_KEY). Raises when no provider succeeds — no placeholder
+        images are ever written (zero-fake policy).
+        """
+        try:
+            from services.xkiro_image_provider import generate_xkiro_image
+
+            used_model = generate_xkiro_image(prompt, ref_path)
+            logger.info("Character reference generated via xKiro (%s): %s", used_model, ref_path)
+            return
+        except Exception as exc:
+            logger.warning("xKiro character image failed (%s). Trying Imagen.", exc)
+
+        session_file: Optional[Path] = None
+        try:
+            account = self.account_pool.get_available_account(reserve=False)
+            if account and Path(account.session_file).exists():
+                session_file = Path(account.session_file)
+        except Exception as exc:
+            logger.warning("Account pool unavailable for character image: %s", exc)
+
+        if session_file:
+            try:
+                import asyncio
+
+                from gemini_webapi import GeminiClient
+                from services.gemini_webapi_provider import extract_cookies_from_file
+
+                psid, psidts = extract_cookies_from_file(session_file)
+                if psid:
+                    async def _gen_img():
+                        c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
+                        await c.init(timeout=60, auto_refresh=True, verbose=False)
+                        out = await c.generate_content(prompt)
+                        if out.images:
+                            await out.images[0].save(path=str(ref_path.parent), filename=ref_path.name)
+                        await c.close()
+
+                    asyncio.run(asyncio.wait_for(_gen_img(), timeout=120.0))
+                    if ref_path.exists() and ref_path.stat().st_size > 1000:
+                        logger.info("Character reference generated via Imagen: %s", ref_path)
+                        return
+            except Exception as exc:
+                logger.warning("Imagen character image failed (%s). Trying DALL-E.", exc)
+
+        import os
+
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            try:
+                import base64
+
+                from openai import OpenAI
+
+                client = OpenAI(api_key=openai_key, timeout=90.0)
+                resp = client.images.generate(
+                    model="dall-e-3",
+                    prompt=prompt[:300],
+                    n=1,
+                    size="1024x1024",
+                    response_format="b64_json",
+                )
+                if resp.data and resp.data[0].b64_json:
+                    ref_path.parent.mkdir(parents=True, exist_ok=True)
+                    ref_path.write_bytes(base64.b64decode(resp.data[0].b64_json))
+                    logger.info("Character reference generated via DALL-E: %s", ref_path)
+                    return
+            except Exception as exc:
+                logger.warning("DALL-E character image failed: %s", exc)
+
+        raise RuntimeError(
+            "No image provider available for character reference "
+            "(xKiro image API + Imagen session + OPENAI_API_KEY all unavailable)"
+        )
+
+    def generate_character_sheets(self, job_id: str, project_dir: Path) -> None:
+        """Generate + style-check reference images for every required character."""
+        from services.approval_state_machine import ApprovalStateMachine
+        from services.style_checker import (
+            check_image_style,
+            generate_with_style_check,
+            save_style_report,
+        )
+
+        project_dir = Path(project_dir)
+        asm = ApprovalStateMachine(project_dir, job_id)
+        asm.load()
+        char_prompt_style = (
+            "Whimsical hand-drawn editorial cartoon character reference, "
+            "rough wax crayon and colored pencil sketch strokes, grainy paper texture, "
+            "flat 2D minimalist composition, generous negative space, "
+            "plain off-white textured sketchbook paper background, "
+            "no gradients, no 3D shading, no photorealism. Character: "
+        )
+        for cid, char in asm.characters.items():
+            char_dir = project_dir / "characters" / cid
+            char_dir.mkdir(parents=True, exist_ok=True)
+            ref_path = char_dir / "reference.png"
+            report_path = char_dir / "style_check.json"
+            subject = f"{char.name}. Ngoại hình: {char.description}"
+            style_verdict = None
+            if not ref_path.exists() or ref_path.stat().st_size < 100:
+                prompt = f"{char_prompt_style}{char.name}. {char.description}"
+
+                # AI verifies its own art — regenerate once with judge issues
+                # folded back before showing the human gate.
+                style_verdict = generate_with_style_check(
+                    self._generate_character_image,
+                    prompt,
+                    ref_path,
+                    subject=subject,
+                    max_attempts=2,
+                )
+                save_style_report(char_dir, char.name, style_verdict)
+                if not style_verdict["ok"]:
+                    logger.warning(
+                        "Character %s style still below bar after retry (score %.1f): %s",
+                        cid, style_verdict["score"], style_verdict["issues"],
+                    )
+            elif not report_path.is_file():
+                # Interrupted earlier run: judge the existing art instead of
+                # paying for a fresh generation.
+                style_verdict = check_image_style(ref_path, subject=subject)
+                save_style_report(char_dir, char.name, style_verdict)
+
+            asm.set_character_reference(cid, ref_path)
+            if self.notifier.is_configured:
+                style_note = ""
+                if style_verdict is not None and not style_verdict["ok"]:
+                    style_note = (
+                        f"\n⚠️ AI tự chấm style: {style_verdict['score']:.1f}/10 — "
+                        f"{'; '.join(style_verdict['issues'][:2])}"
+                    )
+                markup = {
+                    "inline_keyboard": [[
+                        {"text": f"👤 Duyệt {char.name}", "callback_data": f"approve_char:{job_id}:{cid}"}
+                    ]]
+                }
+                self.notifier.send_message(
+                    f"👤 <b>[GATE 3 - CHARACTER SHEET XONG]:</b> <b>{char.name}</b> (ID: <code>{cid}</code>)\n"
+                    f"• Xuất hiện ở cảnh: {char.shot_ids}"
+                    f"{style_note}\n"
+                    f"👉 Gõ <code>/approve_character {job_id} {cid}</code> hoặc duyệt tất cả: <code>/approve_character {job_id} all</code>",
+                    reply_markup=markup
+                )
 
