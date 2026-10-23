@@ -49,7 +49,10 @@ class CaptureRouter:
                 {
                     "index": i + 1,
                     "situation": f"tình huống {i+1}",
-                    "voiceover_vi": f"Cảnh cải tiến {i+1} mở ra bất ngờ.",
+                    "voiceover_vi": (
+                        f"Cảnh cải tiến {i+1} mở ra bất ngờ về dòng tiền "
+                        "và điều đó thay đổi tất cả."
+                    ),
                     "voiceover_en": f"Improved scene {i+1} opens a surprise.",
                     "estimated_duration": 5.0,
                     "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon",

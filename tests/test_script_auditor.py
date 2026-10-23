@@ -180,12 +180,15 @@ def test_build_dual_scripts_raises_on_translation_failure(monkeypatch):
 
 
 def test_audit_algorithm_mode_pacing_and_duration():
-    # 40 scenes, each 4 to 6 words
+    # 40 scenes, each 12 to 24 words (4-8s at ~3 words/s)
     auditor = ScriptAuditor(algorithm_mode=True)
-    raw = "\n".join([f"{i}. Đây là cảnh ngắn {i}." for i in range(1, 41)])
+    raw = "\n".join([
+        f"{i}. Đây là cảnh số {i} với nội dung đủ dài để đạt mười hai từ trở lên."
+        for i in range(1, 41)
+    ])
     res = auditor.audit_script(raw)
     assert res.is_valid is True
     assert len(res.scenes) == 40
-    assert res.scenes[0]["duration"] == 4.75
-    assert res.scenes[0]["word_count"] <= 6
+    assert res.scenes[0]["duration"] == 6.0
+    assert 12 <= res.scenes[0]["word_count"] <= 24
 

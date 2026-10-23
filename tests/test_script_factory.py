@@ -21,6 +21,10 @@ BASE_SLICES_EN = [
 TRANSCRIPT = "Công ty Đông Ấn Hà Lan được thành lập năm 1602 với vốn 6.5 triệu guilders."
 
 
+def _long_vi(index):
+    return f"Cảnh cải tiến {index} mở ra bất ngờ về dòng tiền và điều đó thay đổi tất cả."
+
+
 @pytest.fixture
 def factory(tmp_path):
     f = ScriptFactory()
@@ -36,16 +40,38 @@ def factory(tmp_path):
 class Router:
     """Fake chat_json routing rewrite vs judge calls with configurable judge scores."""
 
-    def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=()):
+    def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=(),
+                 short_rewrites=False):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.rewrite_error = rewrite_error
         self.wrong_count_angles = set(wrong_count_angles)
+        self.short_rewrites = short_rewrites
         self.rewrite_prompts = []
+        self.repair_calls = 0
         self.judge_calls = 0
         self.rewrite_calls = 0
 
     def __call__(self, system_prompt, user_prompt, **kw):
+        import re
+
+        if "DANH SÁCH CẢNH CẦN SỬA NGÂN SÁCH TỪ:" in user_prompt:
+            self.repair_calls += 1
+            m = re.search(
+                r"DANH SÁCH CẢNH CẦN SỬA NGÂN SÁCH TỪ:\n(\[.*?\])\n\n",
+                user_prompt, re.DOTALL,
+            )
+            items = json.loads(m.group(1)) if m else []
+            return {
+                "scenes": [
+                    {
+                        "index": item["index"],
+                        "voiceover_vi": _long_vi(item["index"]),
+                        "voiceover_en": f"Short English line {item['index']} about money.",
+                    }
+                    for item in items
+                ]
+            }
         if "Chấm kịch bản" in system_prompt:
             round_idx = self.judge_calls // len(self.score_plan)
             self.judge_calls += 1
@@ -81,7 +107,11 @@ class Router:
                 {
                     "index": i + 1,
                     "situation": f"tình huống {angle} {i+1}",
-                    "voiceover_vi": f"[{angle}] Cảnh cải tiến {i+1} mở ra bất ngờ.",
+                    "voiceover_vi": (
+                        f"[{angle}] Cảnh ngắn gọn số {i+1}."
+                        if self.short_rewrites
+                        else f"[{angle}] {_long_vi(i + 1)}"
+                    ),
                     "voiceover_en": f"[{angle}] Improved scene {i+1} opens a surprise.",
                     "estimated_duration": 5.0,
                     "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon",
@@ -186,11 +216,46 @@ def test_mechanical_metrics_recorded(factory, monkeypatch):
     )
     m = result["mechanical_metrics"]
     assert m["scene_count"] == 3
-    # Word-derived durations: 6 words / 3 wps = 2.0s -> clamped to MIN 4.0s
-    assert m["total_duration_sec"] == 12.0
+    # Word-derived durations: 19 words / 3 wps = 6.33s per scene
+    assert m["total_duration_sec"] == 19.0
     assert 0.0 <= m["short_sentence_pct"] <= 1.0
     assert m["estimated_wpm"] > 0
     assert "wpm_in_range" in m
+
+
+def test_word_budget_repair_enforces_12_24_and_passes_audit(factory, monkeypatch):
+    slices_vi = [
+        {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh gốc {i+1} diễn biến quan trọng.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(6)
+    ]
+    slices_en = [
+        {"index": sc["index"], "situation": sc["situation"], "text": f"Base scene {sc['index']}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in slices_vi
+    ]
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=6: (slices_vi, slices_en),
+    )
+    router = Router(
+        {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
+        short_rewrites=True,
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=6
+    )
+    assert router.repair_calls > 0
+    assert all(12 <= len(sc["text"].split()) <= 24 for sc in vi)
+    assert all(len(sc["text"].split()) <= 16 for sc in en)
+
+    from services.script_auditor import ScriptAuditor
+    audit = ScriptAuditor(algorithm_mode=True).audit_script(
+        "\n".join(sc["text"] for sc in vi)
+    )
+    assert audit.is_valid is True
 
 
 def test_variants_rewrite_chunked_for_long_scripts(factory, monkeypatch):

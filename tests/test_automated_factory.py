@@ -61,7 +61,10 @@ def mock_xkiro_stubs(monkeypatch):
                 {
                     "index": i + 1,
                     "situation": f"tình huống cải tiến {i + 1}",
-                    "voiceover_vi": f"Cảnh cải tiến số {i + 1} mở ra diễn biến bất ngờ.",
+                    "voiceover_vi": (
+                        f"Cảnh cải tiến số {i + 1} mở ra diễn biến bất ngờ về dòng tiền "
+                        "và điều đó thay đổi tất cả."
+                    ),
                     "voiceover_en": f"Improved scene {i + 1} opens with a surprise turn.",
                     "estimated_duration": 5.0,
                     "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D",

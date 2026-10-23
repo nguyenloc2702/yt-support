@@ -46,6 +46,11 @@ MAX_WPM = 200.0
 TARGET_WPM = 184.8
 MIN_SCENE_DURATION = 4.0
 MAX_SCENE_DURATION = 8.0
+VI_MIN_WORDS = 12
+VI_MAX_WORDS = 24
+EN_MAX_WORDS = 16
+REPAIR_BATCH = 10
+MAX_REPAIR_ROUNDS = 3
 
 VARIANT_ANGLES = [
     {
@@ -86,6 +91,15 @@ JUDGE_RUBRIC = """Bạn là tổng biên tập khắt khe nhất đài documenta
 6. THUẬT NGỮ (1.0đ): thuật ngữ tài chính chính xác, nhất quán (tiền gốc, lãi suất, cung tiền, ngân hàng trung ương...).
 7. CALLBACK (1.0đ): cảnh cuối quay lại giải tỏa câu hỏi/nghịch lý đã gieo ở hook.
 Trả về duy nhất JSON object: {"score": <0-10>, "breakdown": {"hook": <0-2>, "open_loops": <0-2>, "pacing_54_46": <0-1.5>, "wpm": <0-1>, "grounded": <0-1.5>, "terminology": <0-1>, "callback": <0-1>}, "feedback": "nhận xét ngắn tiếng Việt, chỉ ra 2-3 điểm cần sửa cụ thể"}"""
+
+
+REPAIR_SYSTEM_PROMPT = (
+    "Bạn là biên tập viên documentary tài chính theo bộ quy tắc UNIVERSAL_VIDEO_ALGORITHM. "
+    "Nhiệm vụ: sửa các cảnh vượt/dưới ngân sách từ của kịch bản song ngữ. "
+    "TUYỆT ĐỐI GROUNDED: chỉ dùng sự kiện/tên riêng/con số có trong transcript nguồn, "
+    "không bịa chi tiết mới, không đổi index hay thứ tự cảnh. "
+    "Giữ câu ngắn dứt khoát xen kẽ, không lặp từ, không cụt lủn."
+)
 
 
 class ScriptFactoryError(RuntimeError):
@@ -262,10 +276,115 @@ class ScriptFactory:
                 variant.invalid_reason = "empty voiceover in variant"
                 return variant
 
+        self._repair_word_budget(angle, scenes_vi, scenes_en, transcript_text)
+        offenders = self._budget_offenders(scenes_vi, scenes_en)
+        if offenders:
+            variant.invalid_reason = (
+                f"word budget not met after repair: {len(offenders)} scenes"
+            )
+            return variant
+
         variant.scenes_vi = scenes_vi
         variant.scenes_en = scenes_en
         variant.valid = True
         return variant
+
+    @staticmethod
+    def _budget_offenders(
+        scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
+    ) -> List[int]:
+        offenders: List[int] = []
+        for vi, en in zip(scenes_vi, scenes_en):
+            vi_words = len(str(vi.get("text", "")).split())
+            en_words = len(str(en.get("text", "")).split())
+            if vi_words < VI_MIN_WORDS or vi_words > VI_MAX_WORDS or en_words > EN_MAX_WORDS:
+                offenders.append(int(vi.get("index", 0)))
+        return offenders
+
+    def _repair_word_budget(
+        self,
+        angle: Dict[str, str],
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        transcript_text: str,
+    ) -> None:
+        """Rewrite out-of-budget scenes in place until VI 12-24 words / EN <=16."""
+        from pipeline.llm_client import chat_json
+
+        by_index = {
+            int(vi.get("index", 0)): (vi, scenes_en[i])
+            for i, vi in enumerate(scenes_vi)
+            if i < len(scenes_en)
+        }
+        for _ in range(MAX_REPAIR_ROUNDS):
+            offenders = self._budget_offenders(scenes_vi, scenes_en)
+            if not offenders:
+                return
+            for start in range(0, len(offenders), REPAIR_BATCH):
+                batch = offenders[start: start + REPAIR_BATCH]
+                items = []
+                for idx in batch:
+                    vi, en = by_index.get(idx, (None, None))
+                    if vi is None:
+                        continue
+                    items.append({
+                        "index": idx,
+                        "situation": str(vi.get("situation", ""))[:300],
+                        "voiceover_vi": str(vi.get("text", "")),
+                        "voiceover_en": str(en.get("text", "")),
+                    })
+                if not items:
+                    continue
+                user_prompt = (
+                    f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
+                    f"TRANSCRIPT NGUỒN (chỉ dùng sự kiện từ đây):\n\"\"\"{transcript_text[:4000]}\"\"\"\n\n"
+                    "DANH SÁCH CẢNH CẦN SỬA NGÂN SÁCH TỪ:\n"
+                    f"{json.dumps(items, ensure_ascii=False, indent=1)}\n\n"
+                    f"Viết lại CHỈ các cảnh trên: voiceover_vi đúng {VI_MIN_WORDS}-{VI_MAX_WORDS} từ, "
+                    f"voiceover_en tối đa {EN_MAX_WORDS} từ, giữ nguyên index, ý nghĩa, số liệu và tên riêng. "
+                    "Trả về duy nhất JSON object: "
+                    '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}]}'
+                )
+                try:
+                    parsed = chat_json(
+                        REPAIR_SYSTEM_PROMPT, user_prompt,
+                        temperature=0.3, max_tokens=6000, model=self.model,
+                    )
+                except Exception as exc:
+                    logger.warning("Word-budget repair call failed: %s", exc)
+                    continue
+                repaired = parsed.get("scenes") if isinstance(parsed, dict) else None
+                if not isinstance(repaired, list):
+                    continue
+                for rec in repaired:
+                    if not isinstance(rec, dict):
+                        continue
+                    try:
+                        idx = int(rec.get("index"))
+                    except (TypeError, ValueError):
+                        continue
+                    pair = by_index.get(idx)
+                    if pair is None:
+                        continue
+                    vi, en = pair
+                    text_vi = str(rec.get("voiceover_vi", "")).strip()
+                    text_en = str(rec.get("voiceover_en", "")).strip()
+                    if text_vi:
+                        vi["text"] = text_vi
+                        dur = max(
+                            MIN_SCENE_DURATION,
+                            min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
+                        )
+                        vi["duration"] = dur
+                        en["duration"] = dur
+                    if text_en:
+                        en["text"] = text_en
+        remaining = self._budget_offenders(scenes_vi, scenes_en)
+        if remaining:
+            logger.warning(
+                "Word-budget repair left %d/%d scenes out of budget (first: %s)",
+                len(remaining), len(scenes_vi), remaining[:5],
+            )
 
     def _rewrite_chunk(
         self,
