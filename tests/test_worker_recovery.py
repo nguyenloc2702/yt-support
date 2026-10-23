@@ -202,3 +202,31 @@ def test_shot_upload_pending_decoupling_and_no_quota_burn(temp_worker: VideoAuto
     summary = temp_worker.jq.get_job_summary(job_id)
     assert summary["done"] == 1
     assert summary["failed"] == 0
+
+
+def test_reap_orphans_fails_zombie_and_tells_owner(temp_worker: VideoAutomationWorker):
+    zombie = temp_worker.jq.create_job(mode="remake", url="https://youtu.be/yon5fqz6-v8")
+    temp_worker.jq.transition_job(zombie, to_state="ANALYZING")
+    with temp_worker.jq._get_conn() as conn:
+        conn.execute(
+            "UPDATE factory_jobs SET updated_at = ? WHERE id = ?",
+            (time.time() - 7200.0, zombie),
+        )
+        conn.commit()
+    temp_worker.notifier.is_configured = True
+
+    temp_worker._reap_orphans()
+
+    assert temp_worker.jq.get_job(zombie)["status"] == "FAILED"
+    sent = " ".join(c.args[0] for c in temp_worker.notifier.send_message.call_args_list)
+    assert zombie in sent and "/remake" in sent
+    # The reaped row no longer counts as active, so the same URL can be relaunched.
+    assert temp_worker.jq.create_job_if_no_active("remake", "https://youtu.be/yon5fqz6-v8")
+
+
+def test_worker_loop_wires_the_reaper():
+    """A reaper nobody calls is the bug that parked three ANALYZING rows."""
+    import inspect
+
+    source = inspect.getsource(VideoAutomationWorker.run)
+    assert source.count("self._reap_orphans()") == 2  # startup + idle branch

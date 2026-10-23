@@ -1,15 +1,26 @@
 """Unit tests for SQLite JobQueueManager (Step 4a & 4b)."""
 
 from pathlib import Path
+import time
+
 import pytest
 
-from services.job_queue import JobQueueManager
+from services.job_queue import STALE_JOB_TIMEOUT_SEC, JobQueueManager
 
 
 @pytest.fixture
 def temp_jq(tmp_path: Path):
     db_file = tmp_path / "test_jobs.sqlite3"
     return JobQueueManager(db_path=db_file)
+
+
+def _backdate(temp_jq: JobQueueManager, job_id: str, age_sec: float):
+    with temp_jq._get_conn() as conn:
+        conn.execute(
+            "UPDATE factory_jobs SET updated_at = ? WHERE id = ?",
+            (time.time() - age_sec, job_id),
+        )
+        conn.commit()
 
 
 def test_job_lifecycle(temp_jq: JobQueueManager):
@@ -148,5 +159,92 @@ def test_mark_shot_retry_later(temp_jq: JobQueueManager):
     assert s_retried["status"] == "PENDING"
     assert s_retried["attempts"] == 0
     assert s_retried["last_error"] == "Quota exhausted"
+
+
+# --- Stale-job heartbeat & reaper ----------------------------------------
+
+
+def test_touch_job_bumps_updated_at(temp_jq: JobQueueManager):
+    job_id = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=beat")
+    _backdate(temp_jq, job_id, 600.0)
+    before = temp_jq.get_job(job_id)["updated_at"]
+
+    assert temp_jq.touch_job(job_id) is True
+
+    after = temp_jq.get_job(job_id)["updated_at"]
+    assert after > before + 500
+    assert temp_jq.touch_job("job_does_not_exist") is False
+
+
+def test_reap_stale_analyzing_job_fails_it(temp_jq: JobQueueManager):
+    job_id = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=zombie")
+    temp_jq.transition_job(job_id, to_state="ANALYZING")
+    _backdate(temp_jq, job_id, STALE_JOB_TIMEOUT_SEC + 60)
+
+    assert temp_jq.reap_stale_jobs() == [job_id]
+
+    job = temp_jq.get_job(job_id)
+    assert job["status"] == "FAILED"
+    assert "không heartbeat" in job["error_message"]
+
+
+def test_reap_skips_jobs_still_heartbeating(temp_jq: JobQueueManager):
+    job_id = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=alive")
+    temp_jq.transition_job(job_id, to_state="ANALYZING")
+    _backdate(temp_jq, job_id, STALE_JOB_TIMEOUT_SEC - 120)
+
+    assert temp_jq.reap_stale_jobs() == []
+    assert temp_jq.get_job(job_id)["status"] == "ANALYZING"
+
+    temp_jq.touch_job(job_id)
+    _backdate(temp_jq, job_id, STALE_JOB_TIMEOUT_SEC + 1)
+    temp_jq.touch_job(job_id)
+    assert temp_jq.reap_stale_jobs() == []
+
+
+def test_reap_leaves_paused_and_terminal_states_alone(temp_jq: JobQueueManager):
+    waiting = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=gate1")
+    temp_jq.transition_job(waiting, to_state="WAITING_APPROVAL")
+    awaiting = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=script")
+    temp_jq.transition_job(awaiting, to_state="AWAITING_CUSTOM_SCRIPT")
+    done = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=done")
+    temp_jq.transition_job(done, to_state="APPROVED")
+    temp_jq.transition_job(done, to_state="PROCESSING")
+    temp_jq.transition_job(done, to_state="COMPLETED")
+    for job_id in (waiting, awaiting, done):
+        _backdate(temp_jq, job_id, STALE_JOB_TIMEOUT_SEC + 600)
+
+    # User-paused rows wait for a human; resumable rows are picked up by the
+    # runnable query. Only ANALYZING has nothing that ever resumes it.
+    assert temp_jq.reap_stale_jobs() == []
+    assert temp_jq.get_job(waiting)["status"] == "WAITING_APPROVAL"
+    assert temp_jq.get_job(awaiting)["status"] == "AWAITING_CUSTOM_SCRIPT"
+    assert temp_jq.get_job(done)["status"] == "COMPLETED"
+
+
+def test_reap_unblocks_relaunch_of_same_video(temp_jq: JobQueueManager):
+    """The business goal: a zombie row must not silently veto a new /remake."""
+    url = "https://youtu.be/yon5fqz6-v8"
+    zombie = temp_jq.create_job(mode="remake", url=url)
+    temp_jq.transition_job(zombie, to_state="ANALYZING")
+    _backdate(temp_jq, zombie, STALE_JOB_TIMEOUT_SEC + 60)
+    assert temp_jq.create_job_if_no_active(mode="remake", url=url) is None
+
+    temp_jq.reap_stale_jobs()
+
+    assert temp_jq.create_job_if_no_active(mode="remake", url=url) is not None
+
+
+def test_heavy_lock_heartbeat_touches_job_row(temp_jq: JobQueueManager):
+    """A live lock lease is proof of life, so Whisper/render stages heartbeat too."""
+    job_id = temp_jq.create_job(mode="remake", url="https://youtube.com/watch?v=whisper")
+    temp_jq.transition_job(job_id, to_state="ANALYZING")
+    assert temp_jq.acquire_heavy_lock(job_id) is True
+    _backdate(temp_jq, job_id, STALE_JOB_TIMEOUT_SEC + 60)
+
+    assert temp_jq.heartbeat_heavy_lock(job_id) is True
+
+    assert temp_jq.get_job(job_id)["updated_at"] > time.time() - 60
+    assert temp_jq.reap_stale_jobs() == []
 
 

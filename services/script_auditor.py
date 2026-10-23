@@ -12,10 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import logging
+from math import ceil, floor
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from services.algorithm_qa import SCENE_DUR_RANGE
 from services.prompt_sanitizer import (
     clean_narration_for_tts,
     sanitize_veo_prompt,
@@ -31,14 +33,28 @@ MAX_WORDS_PER_SHOT = 28
 DEFAULT_TARGET_SHOTS = 24
 
 # Algorithm Mode constants (UNIVERSAL_VIDEO_ALGORITHM)
-# Scenes run 4-8s; at the 210 WPM plan rate (3.5 words/s) that is 14-28 words.
-# Custom scripts keep the historical 12-word floor; generated scripts target 18-24.
+# The pacing law, in one place: a rate, a duration window owned by the QA
+# scorecard, and the word window that follows from the two. Scene duration is
+# always words / SCENE_WORDS_PER_SECOND, so no stage can plan against a
+# different rate than the one that grades it.
+SCENE_WORDS_PER_SECOND = 3.5
+MIN_SHOT_DURATION_ALGORITHM = SCENE_DUR_RANGE[0]
+MAX_SHOT_DURATION_ALGORITHM = SCENE_DUR_RANGE[1]
+GENERATED_WORD_WINDOW = (
+    ceil(MIN_SHOT_DURATION_ALGORITHM * SCENE_WORDS_PER_SECOND),
+    floor(MAX_SHOT_DURATION_ALGORITHM * SCENE_WORDS_PER_SECOND),
+)
+# Custom scripts keep the historical 12-word floor; generated scripts are steered
+# toward RECOMMENDED_WORDS_PER_SHOT_ALGORITHM but only gated on GENERATED_WORD_WINDOW.
 MIN_WORDS_PER_SHOT_ALGORITHM = 12
-RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (18, 28)
-MAX_WORDS_PER_SHOT_ALGORITHM = 28
+# The band every prompt (and the owner-facing Gate 1 copy) asks the writer for:
+# 18-24 words = 5.1-6.9s, which keeps the mean scene duration inside QA S10.
+RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (18, 24)
+MAX_WORDS_PER_SHOT_ALGORITHM = GENERATED_WORD_WINDOW[1]
+# The gateway's English voices run slow, so EN lines are budgeted far tighter
+# than VI. Shared by the slicer prompt and the factory's rewrite prompts.
+EN_MAX_WORDS_ALGORITHM = 16
 TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
-MIN_SHOT_DURATION_ALGORITHM = 4.0
-MAX_SHOT_DURATION_ALGORITHM = 8.0
 
 # Voice mapping defaults — xKiro-first (Phase 1). All VI voices and EN narration
 # go through the xKiro gateway (`xkiro-voice` TTS model); edge-tts is only an
@@ -197,7 +213,10 @@ def export_segments_to_txt(
         "",
         "📌 HƯỚNG DẪN XÀO CHẺ / TÙY BIẾN KỊCH BẢN:",
         "1. Bạn có thể chỉnh sửa, thêm bớt, hoặc viết lại lời kể theo văn phong riêng.",
-        f"2. Chuẩn video Remake AI: khoảng {target_scenes} cảnh (mỗi cảnh ~10s, từ 14-25 từ/cảnh).",
+        f"2. Chuẩn video Remake AI: khoảng {target_scenes} cảnh "
+        f"(mỗi cảnh {MIN_SHOT_DURATION_ALGORITHM:.0f}-{MAX_SHOT_DURATION_ALGORITHM:.0f}s, "
+        f"{GENERATED_WORD_WINDOW[0]}-{GENERATED_WORD_WINDOW[1]} từ/cảnh ở nhịp "
+        f"{SCENE_WORDS_PER_SECOND * 60:.0f} WPM).",
         "3. Sau khi sửa xong, bạn chỉ cần:",
         "   • Gửi file .txt (hoặc .srt) này lên Telegram Bot",
         "   • Hoặc copy & paste trực tiếp các cảnh vào khung chat Telegram.",
@@ -640,6 +659,10 @@ def _slice_one_block(
         return []
     t_start = float(b_segs[0].get("start", 0.0))
     t_end = float(b_segs[-1].get("end", t_start))
+    rec_lo, rec_hi = RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
+    rec_sec_lo = rec_lo / SCENE_WORDS_PER_SECOND
+    rec_sec_hi = rec_hi / SCENE_WORDS_PER_SECOND
+    plan_wpm = SCENE_WORDS_PER_SECOND * 60
 
     prompt = f"""Bạn là Đạo diễn kiêm Biên tập viên Phóng sự Tài liệu chuyên nghiệp.
 Nhiệm vụ: Phân tích đoạn nội dung thuyết minh tài chính ({t_start:.0f}s - {t_end:.0f}s, vai trò: {block_role}) và băm thành các CẢNH THEO TÌNH HUỐNG NỘI DUNG CỤ THỂ, KHÔNG băm 5s máy móc.
@@ -672,9 +695,9 @@ Nội dung:
 Yêu cầu định dạng đầu ra:
 - CHIA ĐÚNG {scenes_per_block} CẢNH cho khối này (sai số tối đa ±1), dựa trên sự chuyển biến của tình huống cụ thể. Không gộp nhiều ý vào một cảnh.
 - situation: Mô tả tình huống cụ thể (hành động, bối cảnh diễn ra).
-- voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. MỖI cảnh 18-24 từ (5.1-6.9 giây ở nhịp 210 WPM), đan xen câu ngắn dứt khoát (<= 6 từ). Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
-- voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác, tối đa 16 từ mỗi cảnh.
-- estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ 5.1 đến 6.9 giây).
+- voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. MỖI cảnh {rec_lo}-{rec_hi} từ ({rec_sec_lo:.1f}-{rec_sec_hi:.1f} giây ở nhịp {plan_wpm:.0f} WPM), đan xen câu ngắn dứt khoát (<= 6 từ). Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
+- voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác, tối đa {EN_MAX_WORDS_ALGORITHM} từ mỗi cảnh.
+- estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ {rec_sec_lo:.1f} đến {rec_sec_hi:.1f} giây).
 - visual_prompt: Prompt tiếng Anh chi tiết theo STYLE BIBLE crayon hand-drawn cho Veo.
 
 Trả về duy nhất JSON array:
@@ -722,7 +745,7 @@ Chỉ trả về JSON thuần túy."""
         block_feedback = (
             f"\n\nLẦN TRƯỚC BẠN CHỈ CHIA {len(scenes_data)} CẢNH. "
             f"Khối này PHẢI có đúng {scenes_per_block} cảnh (sai số ±1), "
-            "mỗi cảnh 18-24 từ, không gộp nhiều ý vào một cảnh."
+            f"mỗi cảnh {rec_lo}-{rec_hi} từ, không gộp nhiều ý vào một cảnh."
         )
     if scenes_data is None:
         raise last_err or RuntimeError("Slicer block returned no usable scenes")
@@ -822,10 +845,18 @@ def build_semantic_dual_scripts_from_transcript(
                 b_segs, block_role, scenes_per_block, generation_model
             )
             for sc in scenes_data:
-                dur = float(sc.get("estimated_duration", 6.0))
-                dur = max(4.0, min(8.0, dur))
                 v_vi = sc.get("voiceover_vi", "").strip()
                 v_en = (sc.get("voiceover_en") or v_vi).strip()
+                # Duration is derived from the line's own length, never from the
+                # model's estimate: the QA scorecard walks these durations (S09,
+                # S10) and the TTS stage paces against them.
+                dur = max(
+                    MIN_SHOT_DURATION_ALGORITHM,
+                    min(
+                        MAX_SHOT_DURATION_ALGORITHM,
+                        len(v_vi.split()) / SCENE_WORDS_PER_SECOND,
+                    ),
+                )
                 p = (sc.get("visual_prompt") or sanitize_veo_prompt(v_en, scene_counter, target_shots)).strip()
                 sit = sc.get("situation", "").strip()
 

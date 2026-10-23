@@ -26,7 +26,7 @@ from pipeline.automated_factory import AutomatedFactory
 from services.account_pool import AccountPoolManager
 from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.image_kenburns_provider import ImageKenBurnsProvider
-from services.job_queue import JobQueueManager
+from services.job_queue import JobQueueManager, STALE_JOB_TIMEOUT_SEC
 from services.notifier import TelegramNotifier
 from services.settings_service import is_veo_enabled
 from services.storage_uploader import StorageUploader
@@ -92,6 +92,10 @@ class VideoAutomationWorker:
 
         # 1. Reset any interrupted shots on startup (refund attempt counts)
         self.jq.reset_interrupted_shots(worker_id=self.worker_id)
+
+        # 1b. Bury ANALYZING jobs orphaned by a previous process so they stop
+        # blocking a fresh /remake of the same video.
+        self._reap_orphans()
 
         # 2. Check accounts status
         num_accounts = self.account_pool.reload_accounts()
@@ -181,6 +185,7 @@ class VideoAutomationWorker:
             # Step 4b: Fetch next pending shot for generation across approved/processing jobs
             shot = self.jq.get_next_pending_shot()
             if not shot:
+                self._reap_orphans()
                 self._scan_and_assemble_pending_jobs()
                 time.sleep(15)
                 continue
@@ -543,6 +548,25 @@ class VideoAutomationWorker:
             )
             if self.notifier.is_configured:
                 self.notifier.send_message(f"❌ <b>[LỖI RÁP PHIM TÀI LIỆU - {job_id}]:</b> <code>{str(e)[:300]}</code>")
+
+    def _reap_orphans(self):
+        """Fail ANALYZING jobs whose genesis process died, and say so on Telegram.
+
+        ANALYZING has no resume path, and create_job_if_no_active counts such a
+        row as active: the zombie silently vetoes every later /remake of the
+        same video.
+        """
+        try:
+            reaped = self.jq.reap_stale_jobs()
+        except Exception as e:
+            logger.error("Stale-job reaper failed: %s", e)
+            return
+        if reaped and self.notifier.is_configured:
+            self.notifier.send_message(
+                f"🧟 <b>Dọn job mồ côi:</b> <code>{', '.join(reaped)}</code>\n"
+                f"Không heartbeat quá {int(STALE_JOB_TIMEOUT_SEC // 60)} phút ở bước biên kịch "
+                f"→ đánh dấu FAILED. Gửi lại <code>/remake &lt;url&gt;</code> để chạy tiếp."
+            )
 
     def _scan_and_assemble_pending_jobs(self):
         """Scans for any completed Mode 2 jobs that haven't been assembled yet or have pending final uploads."""

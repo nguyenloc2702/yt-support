@@ -272,3 +272,62 @@ def test_audit_algorithm_mode_pacing_and_duration():
     assert res.scenes[0]["duration"] == 6.0
     assert 12 <= res.scenes[0]["word_count"] <= 24
 
+
+
+def test_slicer_derives_scene_duration_from_word_count(monkeypatch):
+    """QA walks these durations (S09/S10), so the model's guess is ignored."""
+    import services.script_auditor as sa
+
+    def line(words):
+        return " ".join(["từ"] * words)
+
+    payload = {
+        "items": [
+            {"situation": "s1", "voiceover_vi": line(21), "voiceover_en": "money moves",
+             "estimated_duration": 99.0, "visual_prompt": "crayon editorial"},
+            {"situation": "s2", "voiceover_vi": line(8), "voiceover_en": "short line",
+             "estimated_duration": 1.0, "visual_prompt": "crayon editorial"},
+            {"situation": "s3", "voiceover_vi": line(40), "voiceover_en": "long english line",
+             "estimated_duration": 3.0, "visual_prompt": "crayon editorial"},
+        ]
+    }
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(
+        "services.settings_service.get_xkiro_generation_model", lambda: "test-model"
+    )
+    monkeypatch.setattr(
+        "pipeline.llm_client.chat_json", lambda *a, **kw: payload
+    )
+
+    segments = [{"start": float(i), "end": float(i + 1), "text": f"nội dung dài dòng {i}."}
+                for i in range(3)]
+    vi, en = sa.build_semantic_dual_scripts_from_transcript(segments, target_shots=3)
+
+    # 21/3.5 = 6.0s; 8 words clamps up to the floor, 40 words clamps down to the cap
+    assert [sc["duration"] for sc in vi] == [
+        21 / sa.SCENE_WORDS_PER_SECOND, sa.MIN_SHOT_DURATION_ALGORITHM,
+        sa.MAX_SHOT_DURATION_ALGORITHM,
+    ]
+    assert [sc["duration"] for sc in en] == [sc["duration"] for sc in vi]
+
+
+def test_slicer_prompt_states_the_derived_budget_not_a_hardcoded_one(monkeypatch):
+    """Steering copy and the enforced gate must come from the same constants."""
+    import services.script_auditor as sa
+
+    seen = {}
+
+    def fake_chat_json(system_prompt, user_prompt, **kw):
+        seen["prompt"] = user_prompt
+        return {"items": []}
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", fake_chat_json)
+    lo, hi = sa.RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
+    sa._slice_one_block(
+        [{"start": 0.0, "end": 60.0, "text": "một đoạn transcript đủ dài để slice."}],
+        "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)", 3, "test-model",
+    )
+
+    assert f"MỖI cảnh {lo}-{hi} từ" in seen["prompt"]
+    assert f"{lo / sa.SCENE_WORDS_PER_SECOND:.1f}-{hi / sa.SCENE_WORDS_PER_SECOND:.1f} giây" in seen["prompt"]
+    assert f"tối đa {sa.EN_MAX_WORDS_ALGORITHM} từ" in seen["prompt"]

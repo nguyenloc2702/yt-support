@@ -1,11 +1,14 @@
 """Unit tests for the Phase 2 best-of-N ScriptFactory (services.script_factory)."""
 
 import json
+import logging
+import math
 import re
 
 import pytest
 
 import services.script_factory as sf
+from services.algorithm_qa import SCENE_DUR_RANGE
 from services.script_factory import ScriptFactory, ScriptFactoryError
 
 
@@ -59,7 +62,9 @@ class Router:
     """Fake chat_json routing rewrite vs judge calls with configurable judge scores."""
 
     def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=(),
-                 short_rewrites=False, fail_chunks_above=None, repair_words=None):
+                 short_rewrites=False, fail_chunks_above=None, repair_words=None,
+                 word_plan=None, repair_echo=False, empty_scene_in_chunks_above=None,
+                 en_word_plan=None):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.rewrite_error = rewrite_error
@@ -67,7 +72,15 @@ class Router:
         self.short_rewrites = short_rewrites
         self.fail_chunks_above = fail_chunks_above
         self.repair_words = repair_words
+        # word_plan: {absolute scene index: word count} for rewrite output
+        self.word_plan = word_plan or {}
+        self.en_word_plan = en_word_plan or {}
+        # repair_echo: answer a repair request by echoing the same lines back,
+        # i.e. a model that cannot fix the scene. Lets tests see the raw verdict.
+        self.repair_echo = repair_echo
+        self.empty_scene_in_chunks_above = empty_scene_in_chunks_above
         self.rewrite_prompts = []
+        self.repair_prompts = []
         self.repair_calls = 0
         self.hook_calls = 0
         self.callback_calls = 0
@@ -112,6 +125,18 @@ class Router:
                 user_prompt, re.DOTALL,
             )
             items = json.loads(m.group(1)) if m else []
+            self.repair_prompts.append(user_prompt)
+            if self.repair_echo:
+                return {
+                    "scenes": [
+                        {
+                            "index": item["index"],
+                            "voiceover_vi": item["voiceover_vi"],
+                            "voiceover_en": item["voiceover_en"],
+                        }
+                        for item in items
+                    ]
+                }
             return {
                 "scenes": [
                     {
@@ -159,7 +184,8 @@ class Router:
         import re
 
         m = re.search(r"trên tổng \d+\):\n(\[.*?\])\n\n", user_prompt, re.DOTALL)
-        n = len(json.loads(m.group(1))) if m else 0
+        items = json.loads(m.group(1)) if m else []
+        n = len(items)
         if self.fail_chunks_above and n > self.fail_chunks_above:
             raise RuntimeError(f"truncated JSON for {n} scenes")
         count = n - 1 if angle in self.wrong_count_angles else n
@@ -168,18 +194,36 @@ class Router:
                 {
                     "index": i + 1,
                     "situation": f"tình huống {angle} {i+1}",
-                    "voiceover_vi": (
-                        f"Cảnh ngắn gọn số {i+1}."
-                        if self.short_rewrites
-                        else _long_vi(i + 1)
-                    ),
-                    "voiceover_en": f"Improved scene {i+1} opens a surprise.",
+                    "voiceover_vi": self._vi_for(items, i),
+                    "voiceover_en": self._en_for(items, i),
                     "estimated_duration": 5.0,
                     "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon",
                 }
                 for i in range(max(0, count))
             ]
         }
+
+    def _abs_index(self, items, i):
+        if i < len(items) and isinstance(items[i], dict):
+            return int(items[i].get("index", i + 1))
+        return i + 1
+
+    def _vi_for(self, items, i):
+        index = self._abs_index(items, i)
+        limit = self.empty_scene_in_chunks_above
+        if limit is not None and len(items) > limit and i == 0:
+            return ""
+        if index in self.word_plan:
+            return _vi_line(index, self.word_plan[index])
+        if self.short_rewrites:
+            return f"Cảnh ngắn gọn số {index}."
+        return _long_vi(index)
+
+    def _en_for(self, items, i):
+        index = self._abs_index(items, i)
+        if index in self.en_word_plan:
+            return " ".join(["line"] * self.en_word_plan[index])
+        return f"Improved scene {index} opens a surprise."
 
 
 def test_best_variant_chosen_and_result_saved(factory, tmp_path, monkeypatch):
@@ -447,3 +491,203 @@ def test_variants_rewrite_chunked_for_long_scripts(factory, monkeypatch):
     assert result["scene_count"] == 60
     expected_chunks = -(-60 // sf.VARIANT_CHUNK)  # ceil: 6 calls per variant
     assert router.rewrite_calls == 3 * expected_chunks
+
+
+# --- W1: one pacing law, derived from the QA scorecard --------------------
+
+
+def test_word_window_is_derived_from_the_qa_duration_band():
+    """No stage may invent a per-scene gate narrower than the scorecard's."""
+    import services.script_auditor as sa
+
+    assert sa.GENERATED_WORD_WINDOW == (
+        math.ceil(SCENE_DUR_RANGE[0] * sa.SCENE_WORDS_PER_SECOND),
+        math.floor(SCENE_DUR_RANGE[1] * sa.SCENE_WORDS_PER_SECOND),
+    )
+    assert (sf.VI_MIN_WORDS, sf.VI_MAX_WORDS) == sa.GENERATED_WORD_WINDOW == (14, 28)
+    assert sf.WORDS_PER_SECOND == sa.SCENE_WORDS_PER_SECOND
+    assert sf.EN_MAX_WORDS == sa.EN_MAX_WORDS_ALGORITHM
+    assert sa.MAX_WORDS_PER_SHOT_ALGORITHM == sa.GENERATED_WORD_WINDOW[1]
+
+
+def test_steering_band_sits_inside_the_enforced_window():
+    import services.script_auditor as sa
+
+    assert sf.VI_TARGET_WORDS == sa.RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
+    assert sf.VI_MIN_WORDS <= sf.VI_TARGET_WORDS[0]
+    assert sf.VI_TARGET_WORDS[1] <= sf.VI_MAX_WORDS
+
+
+def test_gate_window_maps_into_qa_scene_duration_band():
+    edges = [
+        sf.VI_MIN_WORDS / sf.WORDS_PER_SECOND,
+        sf.VI_MAX_WORDS / sf.WORDS_PER_SECOND,
+    ]
+    assert all(SCENE_DUR_RANGE[0] <= d <= SCENE_DUR_RANGE[1] for d in edges)
+
+
+# --- W2/W3: acceptance is a ratio, aggregates are absolute ----------------
+
+
+def _slices(n):
+    vi = [
+        {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh gốc {i+1} diễn biến quan trọng.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(n)
+    ]
+    en = [
+        {"index": sc["index"], "situation": sc["situation"], "text": f"Base scene {sc['index']}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in vi
+    ]
+    return vi, en
+
+
+def _variant(factory, monkeypatch, n, scores=None, **router_kw):
+    """Build one variant directly, so the acceptance verdict is observable."""
+    base_vi, base_en = _slices(n)
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=n: (base_vi, base_en),
+    )
+    router = Router(scores or {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
+                    **router_kw)
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+    variant = factory._make_variant(sf.VARIANT_ANGLES[0], base_vi, base_en, TRANSCRIPT, "")
+    return variant, router
+
+
+def test_variant_accepted_with_five_percent_outliers(factory, monkeypatch):
+    # The old all-or-nothing gate condemned the whole variant for this one scene.
+    variant, _ = _variant(factory, monkeypatch, 20, word_plan={7: 9}, repair_echo=True)
+
+    assert variant.valid is True, variant.invalid_reason
+    assert variant.budget_report["ratio"] == 0.95
+    assert variant.budget_report["offenders"] == 1
+    assert variant.budget_report["vi_low"] == 1
+
+
+def test_variant_rejected_once_outliers_pass_the_ratio(factory, monkeypatch):
+    variant, _ = _variant(
+        factory, monkeypatch, 20, word_plan={3: 9, 8: 9, 13: 9}, repair_echo=True
+    )
+
+    assert variant.valid is False
+    assert "3/20 scenes out of budget" in variant.invalid_reason
+    assert "ratio 0.85" in variant.invalid_reason
+
+
+def test_mean_scene_duration_is_enforced_absolute(factory, monkeypatch):
+    # Every scene inside the 14-28 window, but 28 words each => 8.0s scenes,
+    # which QA S10 (mean 4.5-6.5s) grades as a fail. Aggregate rules stay strict.
+    variant, router = _variant(
+        factory, monkeypatch, 20,
+        word_plan={i: 28 for i in range(1, 21)}, repair_echo=True,
+    )
+
+    assert variant.valid is False
+    assert "mean scene duration" in variant.invalid_reason
+    assert variant.budget_report["offenders"] == 0
+    assert router.repair_calls == 0  # nothing per-scene to repair
+
+
+def test_repair_never_runs_on_an_already_compliant_variant(factory, monkeypatch):
+    variant, router = _variant(factory, monkeypatch, 20)
+
+    assert variant.valid is True
+    assert router.repair_calls == 0
+
+
+def test_repair_stops_as_soon_as_acceptance_holds(factory, monkeypatch):
+    variant, router = _variant(factory, monkeypatch, 20, word_plan={3: 9, 8: 9, 13: 9})
+
+    assert variant.valid is True
+    assert router.repair_calls == 1  # one batch of 3, then the verdict already passes
+
+
+def test_repair_failure_log_shares_the_breakdown(factory, monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _variant(
+            factory, monkeypatch, 20,
+            word_plan={3: 9, 8: 30, 13: 9}, repair_echo=True,
+        )
+
+    lines = [r.getMessage() for r in caplog.records if "out of budget" in r.getMessage()]
+    assert lines, "repair loop must report what it could not fix"
+    assert "vi_low=2" in lines[0] and "vi_high=1" in lines[0]
+
+
+def test_en_only_violation_counts_in_ratio_not_killer(factory, monkeypatch):
+    variant, _ = _variant(factory, monkeypatch, 20, en_word_plan={5: 30}, repair_echo=True)
+
+    assert variant.valid is True, variant.invalid_reason
+    assert variant.budget_report["en_high"] == 1
+
+    two_lines, _ = _variant(
+        factory, monkeypatch, 20, en_word_plan={5: 30, 9: 30}, repair_echo=True
+    )
+    assert two_lines.valid is False
+    assert "2/20 scenes out of budget" in two_lines.invalid_reason
+
+
+# --- W4: a blank line goes through split-retry, not variant death ---------
+
+
+def test_empty_voiceover_triggers_halving_retry(factory, monkeypatch):
+    variant, router = _variant(factory, monkeypatch, 10, empty_scene_in_chunks_above=5)
+
+    assert variant.valid is True, variant.invalid_reason
+    assert len(variant.scenes_vi) == 10
+    assert all(sc["text"] for sc in variant.scenes_vi)
+    assert router.rewrite_calls == 3  # 1 chunk of 10 failed, retried as 5 + 5
+
+
+def test_empty_voiceover_persists_only_after_full_split(factory, monkeypatch):
+    variant, _ = _variant(factory, monkeypatch, 10, empty_scene_in_chunks_above=0)
+
+    assert variant.valid is False
+    assert "returned an empty voiceover_vi" in variant.invalid_reason
+    assert "scene 1" in variant.invalid_reason
+
+
+def test_budget_report_reaches_algorithm_result(factory, monkeypatch, tmp_path):
+    base_vi, base_en = _slices(20)
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=20: (base_vi, base_en),
+    )
+    monkeypatch.setattr(
+        "pipeline.llm_client.chat_json",
+        Router({"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
+               word_plan={7: 9}, repair_echo=True),
+    )
+
+    _, _, result = factory.run(
+        [{"start": 0, "end": 200, "text": TRANSCRIPT}], target_shots=20, project_dir=tmp_path
+    )
+
+    assert result["budget_report"]["ratio"] == 0.95
+    saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
+    assert saved["budget_report"]["offenders"] == 1
+
+
+def test_on_progress_heartbeats_while_the_script_is_being_written(factory, monkeypatch, tmp_path):
+    """A genesis that never touches its row looks identical to a dead one."""
+    base_vi, base_en = _slices(20)
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=20: (base_vi, base_en),
+    )
+    monkeypatch.setattr(
+        "pipeline.llm_client.chat_json",
+        Router({"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]}),
+    )
+
+    beats = []
+    factory.run(
+        [{"start": 0, "end": 200, "text": TRANSCRIPT}], target_shots=20,
+        project_dir=tmp_path, on_progress=lambda: beats.append(len(beats)),
+    )
+
+    assert len(beats) >= 6  # at least one beat per rewrite chunk of every variant
+    assert sf._beat(None) is None  # heartbeat must tolerate no callback

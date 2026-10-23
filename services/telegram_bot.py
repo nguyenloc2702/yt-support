@@ -343,7 +343,10 @@ class TelegramCommandBot:
     def _process_custom_script_for_job(self, job_id: str, script_text: str):
         """Audits custom script and dispatches remake pipeline if valid."""
         from services.script_auditor import ScriptAuditor
-        auditor = ScriptAuditor()
+        # algorithm_mode, because that is the law run_ai_genesis applies to the
+        # same text afterwards. Auditing in legacy mode here tells the owner a
+        # script is "đạt chuẩn" that the pipeline then rejects.
+        auditor = ScriptAuditor(algorithm_mode=True)
         audit_res = auditor.audit_script(script_text)
 
         if not audit_res.is_valid:
@@ -861,12 +864,19 @@ class TelegramCommandBot:
                 job_id = parts[1]
 
             self.jq.transition_job(job_id, to_state="AWAITING_CUSTOM_SCRIPT")
+            from services.script_auditor import (
+                DEFAULT_TARGET_SHOTS,
+                MAX_WORDS_PER_SHOT_ALGORITHM,
+                MIN_WORDS_PER_SHOT_ALGORITHM,
+            )
             self.notifier.send_message(
                 f"✍️ <b>[JOB {job_id}: NHẬP SCRIPT TÙY BIẾN]</b>\n\n"
                 f"Hệ thống đang chờ bạn gửi kịch bản:\n"
                 f"• Gửi file <code>.txt</code> đính kèm\n"
                 f"• Hoặc copy & paste trực tiếp văn bản vào chat này (hoặc gõ: <code>/script {job_id} &lt;nội dung&gt;</code>).\n\n"
-                f"<i>Quy chuẩn: 24 cảnh tài liệu (18-25 từ/cảnh để đọc vừa vặn 10s).</i>"
+                f"<i>Quy chuẩn: {DEFAULT_TARGET_SHOTS} cảnh tài liệu, "
+                f"{MIN_WORDS_PER_SHOT_ALGORITHM}-{MAX_WORDS_PER_SHOT_ALGORITHM} từ/cảnh "
+                f"(cảnh 4-8 giây ở nhịp 210 WPM).</i>"
             )
 
         elif cmd == "/script":

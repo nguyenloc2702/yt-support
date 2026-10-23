@@ -15,6 +15,7 @@ Key architectural features:
 import json
 import logging
 import os
+from functools import partial
 from pathlib import Path
 import re
 import subprocess
@@ -193,6 +194,9 @@ class AutomatedFactory:
         project_dir = self.output_dir / job_id
         project_dir.mkdir(parents=True, exist_ok=True)
         self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
+        # Nothing in ANALYZING is resumable, so the row must keep proving this
+        # process is alive or the stale-job reaper buries a live run.
+        touch = partial(self.jq.touch_job, job_id)
 
         logger.info("=== STARTING SMART REUP PIPELINE: %s ===", job_id)
         if self.notifier.is_configured:
@@ -208,9 +212,11 @@ class AutomatedFactory:
         try:
             # 1. Download YouTube video
             logger.info("Downloading YouTube video for %s...", job_id)
+            touch()
             raw_video = download_video(youtube_url, project_dir, max_height=1080)
 
             # 2. Extract Transcript (Try subtitles first to save Whisper CPU/RAM)
+            touch()
             raw_sub_segments = try_extract_subtitles(project_dir)
             transcript_source = "youtube_subtitles"
             if not raw_sub_segments:
@@ -253,6 +259,7 @@ class AutomatedFactory:
 
             # 3. Rewrite & Paraphrase Script to Vietnamese (LLM with structured beat fallback)
             logger.info("Generating Vietnamese review script for %s...", job_id)
+            touch()
             script_data = None
             try:
                 from pipeline.script_rewrite import rewrite_script
@@ -608,6 +615,7 @@ class AutomatedFactory:
         project_dir = self.output_dir / job_id
         project_dir.mkdir(parents=True, exist_ok=True)
         self.jq.transition_job(job_id, to_state="ANALYZING", project_dir=str(project_dir))
+        touch = partial(self.jq.touch_job, job_id)
 
         from services.script_auditor import ScriptAuditor, detect_language, VOICE_MAP
 
@@ -674,6 +682,7 @@ class AutomatedFactory:
 
                 if not sub_segments:
                     from pipeline.youtube import download_subtitles_fast
+                    touch()
                     sub_segments = download_subtitles_fast(youtube_url, project_dir)
 
                 if not sub_segments:
@@ -687,7 +696,7 @@ class AutomatedFactory:
                 # Determine target duration: if user specified duration, use it;
                 # otherwise match original video duration!
                 effective_duration = float(target_duration) if (target_duration and target_duration > 0) else total_dur
-                # Planned scenes average ~6s (18-24 words at 3.5 words/s), so divide
+                # Planned scenes average ~6s (14-28 words at 3.5 words/s), so divide
                 # by 6 rather than 5 to land the script on the requested duration.
                 target_shots = max(6, min(180, int(round(effective_duration / 6.0))))
 
@@ -696,7 +705,7 @@ class AutomatedFactory:
                 from services.script_factory import ScriptFactory
                 vi_scenes, en_scenes, algo_result = ScriptFactory().run(
                     sub_segments or [], target_shots=target_shots, project_dir=project_dir,
-                    target_duration=effective_duration,
+                    target_duration=effective_duration, on_progress=touch,
                 )
                 # Record the user-facing target so the QA scorecard can score drift
                 algo_result["target_duration_sec"] = round(effective_duration, 1)
@@ -732,6 +741,7 @@ class AutomatedFactory:
             # Character detection across scripts — LLM-based (replaces regex that
             # flooded fake characters). Raises on gateway failure (no silent fakes).
             from pipeline.character_manager import detect_characters_in_text_llm
+            touch()
             combined_script_text = " ".join(s.get("text", "") for s in vi_scenes) + " " + " ".join(s.get("text", "") for s in en_scenes)
             detected_chars = detect_characters_in_text_llm(combined_script_text)
             required_characters = [d["name"] for d in detected_chars]

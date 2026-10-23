@@ -23,6 +23,9 @@ logger = logging.getLogger("job_queue")
 DEFAULT_DB_PATH = Path("data/factory_jobs.sqlite3")
 LOCK_NAME_HEAVY = "HEAVY_PROCESS_LOCK"
 HEAVY_LOCK_TIMEOUT_SEC = 600.0  # 10 minutes safety auto-expire (managed with active heartbeats)
+# A job row whose genesis process died is indistinguishable from a live run until
+# this much time passes without a heartbeat touch.
+STALE_JOB_TIMEOUT_SEC = 1800.0
 
 JOB_TRANSITIONS = {
     "QUEUED": {"ANALYZING", "AWAITING_CUSTOM_SCRIPT", "WAITING_APPROVAL", "APPROVED", "CANCELLED", "FAILED"},
@@ -275,6 +278,13 @@ class JobQueueManager:
                     (now, LOCK_NAME_HEAVY, job_id)
                 )
                 updated = cur.rowcount > 0
+                if updated:
+                    # A live lock lease is proof the owning process is alive, so it
+                    # doubles as the job heartbeat reap_stale_jobs() reads.
+                    cur.execute(
+                        "UPDATE factory_jobs SET updated_at = ? WHERE id = ?",
+                        (now, job_id),
+                    )
                 conn.commit()
                 return updated
             except sqlite3.OperationalError:
@@ -483,6 +493,58 @@ class JobQueueManager:
             ORDER BY created_at ASC LIMIT 1
             """).fetchone()
             return dict(row) if row else None
+
+    def touch_job(self, job_id: str) -> bool:
+        """Heartbeat: prove the process owning this job is still alive."""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE factory_jobs SET updated_at = ? WHERE id = ?",
+                (time.time(), job_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def reap_stale_jobs(self, max_age_sec: float = STALE_JOB_TIMEOUT_SEC) -> List[str]:
+        """Fail ANALYZING jobs whose process stopped heartbeating, and say why.
+
+        ANALYZING is the only non-terminal state nothing resumes (the runnable
+        query above takes QUEUED/APPROVED/PROCESSING), so a genesis process that
+        dies mid-script parks its row forever. Worse, create_job_if_no_active
+        counts that zombie as active and silently rejects every later /remake of
+        the same video.
+        """
+        cutoff = time.time() - max_age_sec
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, updated_at FROM factory_jobs "
+                "WHERE status = 'ANALYZING' AND updated_at < ?",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        reaped: List[str] = []
+        for row in rows:
+            age_min = max(0.0, (time.time() - float(row["updated_at"]))) / 60.0
+            ok = self.transition_job(
+                job_id=row["id"],
+                to_state="FAILED",
+                error_message=(
+                    f"Process died without reporting: không heartbeat {age_min:.0f} phút "
+                    f"ở ANALYZING (ngưỡng {max_age_sec / 60:.0f} phút)."
+                ),
+            )
+            if ok:
+                reaped.append(row["id"])
+                logger.warning(
+                    "🧟 Reaped job mồ côi %s (%.0f phút im lặng) -> FAILED",
+                    row["id"], age_min,
+                )
+        return reaped
 
     def approve_job(self, job_id: str, enforce_gates: bool = True) -> bool:
         job = self.get_job(job_id)

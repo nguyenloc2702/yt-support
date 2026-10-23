@@ -25,9 +25,16 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
+from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE
+from services.script_auditor import (
+    EN_MAX_WORDS_ALGORITHM,
+    GENERATED_WORD_WINDOW,
+    RECOMMENDED_WORDS_PER_SHOT_ALGORITHM,
+    SCENE_WORDS_PER_SECOND,
+)
 
 logger = get_logger(__name__)
 
@@ -39,18 +46,31 @@ SPLIT_MIN_CHUNK = 5  # smallest sub-chunk when a rewrite response is unusable
 # Skill-pack pacing anchor: scene duration is computed in code from the VI word
 # count (210 WPM) instead of trusting the LLM's duration guess. The audio stage
 # targets 205 WPM with pauses; 3.5 words/s is the plan ceiling (QA S08 <=210).
-WORDS_PER_SECOND = 3.5
+WORDS_PER_SECOND = SCENE_WORDS_PER_SECOND
 
 # Skill-pack mechanical targets (mirrors scripts/apply_video_algorithm.py)
 TARGET_SHORT_SENTENCE_PCT = 0.54
 MIN_WPM = 195.0
 MAX_WPM = 214.0
 TARGET_WPM = 205.0
-MIN_SCENE_DURATION = 4.0
-MAX_SCENE_DURATION = 8.0
-VI_MIN_WORDS = 18
-VI_MAX_WORDS = 24
-EN_MAX_WORDS = 16
+MIN_SCENE_DURATION = SCENE_DUR_RANGE[0]
+MAX_SCENE_DURATION = SCENE_DUR_RANGE[1]
+# The per-scene word window is nothing but the QA duration window (S09: 4-8s)
+# expressed in words. It used to be a free-floating 18-24 that no downstream
+# check required, while the slicer feeding it deliberately emitted 6-26 words.
+VI_MIN_WORDS, VI_MAX_WORDS = GENERATED_WORD_WINDOW
+# Steering band quoted to the model: it aims the script at ~6s scenes without
+# being the thing that invalidates a variant. Only the edges above are enforced.
+VI_TARGET_WORDS = RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
+EN_MAX_WORDS = EN_MAX_WORDS_ALGORITHM
+# Acceptance mirrors the scorecard instead of out-tightening it: a flat AND over
+# every scene asks ~170 independent LLM draws to land in one narrow window at
+# once, which is unwinnable (measured 55-65% per-scene compliance => ~1e-32).
+MIN_BUDGET_RATIO = 0.95
+# Aggregate WPM is recorded, never vetoed here: scene duration is derived from
+# the word count, so a compliant script is exactly 210 WPM by construction and
+# the only way to cross S08's ceiling is the <=5% outliers the ratio rule
+# deliberately tolerates. QA measures WPM on the real audio, which is the law.
 # Hook window: QA S16 allows <=32s. Four hook scenes of 24-28 words land at
 # 27.4-32.0s at 3.5 w/s; the repair targets 105-112 words so the 30s boundary
 # falls inside scene 4 and the scene never overflows the 32s tolerance.
@@ -121,6 +141,32 @@ class ScriptFactoryError(RuntimeError):
     """Raised when the script factory cannot produce a usable script."""
 
 
+def _scene_violations(
+    vi_scene: Dict[str, Any], en_scene: Dict[str, Any]
+) -> Tuple[str, ...]:
+    """Which budget rules this scene breaks ("" when it satisfies all of them)."""
+    vi_words = len(str(vi_scene.get("text", "")).split())
+    en_words = len(str(en_scene.get("text", "")).split())
+    kinds: List[str] = []
+    if vi_words < VI_MIN_WORDS:
+        kinds.append("vi_low")
+    elif vi_words > VI_MAX_WORDS:
+        kinds.append("vi_high")
+    if en_words > EN_MAX_WORDS:
+        kinds.append("en_high")
+    return tuple(kinds)
+
+
+def _beat(on_progress: Optional[Callable[[], None]]) -> None:
+    """Report liveness; a heartbeat failure must never sink an expensive script."""
+    if on_progress is None:
+        return
+    try:
+        on_progress()
+    except Exception as exc:
+        logger.warning("Script heartbeat skipped: %s", exc)
+
+
 @dataclass
 class Variant:
     angle: Dict[str, str]
@@ -132,6 +178,7 @@ class Variant:
     breakdown: Dict[str, float] = field(default_factory=dict)
     judge_feedback: str = ""
     metrics: Dict[str, Any] = field(default_factory=dict)
+    budget_report: Dict[str, Any] = field(default_factory=dict)
 
 
 class ScriptFactory:
@@ -157,9 +204,11 @@ class ScriptFactory:
         target_shots: int,
         project_dir: Optional[Path] = None,
         target_duration: Optional[float] = None,
+        on_progress: Optional[Callable[[], None]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
         """Slice -> best-of-N rewrite -> judge -> regenerate. Returns (vi, en, result)."""
         started = time.time()
+        _beat(on_progress)
         slices_vi, slices_en = self._slice(transcript_segments, target_shots)
         if not slices_vi:
             raise ScriptFactoryError("Semantic slicing produced no scenes")
@@ -176,10 +225,12 @@ class ScriptFactory:
         total_calls = 0
 
         for round_idx in range(1, self.max_regen_rounds + 2):
+            _beat(on_progress)
             variants: List[Variant] = []
             for angle in VARIANT_ANGLES[: self.n_variants]:
                 variant = self._make_variant(
-                    angle, slices_vi, slices_en, transcript_text, judge_feedback, feedback_brief
+                    angle, slices_vi, slices_en, transcript_text, judge_feedback,
+                    feedback_brief, on_progress,
                 )
                 total_calls += max(1, (len(slices_vi) + VARIANT_CHUNK - 1) // VARIANT_CHUNK)
                 if variant.valid:
@@ -225,7 +276,9 @@ class ScriptFactory:
         # Post-selection repairs fix the structural checks the judge scores but
         # cannot enforce (hook window, callback echo) and top up a script that is
         # still far short of the requested duration.
-        post_repairs = self._post_process_best(best, transcript_text, target_duration)
+        post_repairs = self._post_process_best(
+            best, transcript_text, target_duration, on_progress
+        )
 
         result = {
             "engine": "script_factory_best_of_n",
@@ -236,6 +289,7 @@ class ScriptFactory:
             "total_rounds": len(rounds),
             "scene_count": len(best.scenes_vi),
             "expected_scene_count": expected_count,
+            "budget_report": best.budget_report,
             "mechanical_metrics": best.metrics,
             "judge_breakdown": best.breakdown,
             "judge_feedback": best.judge_feedback,
@@ -273,6 +327,7 @@ class ScriptFactory:
         transcript_text: str,
         judge_feedback: str,
         feedback_brief: str = "",
+        on_progress: Optional[Callable[[], None]] = None,
     ) -> Variant:
         """Rewrite ALL base scenes into one variant, chunked to respect max_tokens."""
         variant = Variant(angle=angle)
@@ -280,6 +335,7 @@ class ScriptFactory:
         scenes_en: List[Dict[str, Any]] = []
 
         for chunk_start in range(0, len(base_vi), VARIANT_CHUNK):
+            _beat(on_progress)
             chunk_vi = base_vi[chunk_start: chunk_start + VARIANT_CHUNK]
             chunk_en = base_en[chunk_start: chunk_start + VARIANT_CHUNK]
             try:
@@ -298,17 +354,14 @@ class ScriptFactory:
                 f"expected {len(base_vi)} scenes, got {len(scenes_vi)}"
             )
             return variant
-        for sc in scenes_vi:
-            if not str(sc.get("text", "")).strip():
-                variant.invalid_reason = "empty voiceover in variant"
-                return variant
 
-        self._repair_word_budget(angle, scenes_vi, scenes_en, transcript_text)
-        offenders = self._budget_offenders(scenes_vi, scenes_en)
-        if offenders:
-            variant.invalid_reason = (
-                f"word budget not met after repair: {len(offenders)} scenes"
-            )
+        self._repair_word_budget(
+            angle, scenes_vi, scenes_en, transcript_text, on_progress
+        )
+        report = self._acceptance_report(scenes_vi, scenes_en)
+        variant.budget_report = report
+        if not report["ok"]:
+            variant.invalid_reason = report["reason"]
             return variant
 
         variant.scenes_vi = scenes_vi
@@ -316,17 +369,58 @@ class ScriptFactory:
         variant.valid = True
         return variant
 
+    def _acceptance_report(
+        self, scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Budget verdict derived from the QA scorecard rather than a stricter copy.
+
+        Per-scene compliance is a coin flip weighted by model quality, so the
+        scene rule is a ratio. The mean scene duration is a stable statistic over
+        the whole script and is what QA S10 grades, so it is enforced absolutely.
+        """
+        total = len(scenes_vi)
+        if not total:
+            return {"ok": False, "reason": "no scenes produced", "ratio": 0.0}
+        violations = [_scene_violations(vi, en) for vi, en in zip(scenes_vi, scenes_en)]
+        kinds = [k for row in violations for k in row]
+        offenders = sum(1 for row in violations if row)
+        ratio = (total - offenders) / total
+        metrics = self._mechanical_metrics(scenes_vi)
+        wpm = float(metrics.get("estimated_wpm") or 0.0)
+        mean_dur = float(metrics.get("mean_scene_duration") or 0.0)
+        problems: List[str] = []
+        if ratio < MIN_BUDGET_RATIO:
+            problems.append(
+                f"{offenders}/{total} scenes out of budget "
+                f"(ratio {ratio:.2f} < {MIN_BUDGET_RATIO})"
+            )
+        if not MEAN_DUR_RANGE[0] <= mean_dur <= MEAN_DUR_RANGE[1]:
+            problems.append(
+                f"mean scene duration {mean_dur:.2f}s outside "
+                f"{MEAN_DUR_RANGE[0]}-{MEAN_DUR_RANGE[1]}s"
+            )
+        return {
+            "ok": not problems,
+            "reason": "; ".join(problems),
+            "ratio": round(ratio, 3),
+            "offenders": offenders,
+            "vi_low": kinds.count("vi_low"),
+            "vi_high": kinds.count("vi_high"),
+            "en_high": kinds.count("en_high"),
+            "wpm": wpm,
+            "mean_scene_duration": mean_dur,
+        }
+
     @staticmethod
     def _budget_offenders(
         scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
     ) -> List[int]:
-        offenders: List[int] = []
-        for vi, en in zip(scenes_vi, scenes_en):
-            vi_words = len(str(vi.get("text", "")).split())
-            en_words = len(str(en.get("text", "")).split())
-            if vi_words < VI_MIN_WORDS or vi_words > VI_MAX_WORDS or en_words > EN_MAX_WORDS:
-                offenders.append(int(vi.get("index", 0)))
-        return offenders
+        """Work list for the repair loop: indices of scenes breaking any rule."""
+        return [
+            int(vi.get("index", 0))
+            for vi, en in zip(scenes_vi, scenes_en)
+            if _scene_violations(vi, en)
+        ]
 
     # -------------------------------------------------- post-selection repairs
 
@@ -335,12 +429,16 @@ class ScriptFactory:
         best: Variant,
         transcript_text: str,
         target_duration: Optional[float],
+        on_progress: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         vi, en = best.scenes_vi, best.scenes_en
+        _beat(on_progress)
         hook = self._repair_hook(best.angle, vi, en, transcript_text)
+        _beat(on_progress)
         callback = self._repair_callback(best.angle, vi, en, transcript_text)
+        _beat(on_progress)
         expansion = self._expand_toward_target(
-            best.angle, vi, en, transcript_text, target_duration
+            best.angle, vi, en, transcript_text, target_duration, on_progress
         )
         best.metrics = self._mechanical_metrics(vi)
         logger.info(
@@ -591,6 +689,7 @@ class ScriptFactory:
         scenes_en: List[Dict[str, Any]],
         transcript_text: str,
         target_duration: Optional[float],
+        on_progress: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Top up short scripts by rewriting the leanest scenes to 23-24 words."""
         if not target_duration or target_duration <= 0:
@@ -599,6 +698,7 @@ class ScriptFactory:
         start_total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
         calls = 0
         for _ in range(EXPANSION_BATCHES):
+            _beat(on_progress)
             total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
             drift = abs(total - target) / target
             if drift <= EXPANSION_DRIFT_THRESHOLD or total > target:
@@ -615,7 +715,9 @@ class ScriptFactory:
             calls += self._rewrite_scene_indices(
                 angle, scenes_vi, scenes_en, batch, transcript_text,
                 f"Nâng MỖI cảnh trên lên {EXPANSION_TARGET_WORDS[0]}-{EXPANSION_TARGET_WORDS[1]} từ "
-                "(6.6-6.9 giây) bằng chi tiết grounded từ transcript; giữ nguyên ý, số liệu, tên riêng, index. "
+                f"({EXPANSION_TARGET_WORDS[0] / WORDS_PER_SECOND:.1f}-"
+                f"{EXPANSION_TARGET_WORDS[1] / WORDS_PER_SECOND:.1f} giây) bằng chi tiết grounded "
+                "từ transcript; giữ nguyên ý, số liệu, tên riêng, index. "
                 f"voiceover_en tối đa {EN_MAX_WORDS} từ.",
             )
         final_total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
@@ -701,8 +803,9 @@ class ScriptFactory:
         scenes_vi: List[Dict[str, Any]],
         scenes_en: List[Dict[str, Any]],
         transcript_text: str,
+        on_progress: Optional[Callable[[], None]] = None,
     ) -> None:
-        """Rewrite out-of-budget scenes in place until VI 18-24 words / EN <=16."""
+        """Rewrite out-of-budget scenes in place until the acceptance ratio holds."""
         from pipeline.llm_client import chat_json
 
         by_index = {
@@ -711,10 +814,15 @@ class ScriptFactory:
             if i < len(scenes_en)
         }
         for _ in range(MAX_REPAIR_ROUNDS):
+            # Stop as soon as the variant would be accepted: chasing the last
+            # few scenes one LLM call at a time is what used to burn the budget.
+            if self._acceptance_report(scenes_vi, scenes_en)["ok"]:
+                return
             offenders = self._budget_offenders(scenes_vi, scenes_en)
             if not offenders:
                 return
             for start in range(0, len(offenders), REPAIR_BATCH):
+                _beat(on_progress)
                 batch = offenders[start: start + REPAIR_BATCH]
                 items = []
                 for idx in batch:
@@ -773,11 +881,14 @@ class ScriptFactory:
                         en["duration"] = dur
                     if text_en:
                         en["text"] = text_en
-        remaining = self._budget_offenders(scenes_vi, scenes_en)
-        if remaining:
+        report = self._acceptance_report(scenes_vi, scenes_en)
+        if not report["ok"]:
             logger.warning(
-                "Word-budget repair left %d/%d scenes out of budget (first: %s)",
-                len(remaining), len(scenes_vi), remaining[:5],
+                "Word-budget repair left %d/%d scenes out of budget "
+                "(vi_low=%d vi_high=%d en_high=%d WPM=%.0f mean=%.2fs) — first: %s | %s",
+                report["offenders"], len(scenes_vi), report["vi_low"], report["vi_high"],
+                report["en_high"], report["wpm"], report["mean_scene_duration"],
+                self._budget_offenders(scenes_vi, scenes_en)[:5], report["reason"],
             )
 
     def _rewrite_chunk_robust(
@@ -863,15 +974,16 @@ class ScriptFactory:
             f"BỘ CẢNH CẦN VIẾT LẠI (cảnh {chunk_start + 1}-{chunk_start + len(chunk_vi)} "
             f"trên tổng {total_scenes}):\n"
             f"{json.dumps(compact_base, ensure_ascii=False, indent=1)}\n\n"
-            "Yêu cầu: viết lại TỪNG cảnh đúng thứ tự, GIỮ NGUYÊN SỐ LƯỢNG CẢNH. Với mỗi cảnh:\n"
-            "- voiceover_vi: lời thoại mượt mà trọn câu theo góc kể và bộ quy tắc; câu ngắn dứt khoát "
-            "(<= 6 từ) xen kẽ tạo nhịp; không lặp từ, không cụt lủn. MỖI cảnh 18-24 từ "
-            "(5.1-6.9 giây tại nhịp 210 WPM) — ý dài phải viết cô đọng, TUYỆT ĐỐI KHÔNG dồn "
-            "quá 24 từ vào một cảnh. Ưu tiên 20-22 từ để tổng kịch bản đủ dài.\n"
-            "- voiceover_en: bản EN đối chiếu chuẩn xác, giữ nguyên số liệu, diễn lại NGẮN GỌN theo "
-            "nguyên ý (không dịch word-by-word): tối đa 16 từ mỗi cảnh vì giọng đọc EN của gateway "
-            "chỉ ~110 wpm (chậm gần gấp đôi giọng VI ~200 wpm) — vượt budget sẽ lệch timeline.\n"
-            "- estimated_duration: 5.1-6.9 giây, tự nhiên theo độ dài lời thoại.\n"
+            f"Yêu cầu: viết lại TỪNG cảnh đúng thứ tự, GIỮ NGUYÊN SỐ LƯỢNG CẢNH. Với mỗi cảnh:\n"
+            f"- voiceover_vi: lời thoại mượt mà trọn câu theo góc kể và bộ quy tắc; câu ngắn dứt khoát "
+            f"(<= 6 từ) xen kẽ tạo nhịp; không lặp từ, không cụt lủn. MỖI cảnh "
+            f"{VI_MIN_WORDS}-{VI_MAX_WORDS} từ ({MIN_SCENE_DURATION:.1f}-{MAX_SCENE_DURATION:.1f} giây tại nhịp "
+            f"210 WPM), ưu tiên {VI_TARGET_WORDS[0]}-{VI_TARGET_WORDS[1]} từ để tổng kịch bản đủ dài; "
+            f"TUYỆT ĐỐI KHÔNG dồn quá {VI_MAX_WORDS} từ vào một cảnh.\n"
+            f"- voiceover_en: bản EN đối chiếu chuẩn xác, giữ nguyên số liệu, diễn lại NGẮN GỌN theo "
+            f"nguyên ý (không dịch word-by-word): tối đa {EN_MAX_WORDS} từ mỗi cảnh vì giọng đọc EN của gateway "
+            f"chỉ ~110 wpm (chậm gần gấp đôi giọng VI ~200 wpm) — vượt budget sẽ lệch timeline.\n"
+            f"- estimated_duration: {MIN_SCENE_DURATION:.1f}-{MAX_SCENE_DURATION:.1f} giây, tự nhiên theo độ dài lời thoại.\n"
             "- situation: tình huống cụ thể để dựng hình.\n"
             "- visual_prompt: prompt tiếng Anh theo STYLE BIBLE crayon.\n\n"
             "Trả về duy nhất JSON object:\n"
@@ -891,6 +1003,13 @@ class ScriptFactory:
         en_out: List[Dict[str, Any]] = []
         for i, (sc, base) in enumerate(zip(scenes, chunk_vi)):
             text_vi = str(sc.get("voiceover_vi", "")).strip()
+            if not text_vi:
+                # Raise instead of returning: _rewrite_chunk_robust halves the
+                # chunk and retries, rather than condemning 170 good scenes over
+                # one blank line.
+                raise ScriptFactoryError(
+                    f"scene {chunk_start + i + 1} returned an empty voiceover_vi"
+                )
             text_en = str(sc.get("voiceover_en", "") or text_vi).strip()
             dur = max(
                 MIN_SCENE_DURATION,
