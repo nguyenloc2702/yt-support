@@ -625,63 +625,23 @@ def build_dual_scripts_from_transcript(
     return vi_scenes, en_scenes
 
 
-def build_semantic_dual_scripts_from_transcript(
-    transcript_segments: List[Dict[str, Any]],
-    target_shots: int = DEFAULT_TARGET_SHOTS,
-) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
-    """
-    Intelligent AI Scriptwriter & Semantic Scene Slicer using xKiro LLM.
-    Bypasses dumb fixed 5-second mechanical slicing.
-    Slices scenes naturally based on specific dramatic & narrative situations,
-    with flexible dynamic durations (4.5s - 8.0s) and fluent documentary prose.
-    """
-    import os
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return None
-    try:
-        from pipeline.llm_client import chat_json
-        from services.settings_service import get_xkiro_generation_model
+def _slice_one_block(
+    b_segs: List[Dict[str, Any]],
+    block_role: str,
+    scenes_per_block: int,
+    generation_model: str,
+) -> List[Dict[str, Any]]:
+    """Slice one transcript block into scenes; raises when the LLM keeps
+    returning unusable output."""
+    from pipeline.llm_client import chat_json
 
-        generation_model = get_xkiro_generation_model()
-        if not generation_model:
-            return None
+    b_text = _clean_rolling_stutter(" ".join(s["text"] for s in b_segs))
+    if not b_text or len(b_text) < 15:
+        return []
+    t_start = float(b_segs[0].get("start", 0.0))
+    t_end = float(b_segs[-1].get("end", t_start))
 
-        # 1. Clean subtitle stutters and chronological stitching
-        cleaned_segs = []
-        for s in transcript_segments:
-            txt = _clean_rolling_stutter(str(s.get("text", "")).strip())
-            if txt:
-                cleaned_segs.append({
-                    "start": float(s.get("start", 0)),
-                    "end": float(s.get("end", 0)),
-                    "text": txt,
-                })
-        if not cleaned_segs:
-            return None
-
-        total_dur = max((s["end"] for s in cleaned_segs), default=180.0)
-        # ~6s of finished narration per scene (18-24 words at 3.5 w/s). Blocks are
-        # sized so each call emits a manageable scene count while the whole script
-        # still reaches the requested target_shots.
-        target_scenes = max(6, int(target_shots))
-        num_blocks = max(1, min(16, int(round(total_dur / 75.0))))
-        block_dur = total_dur / num_blocks
-        scenes_per_block = max(3, int(round(target_scenes / num_blocks)))
-
-        vi_scenes: List[Dict[str, Any]] = []
-        en_scenes: List[Dict[str, Any]] = []
-        scene_counter = 1
-
-        for b_idx in range(num_blocks):
-            t_start = b_idx * block_dur
-            t_end = (b_idx + 1) * block_dur
-            b_segs = [s for s in cleaned_segs if t_start <= s["start"] < t_end or (b_idx == num_blocks - 1 and s["start"] >= t_start)]
-            b_text = _clean_rolling_stutter(" ".join(s["text"] for s in b_segs))
-            if not b_text or len(b_text) < 15:
-                continue
-
-            block_role = "MỞ ĐẦU (HOOK)" if b_idx == 0 else ("KẾT THÚC (CALLBACK & OUTRO)" if b_idx == num_blocks - 1 else "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)")
-            prompt = f"""Bạn là Đạo diễn kiêm Biên tập viên Phóng sự Tài liệu chuyên nghiệp.
+    prompt = f"""Bạn là Đạo diễn kiêm Biên tập viên Phóng sự Tài liệu chuyên nghiệp.
 Nhiệm vụ: Phân tích đoạn nội dung thuyết minh tài chính ({t_start:.0f}s - {t_end:.0f}s, vai trò: {block_role}) và băm thành các CẢNH THEO TÌNH HUỐNG NỘI DUNG CỤ THỂ, KHÔNG băm 5s máy móc.
 
 Nội dung:
@@ -729,35 +689,138 @@ Trả về duy nhất JSON array:
 ]
 Chỉ trả về JSON thuần túy."""
 
-            scenes_data = None
-            block_feedback = ""
-            min_acceptable = max(3, int(scenes_per_block * 0.7))
-            for _attempt in range(2):
-                parsed = chat_json(
-                    "Bạn là trợ lý chỉ trả về JSON thuần túy, không giải thích.",
-                    prompt + block_feedback,
-                    temperature=0.3,
-                    model=generation_model,
-                )
-                candidate = None
-                for key in ("items", "scenes", "data"):
-                    if isinstance(parsed.get(key), list):
-                        candidate = parsed[key]
-                        break
-                if candidate is None:
-                    raise ValueError("semantic slicing returned unexpected JSON shape")
-                scenes_data = candidate
-                if len(scenes_data) >= min_acceptable:
-                    break
-                logger.warning(
-                    "Slicer block %d returned %d/%d scenes; retrying with stronger instruction",
-                    b_idx + 1, len(scenes_data), scenes_per_block,
-                )
-                block_feedback = (
-                    f"\n\nLẦN TRƯỚC BẠN CHỈ CHIA {len(scenes_data)} CẢNH. "
-                    f"Khối này PHẢI có đúng {scenes_per_block} cảnh (sai số ±1), "
-                    "mỗi cảnh 18-24 từ, không gộp nhiều ý vào một cảnh."
-                )
+    scenes_data: Optional[List[Dict[str, Any]]] = None
+    block_feedback = ""
+    min_acceptable = max(3, int(scenes_per_block * 0.7))
+    last_err: Optional[Exception] = None
+    for _attempt in range(2):
+        try:
+            parsed = chat_json(
+                "Bạn là trợ lý chỉ trả về JSON thuần túy, không giải thích.",
+                prompt + block_feedback,
+                temperature=0.3,
+                model=generation_model,
+            )
+        except Exception as exc:
+            last_err = exc
+            continue
+        candidate = None
+        for key in ("items", "scenes", "data"):
+            if isinstance(parsed.get(key), list):
+                candidate = parsed[key]
+                break
+        if candidate is None:
+            last_err = ValueError("semantic slicing returned unexpected JSON shape")
+            continue
+        scenes_data = candidate
+        if len(scenes_data) >= min_acceptable:
+            break
+        logger.warning(
+            "Slicer block returned %d/%d scenes; retrying with stronger instruction",
+            len(scenes_data), scenes_per_block,
+        )
+        block_feedback = (
+            f"\n\nLẦN TRƯỚC BẠN CHỈ CHIA {len(scenes_data)} CẢNH. "
+            f"Khối này PHẢI có đúng {scenes_per_block} cảnh (sai số ±1), "
+            "mỗi cảnh 18-24 từ, không gộp nhiều ý vào một cảnh."
+        )
+    if scenes_data is None:
+        raise last_err or RuntimeError("Slicer block returned no usable scenes")
+    return scenes_data
+
+
+def _slice_block_or_split(
+    b_segs: List[Dict[str, Any]],
+    block_role: str,
+    scenes_per_block: int,
+    generation_model: str,
+    depth: int = 0,
+) -> List[Dict[str, Any]]:
+    """Slice a block, splitting it in half when the LLM output is unusable.
+
+    Large blocks overflow the gateway's response budget; smaller halves parse
+    reliably (same failure class as the rewrite-chunk truncation fix).
+    """
+    try:
+        return _slice_one_block(b_segs, block_role, scenes_per_block, generation_model)
+    except Exception:
+        if depth >= 3 or len(b_segs) < 2:
+            raise
+    mid = max(1, len(b_segs) // 2)
+    logger.warning(
+        "Slicer block unusable at depth %d (%d segs); splitting in half", depth, len(b_segs)
+    )
+    out: List[Dict[str, Any]] = []
+    for i, half in enumerate((b_segs[:mid], b_segs[mid:])):
+        half_role = block_role
+        if "MỞ ĐẦU" in block_role and i == 1:
+            half_role = "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)"
+        if "KẾT THÚC" in block_role and i == 0:
+            half_role = "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)"
+        out.extend(_slice_block_or_split(
+            half, half_role, max(2, scenes_per_block // 2), generation_model, depth + 1
+        ))
+    return out
+
+
+def build_semantic_dual_scripts_from_transcript(
+    transcript_segments: List[Dict[str, Any]],
+    target_shots: int = DEFAULT_TARGET_SHOTS,
+) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
+    """
+    Intelligent AI Scriptwriter & Semantic Scene Slicer using xKiro LLM.
+    Bypasses dumb fixed 5-second mechanical slicing.
+    Slices scenes naturally based on specific dramatic & narrative situations,
+    with flexible dynamic durations (4.5s - 8.0s) and fluent documentary prose.
+    """
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    try:
+        from services.settings_service import get_xkiro_generation_model
+
+        generation_model = get_xkiro_generation_model()
+        if not generation_model:
+            return None
+
+        # 1. Clean subtitle stutters and chronological stitching
+        cleaned_segs = []
+        for s in transcript_segments:
+            txt = _clean_rolling_stutter(str(s.get("text", "")).strip())
+            if txt:
+                cleaned_segs.append({
+                    "start": float(s.get("start", 0)),
+                    "end": float(s.get("end", 0)),
+                    "text": txt,
+                })
+        if not cleaned_segs:
+            return None
+
+        total_dur = max((s["end"] for s in cleaned_segs), default=180.0)
+        # ~6s of finished narration per scene (18-24 words at 3.5 w/s). Blocks are
+        # sized so each call emits a manageable scene count while the whole script
+        # still reaches the requested target_shots.
+        target_scenes = max(6, int(target_shots))
+        num_blocks = max(1, min(16, int(round(total_dur / 75.0))))
+        block_dur = total_dur / num_blocks
+        scenes_per_block = max(3, int(round(target_scenes / num_blocks)))
+
+        vi_scenes: List[Dict[str, Any]] = []
+        en_scenes: List[Dict[str, Any]] = []
+        scene_counter = 1
+
+        for b_idx in range(num_blocks):
+            t_start = b_idx * block_dur
+            t_end = (b_idx + 1) * block_dur
+            b_segs = [s for s in cleaned_segs if t_start <= s["start"] < t_end or (b_idx == num_blocks - 1 and s["start"] >= t_start)]
+            b_text = _clean_rolling_stutter(" ".join(s["text"] for s in b_segs))
+            if not b_text or len(b_text) < 15:
+                continue
+
+            block_role = "MỞ ĐẦU (HOOK)" if b_idx == 0 else ("KẾT THÚC (CALLBACK & OUTRO)" if b_idx == num_blocks - 1 else "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)")
+            scenes_data = _slice_block_or_split(
+                b_segs, block_role, scenes_per_block, generation_model
+            )
             for sc in scenes_data:
                 dur = float(sc.get("estimated_duration", 6.0))
                 dur = max(4.0, min(8.0, dur))

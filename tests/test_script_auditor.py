@@ -9,6 +9,86 @@ from services.script_auditor import (
 )
 
 
+def _segs(n):
+    return [
+        {"start": float(i), "end": float(i + 1), "text": f"câu số {i} nói về dòng tiền."}
+        for i in range(n)
+    ]
+
+
+def _scene_payload(label, n=3):
+    return {
+        "items": [
+            {
+                "situation": f"tình huống {label} {i}",
+                "voiceover_vi": f"Cảnh {label} số {i} mở ra diễn biến bất ngờ về dòng tiền và thay đổi tất cả.",
+                "voiceover_en": f"Scene {label} {i} opens with a money surprise.",
+                "estimated_duration": 6.0,
+                "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon",
+            }
+            for i in range(n)
+        ]
+    }
+
+
+def test_slice_block_or_split_recovers_from_bad_json(monkeypatch):
+    import services.script_auditor as sa
+
+    calls = []
+
+    def fake_chat_json(system_prompt, user_prompt, **kw):
+        calls.append(user_prompt)
+        # Only the full block (spans both ends) fails, as with gateway truncation
+        if "câu số 0" in user_prompt and "câu số 5" in user_prompt:
+            raise RuntimeError("LLM trả về JSON không hợp lệ: [truncated")
+        tail = user_prompt.split("câu số ")[-1]
+        return _scene_payload(tail.strip()[0])
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", fake_chat_json)
+
+    out = sa._slice_block_or_split(_segs(6), "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)", 6, "test-model")
+
+    assert len(out) == 6  # two halves x 3 scenes each
+    assert len(calls) == 4  # 2 failing full-block attempts + 2 half calls
+    assert all("câu số 0" not in c or "câu số 5" not in c for c in calls[2:])
+
+
+def test_slice_block_or_split_keeps_hook_and_callback_roles(monkeypatch):
+    import services.script_auditor as sa
+
+    prompts = []
+
+    def fake_chat_json(system_prompt, user_prompt, **kw):
+        prompts.append(user_prompt)
+        if "KẾT THÚC" in user_prompt and "câu số 0" in user_prompt:
+            raise RuntimeError("bad JSON")
+        return _scene_payload("x")
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", fake_chat_json)
+
+    out = sa._slice_block_or_split(_segs(4), "KẾT THÚC (CALLBACK & OUTRO)", 4, "test-model")
+
+    assert len(out) == 6
+    assert "KẾT THÚC" in prompts[0]  # full block keeps the callback role
+    assert "THÂN BÀI" in prompts[2] and "KẾT THÚC" not in prompts[2]
+    assert "KẾT THÚC" in prompts[3]
+
+
+def test_slice_block_or_split_raises_when_unrecoverable(monkeypatch):
+    import pytest
+
+    import services.script_auditor as sa
+
+    def fake_chat_json(system_prompt, user_prompt, **kw):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", fake_chat_json)
+
+    with pytest.raises(RuntimeError, match="gateway down"):
+        sa._slice_block_or_split([{"start": 0.0, "end": 1.0, "text": "một đoạn duy nhất."}],
+                                 "THÂN BÀI (TRIỂN KHAI LUẬN ĐIỂM)", 3, "test-model")
+
+
 def test_format_srt_timestamp():
     assert format_srt_timestamp(0.0) == "00:00:00,000"
     assert format_srt_timestamp(65.123) == "00:01:05,123"

@@ -47,6 +47,12 @@ class VideoAutomationWorker:
         self.running = True
         self.worker_id = f"{socket.gethostname()}_{os.getpid()}_{uuid.uuid4().hex[:6]}"
 
+        # The worker reaches the encrypted settings store (API keys) on every
+        # LLM/TTS call; without the tables those queries crash with
+        # "no such table: app_settings" on a fresh DATA_DIR.
+        from core.database import init_db
+        init_db()
+
         # Components
         self.jq = JobQueueManager()
         self.account_pool = AccountPoolManager()
