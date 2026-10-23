@@ -34,6 +34,7 @@ MIN_SCORE = 8.0
 N_VARIANTS = 3
 MAX_REGEN_ROUNDS = 2
 VARIANT_CHUNK = 20  # scenes per rewrite call (keeps output under max_tokens)
+SPLIT_MIN_CHUNK = 5  # smallest sub-chunk when a rewrite response is unusable
 # Skill-pack pacing anchor: scene duration is computed in code from the VI word
 # count (180 WPM) instead of trusting the LLM's duration guess — keeps the plan
 # timeline consistent with real TTS output (xKiro VI voice ~3.6 w/s).
@@ -191,6 +192,11 @@ class ScriptFactory:
                 round_idx,
                 {v.angle["id"]: round(v.score, 1) for v in variants},
             )
+            for v in variants:
+                if not v.valid:
+                    logger.warning(
+                        "Variant %s invalid: %s", v.angle["id"], v.invalid_reason
+                    )
 
             if best is None or round_best.score > best.score:
                 best = round_best
@@ -256,7 +262,7 @@ class ScriptFactory:
             chunk_vi = base_vi[chunk_start: chunk_start + VARIANT_CHUNK]
             chunk_en = base_en[chunk_start: chunk_start + VARIANT_CHUNK]
             try:
-                part_vi, part_en = self._rewrite_chunk(
+                part_vi, part_en = self._rewrite_chunk_robust(
                     angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
                     chunk_start, len(base_vi), feedback_brief,
                 )
@@ -385,6 +391,42 @@ class ScriptFactory:
                 "Word-budget repair left %d/%d scenes out of budget (first: %s)",
                 len(remaining), len(scenes_vi), remaining[:5],
             )
+
+    def _rewrite_chunk_robust(
+        self,
+        angle: Dict[str, str],
+        chunk_vi: List[Dict[str, Any]],
+        chunk_en: List[Dict[str, Any]],
+        transcript_text: str,
+        judge_feedback: str,
+        chunk_start: int,
+        total_scenes: int,
+        feedback_brief: str = "",
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Rewrite a chunk, halving it when the gateway returns unusable JSON."""
+        try:
+            return self._rewrite_chunk(
+                angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
+                chunk_start, total_scenes, feedback_brief,
+            )
+        except Exception as exc:
+            if len(chunk_vi) <= SPLIT_MIN_CHUNK:
+                raise
+            mid = len(chunk_vi) // 2
+            logger.warning(
+                "Rewrite chunk %d-%d failed (%s); splitting into %d+%d scenes",
+                chunk_start + 1, chunk_start + len(chunk_vi), exc, mid,
+                len(chunk_vi) - mid,
+            )
+            left_vi, left_en = self._rewrite_chunk_robust(
+                angle, chunk_vi[:mid], chunk_en[:mid], transcript_text,
+                judge_feedback, chunk_start, total_scenes, feedback_brief,
+            )
+            right_vi, right_en = self._rewrite_chunk_robust(
+                angle, chunk_vi[mid:], chunk_en[mid:], transcript_text,
+                judge_feedback, chunk_start + mid, total_scenes, feedback_brief,
+            )
+            return left_vi + right_vi, left_en + right_en
 
     def _rewrite_chunk(
         self,

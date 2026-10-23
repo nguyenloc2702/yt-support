@@ -41,12 +41,13 @@ class Router:
     """Fake chat_json routing rewrite vs judge calls with configurable judge scores."""
 
     def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=(),
-                 short_rewrites=False):
+                 short_rewrites=False, fail_chunks_above=None):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.rewrite_error = rewrite_error
         self.wrong_count_angles = set(wrong_count_angles)
         self.short_rewrites = short_rewrites
+        self.fail_chunks_above = fail_chunks_above
         self.rewrite_prompts = []
         self.repair_calls = 0
         self.judge_calls = 0
@@ -101,6 +102,8 @@ class Router:
 
         m = re.search(r"trên tổng \d+\):\n(\[.*?\])\n\n", user_prompt, re.DOTALL)
         n = len(json.loads(m.group(1))) if m else 0
+        if self.fail_chunks_above and n > self.fail_chunks_above:
+            raise RuntimeError(f"truncated JSON for {n} scenes")
         count = n - 1 if angle in self.wrong_count_angles else n
         return {
             "scenes": [
@@ -256,6 +259,33 @@ def test_word_budget_repair_enforces_12_24_and_passes_audit(factory, monkeypatch
         "\n".join(sc["text"] for sc in vi)
     )
     assert audit.is_valid is True
+
+
+def test_rewrite_chunk_split_recovers_from_truncated_json(factory, monkeypatch):
+    slices_vi = [
+        {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh {i+1}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(60)
+    ]
+    slices_en = [
+        {"index": sc["index"], "situation": sc["situation"], "text": f"Scene {sc['index']}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in slices_vi
+    ]
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=60: (slices_vi, slices_en),
+    )
+    router = Router(
+        {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
+        fail_chunks_above=10,
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run([{"start": 0, "end": 300, "text": "x"}], target_shots=60)
+    assert len(vi) == 60
+    assert [sc["index"] for sc in vi] == list(range(1, 61))
+    assert router.rewrite_calls > 3  # 20-scene chunks had to be split
 
 
 def test_variants_rewrite_chunked_for_long_scripts(factory, monkeypatch):
