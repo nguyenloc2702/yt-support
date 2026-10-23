@@ -138,6 +138,40 @@ def test_four_gate_happy_path(test_env):
     assert len(data["shot_manifest"][0]["reference_images"]) == 1
 
 
+def test_readiness_uses_algorithm_window_when_marker_present(test_env):
+    """Remake plans allow 4-8s scenes; legacy 1-20s window only applies without the marker."""
+    p_dir = test_env["project_dir"]
+    asm = ApprovalStateMachine(p_dir, test_env["job_id"])
+    asm.set_script(
+        "Vi",
+        "En",
+        beats=[BeatIntent(id=1, text_vi="Vi", text_en="En")],
+        required_characters=["Jensen Huang"],
+    )
+    asm.approve_script(approver="user")
+    asm.set_audio_generated("vi", test_env["audio_vi"], duration=7.0)
+    asm.set_audio_generated("en", test_env["audio_en"], duration=7.0)
+    asm.approve_audio("vi", approver="user")
+    asm.approve_audio("en", approver="user")
+    asm.set_character_reference("jensen_huang", test_env["char_img"])
+    asm.approve_character("jensen_huang", approver="user")
+    asm.set_shots_plan(
+        [{"index": 1, "prompt": "p", "duration": 7.0, "character_ids": []}]
+    )
+
+    ready, errors, _ = asm.check_video_readiness()
+    assert ready is True, errors
+
+    (p_dir / "algorithm_result.json").write_text("{}", encoding="utf-8")
+    out_of_window = [
+        {"index": 1, "prompt": "p", "duration": 3.0, "character_ids": []}
+    ]
+    asm.set_shots_plan(out_of_window)
+    ready, errors, _ = asm.check_video_readiness()
+    assert ready is False
+    assert any("4.0s - 8.0s" in e for e in errors)
+
+
 # =============================================================================
 # TEST B: SCRIPT REVISION AFTER AUDIO GENERATION
 # =============================================================================

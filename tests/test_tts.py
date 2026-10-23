@@ -89,6 +89,137 @@ def test_tempo_capped():
     assert MAX_TEMPO <= 1.6
 
 
+def test_split_text_for_tts_respects_gateway_limit():
+    from pipeline.tts import XKIRO_TTS_MAX_CHARS, _split_text_for_tts
+
+    text = " ".join(
+        f"Câu số {i} nói về dòng tiền và lạm phát trong hệ thống ngân hàng."
+        for i in range(300)
+    )
+    chunks = _split_text_for_tts(text)
+
+    assert len(chunks) > 1
+    assert all(len(c) <= XKIRO_TTS_MAX_CHARS for c in chunks)
+    assert " ".join(chunks).split() == text.split()
+
+
+def test_split_text_for_tts_splits_monster_sentence():
+    from pipeline.tts import XKIRO_TTS_MAX_CHARS, _split_text_for_tts
+
+    text = "từ " * 3000
+    chunks = _split_text_for_tts(text)
+
+    assert all(len(c) <= XKIRO_TTS_MAX_CHARS for c in chunks)
+    assert " ".join(chunks).split() == text.split()
+
+
+def test_long_xkiro_synthesis_chunks_and_concatenates(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    calls = []
+
+    def fake_one(text, voice, out):
+        calls.append(len(text))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"part")
+        return 4.0
+
+    monkeypatch.setattr(tts, "synthesize_one_xkiro", fake_one)
+    merged = {}
+
+    def fake_concat(parts, out):
+        merged["n"] = len(parts)
+        out.write_bytes(b"joined")
+
+    monkeypatch.setattr(tts, "_concat_audio_parts", fake_concat)
+
+    text = " ".join(f"Câu số {i} nói về dòng tiền." for i in range(500))
+    assert len(text) > tts.XKIRO_TTS_MAX_CHARS
+    used = tts.synthesize_one_xkiro_with_fallback(
+        text, "confident-male-vietnamese", tmp_path / "out.mp3"
+    )
+
+    assert used == "confident-male-vietnamese"
+    assert len(calls) > 1
+    assert all(n <= tts.XKIRO_TTS_MAX_CHARS for n in calls)
+    assert merged["n"] == len(calls)
+    assert (tmp_path / "out.mp3").read_bytes() == b"joined"
+
+
+def test_long_xkiro_failure_falls_back_whole_track(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    calls = {"n": 0}
+
+    def fake_one(text, voice, out):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("gateway 500")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"part")
+        return 4.0
+
+    monkeypatch.setattr(tts, "synthesize_one_xkiro", fake_one)
+    monkeypatch.setattr(
+        tts, "_concat_audio_parts", lambda parts, out: out.write_bytes(b"joined")
+    )
+    edge = {}
+
+    def fake_edge(text, voice, out):
+        edge["voice"] = voice
+        edge["len"] = len(text)
+        out.write_bytes(b"edge")
+
+    monkeypatch.setattr(tts, "_edge_tts_save", fake_edge)
+
+    text = " ".join(f"Câu số {i} nói về dòng tiền." for i in range(500))
+    used = tts.synthesize_one_xkiro_with_fallback(
+        text, "confident-male-vietnamese", tmp_path / "out.mp3"
+    )
+
+    assert used == "vi-VN-NamMinhNeural"
+    assert edge["len"] == len(text)
+    assert (tmp_path / "out.mp3").read_bytes() == b"edge"
+
+
+def test_rate_fit_slows_fast_narration_in_place(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    audio = tmp_path / "fast.mp3"
+    audio.write_bytes(b"fast")
+    # 60 words in 15s = 240 WPM -> atempo 0.75 -> 20s
+    monkeypatch.setattr(tts, "_probe_duration", lambda p: 15.0)
+    calls = []
+
+    def fake_ffmpeg(args):
+        calls.append(args)
+        Path(args[-1]).write_bytes(b"slow")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", fake_ffmpeg)
+
+    wpm = tts._fit_narration_rate("từ " * 60, audio)
+
+    assert wpm == pytest.approx(240.0)
+    assert "atempo=0.7500" in calls[0]
+    assert audio.read_bytes() == b"slow"
+
+
+def test_rate_fit_leaves_in_band_audio_untouched(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    audio = tmp_path / "ok.mp3"
+    audio.write_bytes(b"ok")
+    monkeypatch.setattr(tts, "_probe_duration", lambda p: 20.0)
+
+    def boom(args):
+        raise AssertionError("ffmpeg must not run for in-band audio")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", boom)
+
+    assert tts._fit_narration_rate("từ " * 60, audio) == pytest.approx(180.0)
+    assert audio.read_bytes() == b"ok"
+
+
 def test_xkiro_tts_heals_stale_db_key_and_retries(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

@@ -89,6 +89,15 @@ def is_xkiro_voice(voice_id: str) -> bool:
     )
 
 
+XKIRO_TTS_MAX_CHARS = 4000  # gateway hard limit is 4096 per speech request
+# Skill-pack pacing band. The gateway ignores a speed parameter and its VI
+# voice speaks ~250 WPM, so audio is time-stretched into this band locally.
+TARGET_NARRATION_WPM = 180.0
+MIN_NARRATION_WPM = 160.0
+MAX_NARRATION_WPM = 200.0
+MIN_WORDS_FOR_RATE_FIT = 8
+
+
 def _read_llm_key() -> Optional[str]:
     import os
 
@@ -146,14 +155,181 @@ def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Opti
     return float(len(resp.content))
 
 
+def _split_text_for_tts(text: str, max_chars: int = XKIRO_TTS_MAX_CHARS) -> list[str]:
+    """Pack text into chunks under max_chars, splitting on sentence boundaries.
+
+    The gateway rejects a single speech request above 4096 characters; a whole
+    narration script is always longer, so it must be synthesized in parts.
+    """
+    import re
+
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    units = [u.strip() for u in re.split(r"(?<=[.!?…])\s+|\n+", text) if u.strip()]
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        candidate = f"{current} {unit}".strip()
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(unit) <= max_chars:
+            current = unit
+            continue
+        remaining = unit
+        while len(remaining) > max_chars:
+            cut = remaining.rfind(" ", 0, max_chars)
+            if cut <= 0:
+                cut = max_chars
+            chunks.append(remaining[:cut].strip())
+            remaining = remaining[cut:].strip()
+        current = remaining
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _is_vietnamese_voice(voice_id: str) -> bool:
+    v = (voice_id or "").lower()
+    return "vietnamese" in v or v.startswith("vi-")
+
+
+def _fit_narration_rate(text: str, audio_path: Path) -> float:
+    """Time-stretch audio into the skill-pack WPM band, in place.
+
+    Keeps the plan timeline (scenes computed at 3 words/s) aligned with what
+    the TTS actually says. Returns the pre-fit WPM (0.0 when skipped).
+    """
+    words = len(text.split())
+    if words < MIN_WORDS_FOR_RATE_FIT:
+        return 0.0
+    duration = _probe_duration(audio_path)
+    if duration <= 0:
+        return 0.0
+    wpm = words / duration * 60.0
+    if MIN_NARRATION_WPM <= wpm <= MAX_NARRATION_WPM:
+        return wpm
+    factor = max(0.5, min(2.0, TARGET_NARRATION_WPM / wpm))
+    tmp = audio_path.with_name(f"{audio_path.stem}.rate.mp3")
+    from pipeline.ffmpeg import run_ffmpeg
+
+    try:
+        run_ffmpeg(
+            [
+                "-i", str(audio_path),
+                "-filter:a", f"atempo={factor:.4f}",
+                "-c:a", "libmp3lame",
+                "-q:a", "2",
+                str(tmp),
+            ]
+        )
+        tmp.replace(audio_path)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        logging.getLogger(__name__).warning(
+            "Rate fit failed for %s (%.1f WPM, atempo %.2f): %s",
+            audio_path.name, wpm, factor, exc,
+        )
+        return wpm
+    fitted = words / max(_probe_duration(audio_path), 0.001) * 60.0
+    logging.getLogger(__name__).info(
+        "Rate fit %s: %.1f -> %.1f WPM (atempo %.3f)", audio_path.name, wpm, fitted, factor
+    )
+    return wpm
+
+
+def _edge_tts_save(text: str, edge_voice: str, out_path: Path) -> None:
+    async def _edge() -> None:
+        import edge_tts
+
+        comm = edge_tts.Communicate(text, edge_voice)
+        await comm.save(str(out_path))
+
+    asyncio.run(_edge())
+
+
+def _concat_audio_parts(parts: list[Path], out_path: Path) -> None:
+    from pipeline.ffmpeg import run_ffmpeg
+
+    list_file = out_path.with_name(f"{out_path.stem}.concat.txt")
+    list_file.write_text(
+        "\n".join(f"file '{p.resolve().as_posix()}'" for p in parts),
+        encoding="utf-8",
+    )
+    try:
+        run_ffmpeg(
+            [
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_file),
+                "-c:a", "libmp3lame",
+                "-q:a", "2",
+                str(out_path),
+            ]
+        )
+    finally:
+        list_file.unlink(missing_ok=True)
+
+
+def _synthesize_chunked_xkiro_with_fallback(text: str, voice_id: str, out_path: Path) -> str:
+    """Synthesize a long narration in parts, keeping one consistent voice.
+
+    If any part falls back, the whole text is re-synthesized with edge-tts so a
+    single audio track never mixes two voices.
+    """
+    import shutil
+    import uuid
+
+    chunks = _split_text_for_tts(text)
+    if not chunks:
+        raise RenderError("xKiro TTS text is empty")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    parts_dir = out_path.parent / f".xkiro_parts_{uuid.uuid4().hex[:8]}"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        parts: list[Path] = []
+        for i, chunk in enumerate(chunks):
+            part = parts_dir / f"part_{i:03d}.mp3"
+            synthesize_one_xkiro(chunk, voice_id, part)
+            parts.append(part)
+        _concat_audio_parts(parts, out_path)
+        if _is_vietnamese_voice(voice_id):
+            _fit_narration_rate(text, out_path)
+        return voice_id
+    except Exception as exc:
+        edge_voice = XKIRO_TO_EDGE.get(voice_id)
+        if not edge_voice:
+            raise
+        logging.getLogger(__name__).warning(
+            "xKiro TTS failed on a %d-part narration (%s) — falling back to "
+            "edge-tts '%s' for the whole track",
+            len(chunks), exc, edge_voice,
+        )
+        _edge_tts_save(text, edge_voice, out_path)
+        return edge_voice
+    finally:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+
+
 def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path) -> str:
     """xKiro-first synthesis with an explicit edge-tts fallback.
 
     Returns the voice id actually used. The xKiro->edge swap is always logged
     (never silent) and the fallback edge voice is the mapped neural equivalent.
     """
+    if len(text.strip()) > XKIRO_TTS_MAX_CHARS:
+        return _synthesize_chunked_xkiro_with_fallback(text, voice_id, out_path)
     try:
         synthesize_one_xkiro(text, voice_id, out_path)
+        if _is_vietnamese_voice(voice_id):
+            _fit_narration_rate(text, out_path)
         return voice_id
     except Exception as exc:
         edge_voice = XKIRO_TO_EDGE.get(voice_id)
@@ -164,14 +340,7 @@ def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path)
             "xKiro TTS failed for voice '%s' (%s) — falling back to edge-tts '%s'",
             voice_id, exc, edge_voice,
         )
-
-        async def _edge() -> None:
-            import edge_tts
-
-            comm = edge_tts.Communicate(text, edge_voice)
-            await comm.save(str(out_path))
-
-        asyncio.run(_edge())
+        _edge_tts_save(text, edge_voice, out_path)
         return edge_voice
 
 
@@ -280,7 +449,7 @@ def _tts_cache_key(text: str, voice: str, rate: str, pitch_value) -> str:
     import hashlib
 
     h = hashlib.sha256()
-    h.update(f"{voice}|{rate}|{pitch_value}".encode("utf-8"))
+    h.update(f"{voice}|{rate}|{pitch_value}|wpmfit1".encode("utf-8"))
     h.update(text.encode("utf-8"))
     return h.hexdigest()[:32]
 
@@ -388,6 +557,8 @@ def synthesize_narration(
                 cached = _cache_lookup(text, voice, item_rate, None, mp3_path)
                 if not cached:
                     synthesize_one_xkiro(text, voice, mp3_path)
+                    if _is_vietnamese_voice(voice):
+                        _fit_narration_rate(text, mp3_path)
                     _cache_store(text, voice, item_rate, None, mp3_path)
             else:
                 # Edge-tts randomly returns NoAudioReceived ~5-10% of requests, even

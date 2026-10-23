@@ -1070,7 +1070,7 @@ class AutomatedFactory:
                 voice_vi = voice_file.read_text(encoding="utf-8").strip() if voice_file.exists() else ""
                 if not voice_vi:
                     voice_vi = VOICE_MAP["vi"]["default"]
-                out_vi = project_dir / "audio_vi.mp3"
+                out_vi = project_dir / "audio_vi_full.mp3"
                 txt_vi = asm.script_vi_text
                 if txt_vi:
                     used_voice = synthesize_one_xkiro_with_fallback(txt_vi, voice_vi, out_vi)
@@ -1101,7 +1101,7 @@ class AutomatedFactory:
                 from services.script_auditor import VOICE_MAP
 
                 voice_en = VOICE_MAP["en"]["default"]
-                out_en = project_dir / "audio_en.mp3"
+                out_en = project_dir / "audio_en_full.mp3"
                 txt_en = asm.script_en_text
                 if txt_en:
                     used_voice = synthesize_one_xkiro_with_fallback(txt_en, voice_en, out_en)

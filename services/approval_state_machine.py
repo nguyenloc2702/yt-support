@@ -868,6 +868,11 @@ class ApprovalStateMachine:
         errors = []
         warnings = []
 
+        # /remake plans use 4-8s algorithm scenes; the marker file lets every
+        # caller (queue, manifest, approve) apply the same duration window.
+        if not algorithm_mode and (self.project_dir / "algorithm_result.json").is_file():
+            algorithm_mode = True
+
         # 1. Gate 1 - Script
         if not self.is_script_gate_passed():
             errors.append("Gate 1 (Script): Kịch bản chưa được phê duyệt đầy đủ cả VI và EN.")
@@ -896,7 +901,7 @@ class ApprovalStateMachine:
             errors.append("Gate 4: Danh sách shot plan rỗng.")
         else:
             min_dur = 4.0 if algorithm_mode else 1.0
-            max_dur = 6.0 if algorithm_mode else 20.0
+            max_dur = 8.0 if algorithm_mode else 20.0
             for idx, s in enumerate(self.shots_plan, 1):
                 dur = float(s.get("duration", 0.0))
                 if dur < min_dur or dur > max_dur:
