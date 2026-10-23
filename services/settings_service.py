@@ -114,12 +114,16 @@ LLM_MODEL_KEY = "llm_model"
 LLM_PROVIDER_PRESET_KEY = "llm_provider_preset"
 VLM_MODEL_KEY = "vlm_model"
 VLM_ENABLED_KEY = "vlm_enabled"
+VEO_ENABLED_KEY = "veo_enabled"
 
 # Role-specific xKiro models (Phase 1: xKiro-first generation stack).
 # Generation model handles translation, script rewrite, judging, character
 # extraction. VLM model handles image understanding / style checks.
 XKIRO_GENERATION_MODEL_KEY = "xkiro_generation_model"
-DEFAULT_XKIRO_GENERATION_MODEL = "qwen/qwen3.8-omni-flash:free"
+# Measured on the gateway: the free omni model truncates 10-scene rewrite
+# replies and 409s under load, while mistral-large-4-0 answered in 2.0s vs
+# 4.3s, so the paid model leads and the free one is the first backup.
+DEFAULT_XKIRO_GENERATION_MODEL = "mistralai/mistral-large-4-0"
 XKIRO_VLM_MODEL_KEY = "xkiro_vlm_model"
 DEFAULT_XKIRO_VLM_MODEL = "qwen/qwen3.8-omni-flash:free"
 
@@ -129,7 +133,7 @@ DEFAULT_XKIRO_VLM_MODEL = "qwen/qwen3.8-omni-flash:free"
 # from dying in the script phase.
 XKIRO_FALLBACK_MODELS_KEY = "xkiro_fallback_models"
 DEFAULT_XKIRO_FALLBACK_MODELS = [
-    "mistralai/mistral-large-4-0",
+    "qwen/qwen3.8-omni-flash:free",
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-luna",
 ]
@@ -206,7 +210,9 @@ def set_provider_preset(preset: str) -> None:
 
 
 def get_vlm_model() -> str:
-    return get_setting(VLM_MODEL_KEY) or get_llm_model() or DEFAULT_XKIRO_GENERATION_MODEL
+    # Never inherit the generation model here: the primary generator is a
+    # text-only model and would silently break keyframe captioning.
+    return get_setting(VLM_MODEL_KEY) or DEFAULT_XKIRO_VLM_MODEL
 
 
 def set_vlm_model(model: str) -> None:
@@ -269,6 +275,25 @@ def is_vlm_enabled() -> bool:
 
 def set_vlm_enabled(enabled: bool) -> None:
     set_setting(VLM_ENABLED_KEY, "true" if enabled else "false")
+
+
+def is_veo_enabled() -> bool:
+    """Google-cookie Veo shot generation is opt-in.
+
+    __Secure-1PSIDTS is a rolling token: on 20-21/10 the pool served 24 shots for
+    ~28h, then every request returned UNAUTHENTICATED and no ping could bring it
+    back. A still-image + Ken Burns render does not depend on that token, so it
+    is the dependable default. Turn this on only while the cookies are provably
+    alive (/accounts live).
+    """
+    val = get_setting(VEO_ENABLED_KEY)
+    if val is None:
+        return False
+    return val.strip().lower() in ("true", "1", "yes")
+
+
+def set_veo_enabled(enabled: bool) -> None:
+    set_setting(VEO_ENABLED_KEY, "true" if enabled else "false")
 
 
 def verify_provider_connection(

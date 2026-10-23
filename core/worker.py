@@ -28,6 +28,7 @@ from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.image_kenburns_provider import ImageKenBurnsProvider
 from services.job_queue import JobQueueManager
 from services.notifier import TelegramNotifier
+from services.settings_service import is_veo_enabled
 from services.storage_uploader import StorageUploader
 from services.telegram_bot import TelegramCommandBot
 from services.video_provider import ErrorKind, ProviderResult
@@ -96,12 +97,19 @@ class VideoAutomationWorker:
         num_accounts = self.account_pool.reload_accounts()
         pool_status = self.account_pool.get_status_summary()
 
+        veo_enabled = is_veo_enabled()
         logger.info("Số tài khoản Pro sẵn sàng: %d (Available: %d)", num_accounts, pool_status["available"])
+        logger.info(
+            "Chế độ sinh video: %s",
+            "Veo (tài khoản Google Pro) + Ken Burns fallback" if veo_enabled
+            else "Ken Burns (ảnh + camera motion) — Veo TẮT theo cài đặt",
+        )
 
         if self.notifier.is_configured:
             self.notifier.send_message(
                 f"🤖 <b>Video Worker Đã Khởi Động Thành Công</b>\n"
                 f"👤 Worker ID: <code>{self.worker_id}</code>\n"
+                f"🎬 Engine: <b>{'Veo + Ken Burns' if veo_enabled else 'Ken Burns (Veo tắt)'}</b>\n"
                 f"👤 Tài khoản Pro sẵn sàng: {pool_status['available']}/{num_accounts}\n"
                 f"☁️ Google Drive Remote: <code>{self.uploader.remote_name}</code>\n"
                 f"📱 Bạn có thể gửi lệnh qua Telegram: <code>/reup &lt;url&gt;</code> hoặc <code>/remake &lt;url&gt;</code>"
@@ -111,8 +119,16 @@ class VideoAutomationWorker:
         if self.bot.is_configured:
             self.bot.start_polling()
 
-        # 3b. Start auto keep-alive daemon to renew Google cookies 24/7
-        self.account_pool.start_keep_alive(interval_seconds=1800, provider=self.primary_provider)
+        # 3b. Start auto keep-alive daemon to renew Google cookies 24/7 — only
+        # when Veo actually consumes them, so a Veo-off worker never pings Google.
+        if veo_enabled:
+            self.account_pool.start_keep_alive(
+                interval_seconds=1800,
+                provider=self.primary_provider,
+                notifier=self.notifier,
+            )
+        else:
+            logger.info("Keep-alive Google không chạy vì Veo đang tắt (bật bằng /veo on).")
 
         # 4. Main processing loop (Dedup based strictly on DB state, no in-memory sets)
         self._scan_and_assemble_pending_jobs()
@@ -223,7 +239,7 @@ class VideoAutomationWorker:
                     continue
 
             # 2. Generation dispatch
-            needs_veo = is_key_scene and attempts < 2
+            needs_veo = is_veo_enabled() and is_key_scene and attempts < 2
             if needs_veo:
                 account = self.account_pool.get_available_account(reserve=True)
                 if not account:
@@ -247,6 +263,8 @@ class VideoAutomationWorker:
                 acc_id = "ken_burns_local"
                 if not is_key_scene:
                     logger.info("Shot %s là cảnh phụ B-roll. Điều phối trực tiếp sang ImageKenBurnsProvider (tiết kiệm quota Veo).", shot_id)
+                elif not needs_veo and attempts < 2:
+                    logger.info("Shot %s (Key Scene) được render bằng Ken Burns vì Veo đang tắt trong cài đặt.", shot_id)
                 else:
                     logger.warning("Shot %s đã thất bại 2 lần. Kích hoạt Ken Burns graceful fallback!", shot_id)
 

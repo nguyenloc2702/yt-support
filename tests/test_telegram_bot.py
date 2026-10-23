@@ -1,6 +1,7 @@
 """Unit tests for TelegramCommandBot remote control dispatcher."""
 
 from pathlib import Path
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -299,7 +300,6 @@ def test_raw_mobile_share_message_prompts_mode(mock_bot: TelegramCommandBot):
 
 
 def test_accounts_command(mock_bot: TelegramCommandBot):
-    import time
     from services.video_provider import SessionValidationResult
     mock_bot.provider.validate_session = MagicMock(return_value=SessionValidationResult(
         valid=True,
@@ -316,10 +316,97 @@ def test_accounts_command(mock_bot: TelegramCommandBot):
     mock_bot._handle_command("/accounts")
     time.sleep(0.1)
     # Check that send_message was called with prompt and final report
-    assert mock_bot.notifier.send_message.call_count >= 2
-    report_call = mock_bot.notifier.send_message.call_args_list[-1]
-    report_text = report_call[0][0]
-    assert "BÁO CÁO CHI TIẾT TÀI KHOẢN" in report_text
+    assert mock_bot.notifier.send_message.call_count >= 1
+    report_text = mock_bot.notifier.send_message.call_args_list[-1][0][0]
+    assert "BÁO CÁO TÀI KHOẢN" in report_text
+    # Plain /accounts must not spend Google requests on a probe the owner did not ask for.
+    assert mock_bot.provider.validate_session.call_count == 0
+
+
+def test_accounts_command_live_probes_google(mock_bot: TelegramCommandBot):
+    from services.video_provider import SessionValidationResult
+    mock_bot.provider.validate_session = MagicMock(return_value=SessionValidationResult(
+        valid=True, tier="PRO", credits_remaining=2000, reset_at="2026-10-21T05:42:13+00:00",
+    ))
+    (mock_bot.pool.session_dir / "acc_01.json").write_text('{"__Secure-1PSID": "fake"}')
+    mock_bot.pool.reload_accounts()
+
+    mock_bot._handle_command("/accounts live")
+    time.sleep(0.2)
+    assert mock_bot.provider.validate_session.call_count == 1
+    report_text = mock_bot.notifier.send_message.call_args_list[-1][0][0]
+    assert "PRO ⭐" in report_text
+
+
+def test_accounts_report_shows_cookie_age_and_revival_path(mock_bot: TelegramCommandBot):
+    import time as _time
+    (mock_bot.pool.session_dir / "acc_01.json").write_text(
+        '{"__Secure-1PSID": "fake", "updated_at": %s}' % (_time.time() - 20 * 3600)
+    )
+    mock_bot.pool.reload_accounts()
+
+    report = mock_bot.get_accounts_report()
+    assert "Cookie cũ" in report and "20.0 giờ" in report
+    assert "/setcookie" in report and "/accounts live" in report
+
+
+class _SyncExecutor:
+    """Runs submitted callables inline so assertions see the reply immediately."""
+
+    def submit(self, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+
+def test_setcookie_command_stores_cookie_without_echoing_it(mock_bot: TelegramCommandBot):
+    mock_bot.pool.apply_session_cookies = MagicMock(
+        return_value={
+            "ok": True, "acc_id": "acc_01", "valid": True, "tier": "PRO",
+            "credits_remaining": 12, "session_file": "sessions/acc_01.json",
+            "message": "Valid PRO account.",
+        }
+    )
+    mock_bot._executor = _SyncExecutor()
+    mock_bot._handle_command("/setcookie acc_01 SUPER-SECRET-PSID-VALUE SUPER-SECRET-TS")
+
+    args = mock_bot.pool.apply_session_cookies.call_args.args
+    assert args[0] == "acc_01" and args[1] == "SUPER-SECRET-PSID-VALUE"
+    sent = "\n".join(c.args[0] for c in mock_bot.notifier.send_message.call_args_list)
+    assert "SUPER-SECRET" not in sent
+    assert "sha256:" in sent and "PRO" in sent
+
+
+def test_setcookie_reports_free_tier_has_no_veo(mock_bot: TelegramCommandBot):
+    mock_bot.pool.apply_session_cookies = MagicMock(
+        return_value={
+            "ok": True, "acc_id": "acc_01", "valid": True, "tier": "FREE",
+            "credits_remaining": 0, "session_file": "sessions/acc_01.json",
+            "message": "Valid cookie, but account is FREE tier.",
+        }
+    )
+    mock_bot._executor = _SyncExecutor()
+    mock_bot._handle_command("/setcookie acc_01 PSIDVAL123456789")
+
+    sent = "\n".join(c.args[0] for c in mock_bot.notifier.send_message.call_args_list)
+    assert "FREE" in sent and "Veo" in sent
+
+
+def test_setcookie_requires_arguments(mock_bot: TelegramCommandBot):
+    mock_bot._handle_command("/setcookie acc_01")
+    assert "Thiếu tham số" in mock_bot.notifier.send_message.call_args[0][0]
+
+
+def test_veo_command_toggles_engine_flag(mock_bot: TelegramCommandBot, monkeypatch):
+    calls = []
+    monkeypatch.setattr("services.telegram_bot.set_veo_enabled", lambda v: calls.append(v))
+    monkeypatch.setattr("services.telegram_bot.is_veo_enabled", lambda: False)
+
+    mock_bot._handle_command("/veo on")
+    mock_bot._handle_command("/veo off")
+    mock_bot._handle_command("/veo")
+
+    assert calls == [True, False]
+    status = mock_bot.notifier.send_message.call_args_list[-1].args[0]
+    assert "Veo đang" in status
 
 
 def test_button_shortcut_stripping(mock_bot: TelegramCommandBot):

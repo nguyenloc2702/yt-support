@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 MIN_SCORE = 8.0
 N_VARIANTS = 3
 MAX_REGEN_ROUNDS = 2
-VARIANT_CHUNK = 20  # scenes per rewrite call (keeps output under max_tokens)
+VARIANT_CHUNK = 10  # scenes per rewrite call (20-scene replies were truncated mid-JSON)
 SPLIT_MIN_CHUNK = 5  # smallest sub-chunk when a rewrite response is unusable
 # Skill-pack pacing anchor: scene duration is computed in code from the VI word
 # count (210 WPM) instead of trusting the LLM's duration guess. The audio stage

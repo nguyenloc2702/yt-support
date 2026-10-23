@@ -112,6 +112,23 @@ def atomic_save_session(session_file: Path, psid: str, psidts: str):
             pass
 
 
+def persist_rotated_cookie(client, session_file: Path, psid: str, psidts: Optional[str]) -> None:
+    """Write Google's rotated __Secure-1PSIDTS back to our session file.
+
+    gemini-webapi keeps its own cache under the temp dir, which a container
+    restart throws away; without this the on-disk pair becomes stale and every
+    later request returns UNAUTHENTICATED. Our file must be the one that tracks
+    the newest token.
+    """
+    try:
+        new_psidts = client.cookies.get("__Secure-1PSIDTS") if hasattr(client, "cookies") else None
+    except Exception:
+        return
+    if new_psidts and new_psidts != psidts:
+        atomic_save_session(session_file, psid, new_psidts)
+        logger.info("🔄 Đã lưu __Secure-1PSIDTS mới vào %s", session_file.name)
+
+
 class GeminiWebApiProvider(VideoProvider):
     """Video provider using internal RPC via gemini-webapi."""
 
@@ -148,7 +165,7 @@ class GeminiWebApiProvider(VideoProvider):
         )
 
         try:
-            await client.init(timeout=60, auto_refresh=True, verbose=False)
+            await client.init(timeout=60, auto_refresh=False, verbose=False)
 
             tier = "UNKNOWN"
             credits_remaining = None
@@ -168,9 +185,7 @@ class GeminiWebApiProvider(VideoProvider):
             reset_at = current_window.get("reset_at")
 
             # Check if cookie was updated during init
-            new_psidts = client.cookies.get("__Secure-1PSIDTS") if hasattr(client, "cookies") else None
-            if new_psidts and new_psidts != psidts:
-                atomic_save_session(session_file, psid, new_psidts)
+            persist_rotated_cookie(client, session_file, psid, psidts)
 
             if tier == "FREE":
                 return SessionValidationResult(
@@ -259,7 +274,7 @@ class GeminiWebApiProvider(VideoProvider):
 
         try:
             logger.info("Initializing Gemini Web client for shot...")
-            await client.init(timeout=300, auto_refresh=True, verbose=False)
+            await client.init(timeout=300, auto_refresh=False, verbose=False)
 
             # Check tier
             if client.usage_info:
@@ -336,11 +351,6 @@ class GeminiWebApiProvider(VideoProvider):
             if final_path.exists() and final_path.stat().st_size > 10000:
                 logger.info("Shot generated successfully: %s (%.2f MB in %.1fs)", final_path, final_path.stat().st_size / (1024 * 1024), total_duration)
 
-                # Persist updated session cookie if changed
-                new_psidts = client.cookies.get("__Secure-1PSIDTS") if hasattr(client, "cookies") else None
-                if new_psidts and new_psidts != psidts:
-                    atomic_save_session(session_file, psid, new_psidts)
-
                 return ProviderResult(
                     ok=True,
                     video_path=final_path,
@@ -406,4 +416,5 @@ class GeminiWebApiProvider(VideoProvider):
                 duration_sec=time.time() - start_time,
             )
         finally:
+            persist_rotated_cookie(client, session_file, psid, psidts)
             await client.close()

@@ -117,6 +117,9 @@ jobs:
             mkdir -p "$DEPLOY_PATH/shared/data"
             mkdir -p "$DEPLOY_PATH/shared/logs"
             mkdir -p "$DEPLOY_PATH/shared/rclone"
+            # Holds gemini-webapi's rotated Google tokens, so it must survive redeploys.
+            mkdir -p "$DEPLOY_PATH/shared/gemini_cache"
+            chmod 700 "$DEPLOY_PATH/shared/gemini_cache"
 
             if [ ! -d "$DEPLOY_PATH/.git" ]; then
               echo "Cloning repository to $DEPLOY_PATH..."

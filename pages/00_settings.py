@@ -1,6 +1,10 @@
 # ruff: noqa: N999
 """Settings page: LLM & VLM provider configuration (Presets, API key, base URL, models)."""
 
+import json
+from pathlib import Path
+import time
+
 import streamlit as st
 
 from core.logging_config import get_logger
@@ -21,9 +25,11 @@ from services.settings_service import (
     get_provider_preset,
     get_vlm_model,
     get_xkiro_fallback_models,
+    is_veo_enabled,
     is_vlm_enabled,
     mask_secret,
     set_setting,
+    set_veo_enabled,
     verify_provider_connection,
 )
 
@@ -273,6 +279,66 @@ if st.button("🩺 Probe từng model trong chuỗi", use_container_width=False)
                 )
 else:
     _probe_results = None
+
+st.divider()
+st.subheader("🎬 Engine sinh video (Veo vs Ken Burns)")
+st.markdown(
+    "**Ken Burns (mặc định):** sinh ảnh + chuyển động camera. Không phụ thuộc cookie Google, "
+    "không hết quota, chạy liên tục.\n\n"
+    "**Veo:** video thật từ Gemini nhưng cần cookie `__Secure-1PSID` còn sống. Google quay vòng "
+    "token mỗi lần dùng và cookie đã chết thì **không ping hồi sinh được**, nên Veo chỉ bật khi "
+    "bạn vừa xác nhận cookie còn hợp lệ."
+)
+
+_veo_now = is_veo_enabled()
+_veo_toggle = st.toggle(
+    "Bật Veo cho Key Scene (tắt = mọi cảnh dùng Ken Burns)",
+    value=_veo_now,
+    key="veo_enabled_toggle",
+)
+if _veo_toggle != _veo_now:
+    set_veo_enabled(_veo_toggle)
+    st.success(f"Đã {'bật' if _veo_toggle else 'tắt'} Veo. Worker đang chạy sẽ áp dụng từ cảnh kế tiếp.")
+
+try:
+    # Read the pool state file directly: AccountPoolManager() would rewrite it and
+    # zero the worker's live in-flight reservations just by opening this page.
+    _state_path = Path("sessions/pool_state.json")
+    _accounts = json.loads(_state_path.read_text(encoding="utf-8")).get("accounts", {}) if _state_path.exists() else {}
+except Exception as exc:  # pool state lives on the worker's disk, not always reachable here
+    _accounts = {}
+    st.caption(f"Không đọc được pool tài khoản ở đây: {exc}")
+
+if _accounts:
+    st.markdown("##### 🍪 Tình trạng cookie Google")
+    for _acc_id in sorted(_accounts):
+        _rec = _accounts[_acc_id]
+        _age = None
+        _session_path = Path(_rec.get("session_file") or f"sessions/{_acc_id}.json")
+        if _session_path.exists():
+            try:
+                _updated_at = json.loads(_session_path.read_text(encoding="utf-8")).get("updated_at")
+                if _updated_at:
+                    _age = (time.time() - float(_updated_at)) / 3600.0
+            except Exception:
+                _age = None
+        _age_text = "không rõ" if _age is None else (
+            f"{int(_age * 60)} phút" if _age < 1 else f"{_age:.1f} giờ"
+        )
+        _streak = int(_rec.get("ping_fail_streak", 0) or 0)
+        _badge = {
+            "AVAILABLE": "🟢",
+            "AUTH_ERROR": "🔴 cookie chết",
+            "EXHAUSTED": "🟡 hết quota",
+            "COOLDOWN": "🟠 cooldown",
+            "DISABLED": "⚪ tắt",
+        }.get(_rec.get("status", ""), _rec.get("status", "?"))
+        st.caption(
+            f"{_badge} `{_acc_id}` — cookie cũ **{_age_text}**, ping lỗi liên tiếp **{_streak}**"
+        )
+    st.caption(
+        "Cookie chết → dán lại từ Telegram: `/setcookie acc_01 <__Secure-1PSID> <__Secure-1PSIDTS>`"
+    )
 
 st.divider()
 st.subheader("🔒 Bảo mật & Hoạt động Ngoại tuyến (Offline Fallback)")

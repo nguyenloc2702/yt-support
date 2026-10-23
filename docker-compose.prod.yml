@@ -14,11 +14,16 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - RCLONE_REMOTE=${RCLONE_REMOTE:-gdrive}
       - RCLONE_REMOTE_FOLDER=${RCLONE_REMOTE_FOLDER:-Video_Projects/history_of_microsoft/raw_shots}
+      # gemini-webapi keeps its rotated-token cache under the temp dir, so every
+      # redeploy threw away the newest __Secure-1PSIDTS and left the stored
+      # session pair stale. Keep the cache on a persistent volume instead.
+      - GEMINI_COOKIE_PATH=/app/shared/gemini_cache
     volumes:
       # Persistent external volumes on host VPS
       - /opt/support-video-edit/shared/sessions:/app/sessions
       - /opt/support-video-edit/shared/data:/app/data
       - /opt/support-video-edit/shared/logs:/app/logs
+      - /opt/support-video-edit/shared/gemini_cache:/app/shared/gemini_cache
       - /opt/support-video-edit/shared/rclone:/root/.config/rclone
     deploy:
       resources:

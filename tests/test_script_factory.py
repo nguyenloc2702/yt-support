@@ -412,18 +412,18 @@ def test_rewrite_chunk_split_recovers_from_truncated_json(factory, monkeypatch):
     )
     router = Router(
         {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
-        fail_chunks_above=10,
+        fail_chunks_above=sf.SPLIT_MIN_CHUNK,
     )
     monkeypatch.setattr("pipeline.llm_client.chat_json", router)
 
     vi, en, result = factory.run([{"start": 0, "end": 300, "text": "x"}], target_shots=60)
     assert len(vi) == 60
     assert [sc["index"] for sc in vi] == list(range(1, 61))
-    assert router.rewrite_calls > 3  # 20-scene chunks had to be split
+    assert router.rewrite_calls > 18  # 10-scene chunks had to be split into 5+5
 
 
 def test_variants_rewrite_chunked_for_long_scripts(factory, monkeypatch):
-    """60 scenes -> 3 rewrite calls per variant (VARIANT_CHUNK=20)."""
+    """60 scenes -> 6 rewrite calls per variant (VARIANT_CHUNK=10)."""
     long_slices_vi = [
         {"index": i + 1, "situation": f"s{i}", "text": f"Cảnh {i+1}.",
          "prompt": "p", "duration": 5.0, "is_key_scene": True}
@@ -445,3 +445,5 @@ def test_variants_rewrite_chunked_for_long_scripts(factory, monkeypatch):
     assert len(vi) == 60
     assert vi[59]["index"] == 60
     assert result["scene_count"] == 60
+    expected_chunks = -(-60 // sf.VARIANT_CHUNK)  # ceil: 6 calls per variant
+    assert router.rewrite_calls == 3 * expected_chunks

@@ -72,17 +72,23 @@ class ImageKenBurnsProvider(VideoProvider):
             try:
                 import asyncio
                 from gemini_webapi import GeminiClient
-                from services.gemini_webapi_provider import extract_cookies_from_file
+                from services.gemini_webapi_provider import (
+                    extract_cookies_from_file,
+                    persist_rotated_cookie,
+                )
 
                 psid, psidts = extract_cookies_from_file(session_file)
                 if psid:
                     async def _gen_img():
                         c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
-                        await c.init(timeout=60, auto_refresh=True, verbose=False)
-                        out = await c.generate_content(f"{CRAYON_STYLE_PREFIX}{safe_prompt}")
-                        if out.images:
-                            await out.images[0].save(path=str(img_path.parent), filename=img_path.name)
-                        await c.close()
+                        try:
+                            await c.init(timeout=60, auto_refresh=False, verbose=False)
+                            out = await c.generate_content(f"{CRAYON_STYLE_PREFIX}{safe_prompt}")
+                            if out.images:
+                                await out.images[0].save(path=str(img_path.parent), filename=img_path.name)
+                        finally:
+                            persist_rotated_cookie(c, session_file, psid, psidts)
+                            await c.close()
 
                     asyncio.run(asyncio.wait_for(_gen_img(), timeout=120.0))
                     if img_path.exists() and img_path.stat().st_size > 1000:

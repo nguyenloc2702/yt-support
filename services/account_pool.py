@@ -26,6 +26,11 @@ DEFAULT_SESSION_DIR = Path("sessions")
 DEFAULT_POOL_STATE_FILE = Path("sessions/pool_state.json")
 MAX_SHOTS_PER_ACCOUNT_DAY = 20  # Safe ~70% daily budget per Pro account
 
+# A dead cookie cannot be pinged back to life, so repeated AUTH rejections must
+# park the account and tell the owner instead of silently retrying for days.
+KEEP_ALIVE_FAIL_QUARANTINE = 3
+SESSION_STALE_WARN_HOURS = 12.0
+
 
 @dataclass
 class AccountInfo:
@@ -38,6 +43,8 @@ class AccountInfo:
     consecutive_errors: int = 0
     last_reset_date: str = ""  # YYYY-MM-DD
     in_flight: int = 0
+    last_success_at: Optional[str] = None  # ISO UTC of the last keep-alive ping that passed
+    ping_fail_streak: int = 0  # consecutive AUTH failures from keep-alive
 
 
 class AccountPoolManager:
@@ -131,10 +138,14 @@ class AccountPoolManager:
                         "consecutive_errors": 0,
                         "last_reset_date": today,
                         "in_flight": 0,
+                        "last_success_at": None,
+                        "ping_fail_streak": 0,
                     }
                 else:
                     # Update session_file path
                     accounts_data[acc_id]["session_file"] = str(f)
+                    accounts_data[acc_id].setdefault("last_success_at", None)
+                    accounts_data[acc_id].setdefault("ping_fail_streak", 0)
                     # Reset in_flight counter on worker startup to prevent leakage from crashes
                     accounts_data[acc_id]["in_flight"] = 0
                     # Reset daily counter if day changed
@@ -352,7 +363,12 @@ class AccountPoolManager:
     # AUTOMATED KEEP-ALIVE DAEMON (Token Rotation & Session Preservation)
     # -------------------------------------------------------------------------
 
-    def start_keep_alive(self, interval_seconds: int = 1800, provider: Optional[Any] = None):
+    def start_keep_alive(
+        self,
+        interval_seconds: int = 1800,
+        provider: Optional[Any] = None,
+        notifier: Optional[Any] = None,
+    ):
         """
         Starts a background daemon thread that periodically pings Google Gemini
         for each valid account, triggering token rotation (__Secure-1PSIDTS)
@@ -363,7 +379,7 @@ class AccountPoolManager:
         self._keep_alive_running = True
         self._keep_alive_thread = threading.Thread(
             target=self._keep_alive_loop,
-            args=(interval_seconds, provider),
+            args=(interval_seconds, provider, notifier),
             name="account_keep_alive",
             daemon=True,
         )
@@ -374,7 +390,12 @@ class AccountPoolManager:
         """Stops the background keep-alive thread."""
         self._keep_alive_running = False
 
-    def _keep_alive_loop(self, interval_seconds: int, provider: Optional[Any] = None):
+    def _keep_alive_loop(
+        self,
+        interval_seconds: int,
+        provider: Optional[Any] = None,
+        notifier: Optional[Any] = None,
+    ):
         while self._keep_alive_running:
             # Add jitter ±300s (5 minutes) to mimic authentic human browsing rhythm
             jitter = random.uniform(-300, 300)
@@ -389,15 +410,118 @@ class AccountPoolManager:
                 break
 
             try:
-                self.ping_and_refresh_all_accounts(provider=provider, pacing_delay=random.uniform(5.0, 10.0))
+                self.ping_and_refresh_all_accounts(
+                    provider=provider,
+                    pacing_delay=random.uniform(5.0, 10.0),
+                    notifier=notifier,
+                )
             except Exception as e:
                 logger.warning("Error during keep-alive refresh: %s", e)
 
-    def ping_and_refresh_all_accounts(self, provider: Optional[Any] = None, pacing_delay: float = 5.0) -> Dict[str, bool]:
+    def session_age_hours(self, acc_id: str) -> Optional[float]:
+        """Hours since an account's cookies were last written (None if unknown)."""
+        info = self.get_all_accounts_state().get(acc_id) or {}
+        path = Path(info.get("session_file") or (self.session_dir / f"{acc_id}.json"))
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        updated_at = data.get("updated_at")
+        if not updated_at:
+            return None
+        return (time.time() - float(updated_at)) / 3600.0
+
+    def apply_session_cookies(
+        self,
+        acc_id: str,
+        secure_1psid: str,
+        secure_1psidts: Optional[str] = None,
+        provider: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Store freshly pasted cookies and validate them once.
+
+        This is the two-minute revival path for Google's rolling token, and the
+        only writer besides keep-alive, so its rotation cannot race a second
+        process. Reports the account tier, which is what tells the owner whether
+        Veo is even available to them.
+        """
+        psid = (secure_1psid or "").strip()
+        if not psid:
+            return {"ok": False, "message": "Thiếu __Secure-1PSID."}
+
+        path = self.session_dir / f"{acc_id}.json"
+        payload = {
+            "__Secure-1PSID": psid,
+            "__Secure-1PSIDTS": (secure_1psidts or "").strip(),
+            "updated_at": time.time(),
+        }
+        tmp_file = path.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(payload), encoding="utf-8")
+        tmp_file.replace(path)
+
+        with FileLock(str(self.lock_file), timeout=10):
+            state = json.loads(self.state_file.read_text(encoding="utf-8")) if self.state_file.exists() else {}
+            accounts = state.get("accounts", {})
+            record = accounts.setdefault(acc_id, {"acc_id": acc_id})
+            record.update(
+                {
+                    "session_file": str(path),
+                    "status": "AVAILABLE",
+                    "cooldown_until": None,
+                    "consecutive_errors": 0,
+                    "ping_fail_streak": 0,
+                }
+            )
+            state["accounts"] = accounts
+            state["kill_switch_active"] = self._kill_switch_active
+            state["kill_switch_reason"] = self._kill_switch_reason
+            self._save_state_unlocked(state)
+
+        out: Dict[str, Any] = {"ok": True, "acc_id": acc_id, "session_file": str(path)}
+        try:
+            from services.gemini_webapi_provider import GeminiWebApiProvider
+
+            val_provider = provider or GeminiWebApiProvider()
+            res = val_provider.validate_session(path)
+            out.update(
+                {
+                    "valid": bool(res.valid),
+                    "tier": res.tier,
+                    "credits_remaining": res.credits_remaining,
+                    "message": res.message or "Cookie hợp lệ.",
+                }
+            )
+            if res.valid:
+                with FileLock(str(self.lock_file), timeout=10):
+                    st = json.loads(self.state_file.read_text(encoding="utf-8"))
+                    st.setdefault("accounts", {}).setdefault(acc_id, {})[
+                        "last_success_at"
+                    ] = datetime.now(timezone.utc).isoformat()
+                    self._save_state_unlocked(st)
+        except Exception as exc:
+            out.update({"valid": False, "tier": None, "message": f"Không kiểm tra được cookie: {exc}"})
+        return out
+
+    def ping_and_refresh_all_accounts(
+        self,
+        provider: Optional[Any] = None,
+        pacing_delay: float = 5.0,
+        notifier: Optional[Any] = None,
+    ) -> Dict[str, bool]:
         """
         Pings Google Gemini for all registered accounts to auto-renew __Secure-1PSIDTS.
         Saves updated cookies to disk and updates account status in pool_state.json.
         """
+        if self.kill_switch_active:
+            logger.warning(
+                "⏸ [Auto Keep-Alive] Kill-switch đang bật (%s) — bỏ qua vòng ping này "
+                "để tránh đổ thêm lỗi xác thực lên toàn bộ tài khoản.",
+                self.kill_switch_reason or "không rõ lý do",
+            )
+            return {}
+
         from services.gemini_webapi_provider import GeminiWebApiProvider
         val_provider = provider or GeminiWebApiProvider()
         results = {}
@@ -423,26 +547,93 @@ class AccountPoolManager:
                 logger.info("💓 [Auto Keep-Alive] Refreshing session token for account %s...", acc_id)
                 res = val_provider.validate_session(session_file)
                 if res.valid:
-                    with FileLock(str(self.lock_file), timeout=10):
-                        st = json.loads(self.state_file.read_text(encoding="utf-8"))
-                        if acc_id in st.get("accounts", {}):
-                            if st["accounts"][acc_id]["status"] == "AUTH_ERROR":
-                                st["accounts"][acc_id]["status"] = "AVAILABLE"
-                                st["accounts"][acc_id]["consecutive_errors"] = 0
-                            self._save_state_unlocked(st)
+                    was_quarantined = info.get("status") == "AUTH_ERROR"
+                    self._record_ping_success(acc_id)
                     logger.info("✔ [Auto Keep-Alive] Account %s successfully refreshed! (Tier: %s, Credits: %s)",
                                 acc_id, res.tier, res.credits_remaining)
+                    if was_quarantined:
+                        self._notify(
+                            notifier,
+                            f"✅ <b>hồi phục!</b>\n"
+                            f"Tài khoản <code>{acc_id}</code> đã xác thực lại được và trở về trạng thái AVAILABLE.\n"
+                            f"• Tier: <b>{res.tier or 'Không rõ'}</b>\n"
+                            f"• Credits 5h còn lại: {res.credits_remaining if res.credits_remaining is not None else 'Không rõ'}",
+                        )
                     results[acc_id] = True
                 else:
                     logger.warning("⚠️ [Auto Keep-Alive] Account %s validation failed: %s (%s)",
                                    acc_id, res.error_kind, res.message)
+                    self._record_ping_failure(acc_id, res.message or str(res.error_kind), notifier)
                     results[acc_id] = False
             except Exception as e:
                 logger.error("Error refreshing account %s: %s", acc_id, e)
+                self._record_ping_failure(acc_id, str(e), notifier)
                 results[acc_id] = False
 
             if pacing_delay > 0:
                 time.sleep(pacing_delay)
 
         return results
+
+    def _record_ping_success(self, acc_id: str) -> None:
+        with FileLock(str(self.lock_file), timeout=10):
+            st = json.loads(self.state_file.read_text(encoding="utf-8"))
+            record = st.setdefault("accounts", {}).get(acc_id)
+            if record is None:
+                return
+            revived = record.get("status") == "AUTH_ERROR"
+            record["last_success_at"] = datetime.now(timezone.utc).isoformat()
+            record["ping_fail_streak"] = 0
+            if revived:
+                record["status"] = "AVAILABLE"
+                record["cooldown_until"] = None
+                record["consecutive_errors"] = 0
+            self._save_state_unlocked(st)
+
+    def _record_ping_failure(self, acc_id: str, reason: str, notifier: Optional[Any] = None) -> None:
+        """Count AUTH failures and park the account once ping alone clearly cannot save it.
+
+        Google rotates __Secure-1PSIDTS on every usable request; a rejected cookie is
+        already dead, so the only useful action left is to tell the owner while the
+        cookie age is still short enough to re-paste.
+        """
+        with FileLock(str(self.lock_file), timeout=10):
+            st = json.loads(self.state_file.read_text(encoding="utf-8"))
+            record = st.setdefault("accounts", {}).get(acc_id)
+            if record is None:
+                return
+            streak = int(record.get("ping_fail_streak", 0)) + 1
+            record["ping_fail_streak"] = streak
+            was_quarantined = record.get("status") == "AUTH_ERROR"
+            should_alert = False
+            if streak >= KEEP_ALIVE_FAIL_QUARANTINE and not was_quarantined:
+                record["status"] = "AUTH_ERROR"
+                record["cooldown_until"] = None
+                should_alert = True
+            self._save_state_unlocked(st)
+
+        if not should_alert:
+            return
+
+        age = self.session_age_hours(acc_id)
+        age_text = f"{age:.1f} giờ" if age is not None else "không rõ (thiếu updated_at)"
+        self._notify(
+            notifier,
+            f"🚨 <b>Cookie hết hạn — tài khoản <code>{acc_id}</code></b>\n"
+            f"Ping giữ session sống thất bại {streak} lần liên tiếp: {reason[:200]}\n"
+            f"• Cookie cũ: <b>{age_text}</b>\n"
+            f"• Trạng thái: AUTH_ERROR (tạm cách ly, không sinh video bằng tài khoản này)\n\n"
+            f"ℹ️ Cookie Google quay vòng token, ping KHÔNG hồi sinh được cookie đã chết. "
+            f"Lấy cookie mới từ trình duyệt rồi chạy:\n"
+            f"<code>/setcookie {acc_id} &lt;__Secure-1PSID&gt; &lt;__Secure-1PSIDTS&gt;</code>",
+        )
+
+    @staticmethod
+    def _notify(notifier: Optional[Any], message: str) -> None:
+        if notifier is None or not getattr(notifier, "is_configured", False):
+            return
+        try:
+            notifier.send_message(message)
+        except Exception as exc:
+            logger.warning("Không gửi được thông báo keep-alive: %s", exc)
 

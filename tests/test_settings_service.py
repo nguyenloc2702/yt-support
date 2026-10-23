@@ -56,3 +56,37 @@ def test_llm_key_env_fallback(temp_data_dir, monkeypatch):
 
 def test_llm_base_url_default(temp_data_dir):
     assert ss.get_llm_base_url() == ss.DEFAULT_LLM_BASE_URL
+
+
+def test_veo_is_off_until_the_owner_turns_it_on(temp_data_dir):
+    """Default must be Ken Burns: Veo dies when a cookie dies, so it is opt-in."""
+    assert ss.get_setting(ss.VEO_ENABLED_KEY) is None
+    assert ss.is_veo_enabled() is False
+    ss.set_veo_enabled(True)
+    assert ss.is_veo_enabled() is True
+    ss.set_veo_enabled(False)
+    assert ss.is_veo_enabled() is False
+
+
+def test_veo_flag_is_db_only_not_env(temp_data_dir, monkeypatch):
+    """One control surface on purpose: /veo and the Settings page write the DB."""
+    monkeypatch.setenv("VEO_ENABLED", "yes")
+    ss.set_setting(ss.VEO_ENABLED_KEY, None)
+    assert ss.is_veo_enabled() is False
+    ss.set_setting(ss.VEO_ENABLED_KEY, "TRUE")
+    assert ss.is_veo_enabled() is True
+    ss.set_setting(ss.VEO_ENABLED_KEY, "0")
+    assert ss.is_veo_enabled() is False
+
+
+def test_vlm_model_does_not_inherit_text_only_generator(temp_data_dir, monkeypatch):
+    """A text-only primary must never become the vision model by inheritance."""
+    monkeypatch.delenv("XKIRO_VLM_MODEL", raising=False)
+    ss.set_setting(ss.VLM_MODEL_KEY, None)
+    ss.set_setting(ss.LLM_MODEL_KEY, "mistralai/mistral-large-4-0")
+    assert ss.get_vlm_model() == ss.DEFAULT_XKIRO_VLM_MODEL
+    assert ss.get_vlm_model() != ss.get_llm_model()
+
+
+def test_generation_model_default_is_the_fastest_measured_model(temp_data_dir):
+    assert ss.get_xkiro_generation_model() == "mistralai/mistral-large-4-0"

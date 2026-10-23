@@ -23,12 +23,22 @@ import time
 from typing import Any, Callable, Optional
 import requests
 
-from services.account_pool import AccountPoolManager
+from services.account_pool import SESSION_STALE_WARN_HOURS, AccountPoolManager
 from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.job_queue import JobQueueManager
 from services.notifier import TelegramNotifier, get_default_keyboard
+from services.settings_service import is_veo_enabled, set_veo_enabled
 
 logger = logging.getLogger("telegram_bot")
+
+
+def _fingerprint(secret: Optional[str]) -> str:
+    """Short, non-reversible preview so a pasted cookie can be identified without echoing it."""
+    if not secret:
+        return "(trống)"
+    import hashlib
+
+    return f"sha256:{hashlib.sha256(secret.encode('utf-8')).hexdigest()[:12]} (độ dài {len(secret)})"
 
 
 def format_vn_time(iso_str: Optional[str]) -> str:
@@ -363,8 +373,14 @@ class TelegramCommandBot:
             except Exception:
                 self._executor.submit(self.on_remake_handler, job["url"], job_id=job_id)
 
-    def get_accounts_report(self, check_realtime: bool = True) -> str:
-        """Inspects all accounts in pool and returns a detailed real-time HTML status report."""
+    def get_accounts_report(self, check_realtime: bool = False) -> str:
+        """Inspects all accounts in pool and returns a detailed HTML status report.
+
+        Read-only by default: validate_session() burns a Google request per
+        account and fails noisily once a cookie is dead, so the normal /accounts
+        view just shows the pool state plus cookie age. Pass check_realtime=True
+        (/accounts live) when the owner explicitly wants a fresh auth probe.
+        """
         accounts = self.pool.get_all_accounts_state()
         if not accounts:
             self.pool.reload_accounts()
@@ -379,7 +395,8 @@ class TelegramCommandBot:
             )
 
         report_lines = [
-            "📋 <b>BÁO CÁO CHI TIẾT TÀI KHOẢN (REALTIME):</b>\n"
+            "📋 <b>BÁO CÁO TÀI KHOẢN</b>"
+            + (" <i>(probe Google trực tiếp)</i>:\n" if check_realtime else ":\n")
         ]
 
         now = datetime.now(timezone.utc)
@@ -394,11 +411,21 @@ class TelegramCommandBot:
             shots_today = acc.get("shots_today", 0)
             total_shots = acc.get("total_shots", 0)
             cd_until = acc.get("cooldown_until")
+            fail_streak = int(acc.get("ping_fail_streak", 0) or 0)
+            last_success = acc.get("last_success_at")
 
-            tier = "UNKNOWN"
+            tier = acc.get("tier", "UNKNOWN") or "UNKNOWN"
             credits_remaining = None
             reset_at = cd_until
-            is_valid = True
+            is_valid = status not in ("AUTH_ERROR",)
+
+            age_hours = self.pool.session_age_hours(acc_id)
+            if age_hours is None:
+                age_text = "không rõ (file thiếu updated_at)"
+            elif age_hours < 1:
+                age_text = f"{int(age_hours * 60)} phút"
+            else:
+                age_text = f"{age_hours:.1f} giờ"
 
             if check_realtime and session_file.exists():
                 try:
@@ -423,6 +450,7 @@ class TelegramCommandBot:
                             pass
                 except Exception as e:
                     logger.warning("Error checking account %s: %s", acc_id, e)
+                    is_valid = False
 
             # Determine badge & status label
             if not session_file.exists():
@@ -446,11 +474,18 @@ class TelegramCommandBot:
                 ready_count += 1
 
             tier_badge = "PRO ⭐" if tier == "PRO" else ("FREE ⚠️" if tier == "FREE" else tier)
+            stale = age_hours is not None and age_hours >= SESSION_STALE_WARN_HOURS
 
             report_lines.append(
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"👤 <b>[{idx}/{total_accs}] Tài khoản: <code>{acc_id}</code></b> ({tier_badge})\n"
                 f"• Trạng thái: {status_icon} <b>{status_desc}</b>\n"
+                f"• Cookie cũ: <b>{age_text}</b>"
+                + (" ⚠️ <i>cookie lâu ngày, dễ hết hạn</i>" if stale else "")
+                + "\n"
+                f"• Ping Google lỗi liên tiếp: <b>{fail_streak}</b>"
+                + ("" if last_success is None else f" • Ping OK gần nhất: {format_vn_time(last_success)}")
+                + "\n"
                 f"• Giới hạn mới (Reset lúc): {format_vn_time(reset_at)}\n"
                 f"• Credits 5h còn lại: <b>{credits_remaining if credits_remaining is not None else 'Không rõ'}</b>\n"
                 f"• Tiến độ hôm nay: <b>{shots_today}</b> shots (Tổng: <b>{total_shots}</b> shots)\n"
@@ -460,12 +495,72 @@ class TelegramCommandBot:
         report_lines.append("━━━━━━━━━━━━━━━━━━━")
         report_lines.append(
             f"📊 <b>Tổng kết:</b> <b>{ready_count}/{total_accs}</b> tài khoản sẵn sàng sinh video Veo.\n\n"
-            f"💡 <i>Gợi ý: Nếu hết quota, hãy nạp thêm tài khoản bằng:</i>\n"
-            f"<code>python scripts/manage_accounts.py add --acc 2</code>\n"
-            f"<i>Sau đó gõ <code>/resume</code> để tiếp tục dây chuyền.</i>"
+            f"🩺 Probe Google thật (mỗi tài khoản 1 request): <code>/accounts live</code>\n"
+            f"🔑 Cookie chết thì ping không cứu được — dán cookie mới, mất ~2 phút:\n"
+            f"<code>/setcookie acc_01 &lt;__Secure-1PSID&gt; &lt;__Secure-1PSIDTS&gt;</code>\n"
+            f"🎬 Bật/tắt engine Veo: <code>/veo on</code> | <code>/veo off</code>"
         )
 
         return "\n".join(report_lines)
+
+    def _handle_setcookie(self, parts: list[str]):
+        """Paste fresh Google cookies from the phone: /setcookie <acc_id> <PSID> [PSIDTS].
+
+        Google rotates __Secure-1PSIDTS on every request and a dead cookie cannot
+        be pinged back to life, so the only reliable revival path is a fresh paste.
+        """
+        if len(parts) < 3:
+            self.notifier.send_message(
+                "⚠️ Thiếu tham số.\n"
+                "<code>/setcookie acc_01 &lt;__Secure-1PSID&gt; &lt;__Secure-1PSIDTS&gt;</code>\n\n"
+                "Lấy cookie: đăng nhập <code>gemini.google.com</code> bằng đúng tài khoản đó "
+                "→ F12 → Application → Cookies → copy 2 giá trị <code>__Secure-1PSID</code> "
+                "và <code>__Secure-1PSIDTS</code>."
+            )
+            return
+
+        acc_id = parts[1].strip()
+        if acc_id.endswith(".json"):
+            acc_id = acc_id[: -len(".json")]
+        psid = parts[2].strip()
+        psidts = parts[3].strip() if len(parts) > 3 else None
+
+        def _apply():
+            res = self.pool.apply_session_cookies(
+                acc_id, psid, psidts, provider=self.provider
+            )
+            if not res.get("ok"):
+                self.notifier.send_message(f"❌ Không lưu được cookie: {res.get('message')}")
+                return
+
+            valid = res.get("valid")
+            tier = res.get("tier") or "UNKNOWN"
+            if valid and tier == "FREE":
+                verdict = (
+                    "⚠️ Cookie <b>HỢP LỆ</b> nhưng tài khoản này là gói <b>FREE</b> — "
+                    "Google không cho Veo. Dùng được cho ảnh Ken Burns, không dùng được cho video Veo."
+                )
+            elif valid:
+                verdict = (
+                    f"✅ Cookie <b>HỢP LỆ</b> — tier <b>{tier}</b>, credits 5h còn lại: "
+                    f"<b>{res.get('credits_remaining') if res.get('credits_remaining') is not None else 'Không rõ'}</b>.\n"
+                    f"{'🟢 Veo đã sẵn sàng. Gõ /resume để dây chuyền chạy tiếp.' if is_veo_enabled() else 'ℹ️ Veo đang TẮT theo cài đặt — gõ <code>/veo on</code> nếu muốn dùng cookie này sinh video.'}"
+                )
+            else:
+                verdict = (
+                    f"🔴 Cookie <b>KHÔNG hợp lệ</b>: {res.get('message')}\n"
+                    f"Hãy lấy lại cookie từ trình duyệt đang đăng nhập đúng tài khoản này."
+                )
+
+            self.notifier.send_message(
+                f"🔑 <b>ĐÃ LƯU COOKIE cho {acc_id}</b>\n"
+                f"• File: <code>{Path(res.get('session_file', acc_id)).name}</code>\n"
+                f"• PSID: <code>{_fingerprint(psid)}</code> (đã lưu, không hiển thị nội dung)\n"
+                f"{verdict}"
+            )
+
+        self.notifier.send_message(f"⏳ Đang lưu và kiểm tra cookie cho <code>{acc_id}</code>...")
+        self._executor.submit(_apply)
 
     def _handle_command(self, text: str):
         # Strip button emoji prefixes if user tapped custom reply keyboard
@@ -516,8 +611,12 @@ class TelegramCommandBot:
             help_msg = (
                 "🤖 <b>HỆ THỐNG ĐIỀU KHIỂN VIDEO FACTORY TỰ ĐỘNG</b>\n\n"
                 "📌 <b>Các lệnh khả dụng:</b>\n"
-                "• <code>/accounts</code> | <code>/acc</code>\n"
-                "  ➔ <i>Xem danh sách, thông tin chi tiết & quota realtime từng tài khoản.</i>\n\n"
+                "• <code>/accounts</code> | <code>/acc</code> | <code>/accounts live</code>\n"
+                "  ➔ <i>Xem tình trạng cookie/quota (chế độ thường chỉ đọc state; <code>live</code> mới probe Google).</i>\n\n"
+                "• <code>/setcookie &lt;acc_id&gt; &lt;PSID&gt; [PSIDTS]</code>\n"
+                "  ➔ <i>Dán cookie Google mới, hệ thống tự kiểm tra tier + credits ngay lập tức.</i>\n\n"
+                "• <code>/veo on</code> | <code>/veo off</code>\n"
+                "  ➔ <i>Tắt/bật engine Veo. Tắt = mọi scene dùng Ken Burns, không cần cookie, không hết quota.</i>\n\n"
                 "• <code>/reup &lt;link_youtube&gt; [duration=180]</code>\n"
                 "  ➔ <i>Mode 1: Tóm tắt & cắt dựng nhanh từ video gốc.</i>\n\n"
                 "• <code>/remake &lt;link_youtube&gt; [ai|custom]</code>\n"
@@ -544,11 +643,36 @@ class TelegramCommandBot:
             self.notifier.send_message(help_msg, reply_markup=get_default_keyboard())
 
         elif cmd in ["/accounts", "/acc"]:
-            self.notifier.send_message("🔍 <i>Đang kiểm tra quota realtime từng tài khoản từ Google server...</i>")
+            live = len(parts) > 1 and parts[1].lower() == "live"
+            if live:
+                self.notifier.send_message("🔍 <i>Đang probe Google thật cho từng tài khoản (mỗi tài khoản 1 request)...</i>")
             def _async_acc_report():
-                report = self.get_accounts_report(check_realtime=True)
+                report = self.get_accounts_report(check_realtime=live)
                 self.notifier.send_message(report, reply_markup=get_default_keyboard())
             self._executor.submit(_async_acc_report)
+
+        elif cmd == "/setcookie":
+            self._handle_setcookie(parts)
+
+        elif cmd == "/veo":
+            arg = parts[1].lower() if len(parts) > 1 else ""
+            if arg in ("on", "bật", "1", "true"):
+                set_veo_enabled(True)
+                self.notifier.send_message(
+                    "🎬 <b>VEO = BẬT</b>\nKey Scene sẽ gọi Veo qua tài khoản Google Pro (cần cookie sống).\n"
+                    "⚠️ Cần <code>/restart</code> hoặc khởi động lại worker để keep-alive Google chạy."
+                )
+            elif arg in ("off", "tắt", "0", "false"):
+                set_veo_enabled(False)
+                self.notifier.send_message(
+                    "🎨 <b>VEO = TẮT</b>\nToàn bộ scene render bằng Ken Burns (ảnh + camera motion), "
+                    "không đụng quota Google và không cần cookie.\nDây chuyền đang chạy sẽ dùng chế độ này ở cảnh kế tiếp."
+                )
+            else:
+                self.notifier.send_message(
+                    f"ℹ️ Veo đang <b>{'BẬT' if is_veo_enabled() else 'TẮT'}</b>.\n"
+                    f"Dùng: <code>/veo on</code> hoặc <code>/veo off</code>"
+                )
 
         elif cmd == "/status":
             pool_summary = self.pool.get_status_summary()
