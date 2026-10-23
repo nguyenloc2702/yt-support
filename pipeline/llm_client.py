@@ -18,6 +18,7 @@ from services.settings_service import (
     get_llm_api_key,
     get_llm_base_url,
     get_llm_model,
+    get_xkiro_generation_model,
 )
 
 logger = get_logger(__name__)
@@ -271,7 +272,10 @@ def chat_json(
     Returns the parsed dict. Raises LLMResponseError on unusable output.
     """
     client = get_llm_client()
-    selected_model = model or get_llm_model() or "gemini-2.0-flash"
+    # Default to the xKiro generation model: the gateway (default base URL)
+    # 404s on "gemini-2.0-flash", which stranded every call without an
+    # explicit model when the settings DB had no llm_model row.
+    selected_model = model or get_llm_model() or get_xkiro_generation_model()
 
     kwargs: dict[str, Any] = {
         "model": selected_model,
@@ -334,7 +338,10 @@ def chat_text(
     (Phase 8 block-based workflow). Raises LLMResponseError on unusable output.
     """
     client = get_llm_client()
-    selected_model = model or get_llm_model() or "gemini-2.0-flash"
+    # Default to the xKiro generation model: the gateway (default base URL)
+    # 404s on "gemini-2.0-flash", which stranded every call without an
+    # explicit model when the settings DB had no llm_model row.
+    selected_model = model or get_llm_model() or get_xkiro_generation_model()
 
     breaker = get_default_breaker()
     try:

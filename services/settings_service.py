@@ -195,7 +195,7 @@ def set_provider_preset(preset: str) -> None:
 
 
 def get_vlm_model() -> str:
-    return get_setting(VLM_MODEL_KEY) or get_llm_model() or "gemini-2.0-flash"
+    return get_setting(VLM_MODEL_KEY) or get_llm_model() or DEFAULT_XKIRO_GENERATION_MODEL
 
 
 def set_vlm_model(model: str) -> None:

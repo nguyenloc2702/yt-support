@@ -90,3 +90,13 @@ def test_no_api_key_raises(monkeypatch, tmp_path, isolated_db):
     ss._SECRET_KEY_PATH = tmp_path / "data" / ".secret_key"
     with pytest.raises(LLMNotConfiguredError):
         chat_json("sys", "user")
+
+
+def test_chat_json_defaults_to_xkiro_generation_model(llm_env, monkeypatch):
+    fake = _FakeClient(_FakeResponse('{"ok": true}'))
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: fake)
+    monkeypatch.setattr("services.settings_service.get_setting", lambda key: None)
+    chat_json("sys", "user")
+    model = fake.chat.completions.last_kwargs["model"]
+    assert model == "qwen/qwen3.8-omni-flash:free"
+    assert model != "gemini-2.0-flash"
