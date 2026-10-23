@@ -1008,6 +1008,11 @@ class AutomatedFactory:
                     dur = _probe_duration(out_vi)
                     asm.set_audio_generated(language="vi", file_path=out_vi, duration=dur, voice_id=used_voice)
                     if self.notifier.is_configured:
+                        self.notifier.send_audio(
+                            str(out_vi),
+                            caption=f"Audio VI — {dur:.1f}s | {used_voice}",
+                            title=f"Remake VI — {job_id}",
+                        )
                         markup = {
                             "inline_keyboard": [[
                                 {"text": "🎙 Duyệt Audio VI", "callback_data": f"approve_audio_vi:{job_id}"}
@@ -1039,6 +1044,11 @@ class AutomatedFactory:
                     dur = _probe_duration(out_en)
                     asm.set_audio_generated(language="en", file_path=out_en, duration=dur, voice_id=used_voice)
                     if self.notifier.is_configured:
+                        self.notifier.send_audio(
+                            str(out_en),
+                            caption=f"Audio EN — {dur:.1f}s | {used_voice}",
+                            title=f"Remake EN — {job_id}",
+                        )
                         markup = {
                             "inline_keyboard": [[
                                 {"text": "🎙 Duyệt Audio EN", "callback_data": f"approve_audio_en:{job_id}"}

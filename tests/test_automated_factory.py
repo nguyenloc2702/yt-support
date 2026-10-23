@@ -153,6 +153,68 @@ def test_factory_mode2_custom_duration_and_telegram_dispatch(test_factory: Autom
 
 
 
+def test_gate2_sends_audio_previews_to_telegram(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    sent = {"audio": [], "messages": []}
+
+    class FakeNotifier:
+        is_configured = True
+
+        def send_message(self, text, **kw):
+            sent["messages"].append(text)
+            return True
+
+        def send_audio(self, path, caption="", title="", performer=""):
+            sent["audio"].append(Path(path).name)
+            return True
+
+        def send_document(self, *a, **kw):
+            return True
+
+    class FakeASM:
+        def __init__(self, project_dir, job_id):
+            self.script_vi_text = "Xin chào, đây là bản tin thử nghiệm."
+            self.script_en_text = "Hello, this is a test bulletin."
+            self.characters = {}
+
+        def load(self):
+            pass
+
+        def is_script_gate_passed(self):
+            return True
+
+        def set_audio_generated(self, **kw):
+            pass
+
+    def fake_tts(text, voice, out_path):
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"ID3" + b"\0" * 2000)
+        return voice
+
+    monkeypatch.setattr(
+        "services.approval_state_machine.ApprovalStateMachine", FakeASM
+    )
+    monkeypatch.setattr("pipeline.tts.synthesize_one_xkiro_with_fallback", fake_tts)
+    monkeypatch.setattr("pipeline.tts._probe_duration", lambda p: 12.5)
+
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs",
+        db_path=tmp_path / "jobs.sqlite3",
+        account_pool=SimpleNamespace(get_available_account=lambda reserve=False: None),
+    )
+    factory.notifier = FakeNotifier()
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    factory.generate_gate2_and_gate3_artifacts("job1", project_dir)
+
+    assert set(sent["audio"]) == {"audio_vi_full.mp3", "audio_en_full.mp3"}
+    assert (project_dir / "audio_vi_full.mp3").is_file()
+    assert (project_dir / "audio_en_full.mp3").is_file()
+
+
 def test_deduplicate_vtt_segments():
     from pipeline.automated_factory import deduplicate_vtt_segments
 
