@@ -89,6 +89,50 @@ def test_tempo_capped():
     assert MAX_TEMPO <= 1.6
 
 
+def test_xkiro_tts_heals_stale_db_key_and_retries(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from services.settings_service import LLM_KEY
+
+    store = {LLM_KEY: "sk-dead-key-from-reverted-db"}
+    monkeypatch.setenv("XKIRO_API_KEY", "sk-fresh-env-key")
+    monkeypatch.setattr(
+        "services.settings_service.get_llm_api_key", lambda: store[LLM_KEY]
+    )
+    monkeypatch.setattr(
+        "services.settings_service.get_setting", lambda key: store.get(key)
+    )
+    monkeypatch.setattr(
+        "services.settings_service.set_setting",
+        lambda key, value: store.__setitem__(key, value),
+    )
+    monkeypatch.setattr("services.settings_service.mask_secret", lambda v: "sk-...test")
+
+    auth_headers = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        auth_headers.append(headers["Authorization"])
+        if len(auth_headers) == 1:
+            return SimpleNamespace(
+                status_code=401,
+                text='{"error":{"message":"Invalid or disabled ClientApiKey."}}',
+                content=b"",
+            )
+        return SimpleNamespace(status_code=200, text="", content=b"ID3-fake-mp3")
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    from pipeline.tts import synthesize_one_xkiro
+
+    out = tmp_path / "a.mp3"
+    size = synthesize_one_xkiro("Xin chào", "confident-male-vietnamese", out)
+
+    assert len(auth_headers) == 2
+    assert auth_headers[1] == "Bearer sk-fresh-env-key"
+    assert store[LLM_KEY] == "sk-fresh-env-key"
+    assert size == len(b"ID3-fake-mp3") and out.read_bytes() == b"ID3-fake-mp3"
+
+
 def test_synthesize_failure_raises_and_cleans(monkeypatch, tmp_path):
     items = [{"output_start": 0.0, "text": "abc", "clip_duration": 3.0}]
 

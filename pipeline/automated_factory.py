@@ -156,12 +156,22 @@ def send_voice_previews(notifier: TelegramNotifier, job_id: str, project_dir: Pa
 
 
 class AutomatedFactory:
-    def __init__(self, output_dir: Optional[Path] = None, db_path: Optional[Path] = None):
+    def __init__(
+        self,
+        output_dir: Optional[Path] = None,
+        db_path: Optional[Path] = None,
+        account_pool=None,
+    ):
         self.output_dir = Path(output_dir or "data/automated_runs")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.notifier = TelegramNotifier()
         self.uploader = StorageUploader()
         self.jq = JobQueueManager(db_path=db_path)
+        if account_pool is None:
+            from services.account_pool import AccountPoolManager
+
+            account_pool = AccountPoolManager()
+        self.account_pool = account_pool
 
     # =========================================================================
     # MODE 1: SMART REUP & SUMMARY

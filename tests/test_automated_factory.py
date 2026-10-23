@@ -168,6 +168,20 @@ def test_deduplicate_vtt_segments():
     assert deduped[1]["text"] == "với kênh video hôm nay chúng ta sẽ tìm hiểu"
 
 
+def test_factory_uses_injected_account_pool(tmp_path: Path):
+    sentinel = object()
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs",
+        db_path=tmp_path / "db.sqlite3",
+        account_pool=sentinel,
+    )
+    assert factory.account_pool is sentinel
+
+
+def test_factory_creates_account_pool_by_default(test_factory: AutomatedFactory):
+    assert hasattr(test_factory.account_pool, "get_available_account")
+
+
 def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory):
     # If execute_approved_reup is called on a remake job, it must return False safely without corrupting DB
     job_id = test_factory.jq.create_job(mode="remake", url="https://youtube.com/watch?v=mode2_test")

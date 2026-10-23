@@ -54,7 +54,7 @@ class VideoAutomationWorker:
         self.fallback_provider = ImageKenBurnsProvider(fallback_provider=self.primary_provider)
         self.uploader = StorageUploader()
         self.notifier = TelegramNotifier()
-        self.factory = AutomatedFactory(db_path=self.jq.db_path)
+        self.factory = AutomatedFactory(db_path=self.jq.db_path, account_pool=self.account_pool)
 
         # Remote Telegram Command Listener
         self.bot = TelegramCommandBot(

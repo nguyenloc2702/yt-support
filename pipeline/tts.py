@@ -89,20 +89,30 @@ def is_xkiro_voice(voice_id: str) -> bool:
     )
 
 
+def _read_llm_key() -> Optional[str]:
+    import os
+
+    try:
+        from services.settings_service import get_llm_api_key
+
+        key = get_llm_api_key()
+    except Exception:
+        key = None
+    return key or os.environ.get("XKIRO_API_KEY")
+
+
 def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Optional[str] = None) -> float:
-    """Synthesizes text using xKiro API and saves to out_path."""
+    """Synthesizes text using xKiro API and saves to out_path.
+
+    A rejected key (401/403) triggers the same settings-DB self-heal the LLM
+    client uses: the dead row is re-paired from .env and the call retried once.
+    """
     import os
     import requests
 
+    explicit_key = api_key is not None
     if not api_key:
-        try:
-            from services.settings_service import get_llm_api_key
-
-            api_key = get_llm_api_key()
-        except Exception:
-            api_key = None
-    if not api_key:
-        api_key = os.environ.get("XKIRO_API_KEY")
+        api_key = _read_llm_key()
     if not api_key:
         raise RenderError("xKiro API key is not configured (DB or XKIRO_API_KEY).")
 
@@ -117,6 +127,17 @@ def synthesize_one_xkiro(text: str, voice_id: str, out_path: Path, api_key: Opti
         "Content-Type": "application/json",
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    if resp.status_code in (401, 403) and not explicit_key:
+        from pipeline.llm_client import _repair_credentials
+
+        if _repair_credentials(
+            RenderError(f"xKiro TTS returned {resp.status_code}: {resp.text[:120]}")
+        ):
+            retry_key = _read_llm_key()
+            if retry_key and retry_key != api_key:
+                api_key = retry_key
+                headers["Authorization"] = f"Bearer {api_key}"
+                resp = requests.post(url, json=payload, headers=headers, timeout=60)
     if resp.status_code != 200:
         raise RenderError(f"xKiro TTS API returned status {resp.status_code}: {resp.text[:200]}")
 
