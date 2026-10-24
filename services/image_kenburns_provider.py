@@ -12,6 +12,7 @@ loudly (zero-fake policy) instead of rendering a caption card.
 """
 
 import logging
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,6 +27,90 @@ from services.prompt_sanitizer import (
 )
 
 logger = logging.getLogger("image_kenburns_provider")
+
+KENBURNS_FPS = 25
+KENBURNS_WIDTH = 2304
+KENBURNS_HEIGHT = 1296
+KENBURNS_OUTPUT = "1920x1080"
+# Alternate directions per shot, otherwise every clip reads as the same still.
+KENBURNS_MOTIONS = (
+    "zoom_in",
+    "pan_lr",
+    "zoom_out",
+    "pan_rl",
+    "zoom_diag",
+    "pan_up",
+    "pan_down",
+)
+# Shots longer than this get a mid-clip reframe cut so the image changes
+# framing while the narration continues.
+REFRAAME_CUT_MIN_SECONDS = 5.5
+
+
+def _shot_seed(out_path: Path) -> int:
+    match = re.search(r"(\d+)", out_path.stem)
+    if match:
+        return int(match.group(1))
+    return sum(out_path.stem.encode("utf-8")) % 97
+
+
+def _zoompan_filter(motion: str, frames: int) -> str:
+    """zoompan expression for one camera move over `frames` output frames."""
+    progress = f"(on/{max(1, frames - 1)})"
+    center_x = "(iw-iw/zoom)/2"
+    center_y = "(ih-ih/zoom)/2"
+    if motion == "zoom_in":
+        z, x, y = f"(1.02+0.28*{progress})", center_x, center_y
+    elif motion == "zoom_out":
+        z, x, y = f"(1.30-0.28*{progress})", center_x, center_y
+    elif motion == "pan_lr":
+        z, x, y = "1.22", f"(iw-iw/zoom)*{progress}", center_y
+    elif motion == "pan_rl":
+        z, x, y = "1.22", f"(iw-iw/zoom)*(1-{progress})", center_y
+    elif motion == "pan_down":
+        z, x, y = "1.22", center_x, f"(ih-ih/zoom)*{progress}"
+    elif motion == "pan_up":
+        z, x, y = "1.22", center_x, f"(ih-ih/zoom)*(1-{progress})"
+    else:  # zoom_diag
+        z, x, y = f"(1.08+0.22*{progress})", f"(iw-iw/zoom)*{progress}", f"(ih-ih/zoom)*(1-{progress})"
+    return (
+        f"zoompan=z='{z}':x='{x}':y='{y}'"
+        f":d={frames}:s={KENBURNS_OUTPUT}:fps={KENBURNS_FPS}"
+    )
+
+
+def build_kenburns_filter(seed: int, duration: float) -> str:
+    """Return an ffmpeg filter_complex graph: one cover crop plus 1-2 moves.
+
+    The source image is cover-cropped to the overscan canvas (never stretched),
+    so pans have real room to travel and faces keep their proportions.
+    """
+    total_frames = max(1, int(round(duration * KENBURNS_FPS)))
+    cover = (
+        f"scale={KENBURNS_WIDTH}:{KENBURNS_HEIGHT}:force_original_aspect_ratio=increase,"
+        # Height overflow is biased upward so square/portrait character sheets
+        # keep the face instead of losing the top of the head.
+        f"crop={KENBURNS_WIDTH}:{KENBURNS_HEIGHT}:0:(ih-oh)*0.10"
+    )
+    first = KENBURNS_MOTIONS[seed % len(KENBURNS_MOTIONS)]
+
+    if duration < REFRAAME_CUT_MIN_SECONDS:
+        return (
+            f"[0:v]{cover},{_zoompan_filter(first, total_frames)},"
+            f"format=yuv420p[v]"
+        )
+
+    frames_a = total_frames // 2
+    frames_b = total_frames - frames_a
+    second = KENBURNS_MOTIONS[(seed + 3) % len(KENBURNS_MOTIONS)]
+    return (
+        f"[0:v]{cover},split=2[a][b];"
+        f"[a]{_zoompan_filter(first, frames_a)},trim=end_frame={frames_a},"
+        f"setpts=PTS-STARTPTS[va];"
+        f"[b]{_zoompan_filter(second, frames_b)},trim=end_frame={frames_b},"
+        f"setpts=PTS-STARTPTS[vb];"
+        f"[va][vb]concat=n=2:v=1:a=0,format=yuv420p[v]"
+    )
 
 
 class ImageKenBurnsProvider(VideoProvider):
@@ -69,7 +154,9 @@ class ImageKenBurnsProvider(VideoProvider):
                 from services.xkiro_image_provider import generate_xkiro_image
 
                 used_model = generate_xkiro_image(
-                    f"{CRAYON_STYLE_PREFIX}{safe_prompt}", img_path
+                    f"{CRAYON_STYLE_PREFIX}{safe_prompt}",
+                    img_path,
+                    size="1792x1024",
                 )
                 if img_path.exists() and img_path.stat().st_size > 1000:
                     has_image = True
@@ -142,17 +229,20 @@ class ImageKenBurnsProvider(VideoProvider):
                 duration_sec=time.time() - start_time,
             )
 
-        # Step 2: Apply Ken Burns Zoom/Pan animation sized to kb_duration (25fps, 1280x720) with timeout (P1.6)
+        # Step 2: Animate with a cover-cropped, per-shot varied camera move
         try:
-            # Subtle zoom from 1.0 to 1.15 centered across the whole clip
-            kb_frames = max(1, int(kb_duration * 25))
+            graph = build_kenburns_filter(_shot_seed(out_path), kb_duration)
             cmd_kb = [
                 "ffmpeg", "-y",
                 "-loop", "1",
                 "-i", str(img_path),
-                "-vf", f"zoompan=z='min(zoom+{0.15 / kb_frames:.6f},1.15)':d={kb_frames}:s=1280x720:fps=25",
+                "-filter_complex", graph,
+                "-map", "[v]",
                 "-t", f"{kb_duration:.2f}",
+                "-r", str(KENBURNS_FPS),
                 "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "20",
                 "-pix_fmt", "yuv420p",
                 str(out_path),
             ]

@@ -22,7 +22,7 @@ def test_no_provider_fails_loudly_without_placeholder(kb_provider, tmp_path, mon
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
         "services.xkiro_image_provider.generate_xkiro_image",
-        lambda prompt, out_path: (_ for _ in ()).throw(RuntimeError("xKiro image down")),
+        lambda prompt, out_path, **kw: (_ for _ in ()).throw(RuntimeError("xKiro image down")),
     )
 
     out = tmp_path / "shots" / "shot_01.mp4"
@@ -47,9 +47,11 @@ def test_xkiro_image_is_the_primary_provider(kb_provider, tmp_path, monkeypatch)
     out = tmp_path / "shots" / "shot_04.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
     prompts = []
+    sizes = []
 
-    def fake_xkiro(prompt, out_path):
+    def fake_xkiro(prompt, out_path, **kw):
         prompts.append(prompt)
+        sizes.append(kw.get("size"))
         Path(out_path).write_bytes(b"jpg" * 600)
         return "openai/gpt-image-2.5"
 
@@ -73,6 +75,8 @@ def test_xkiro_image_is_the_primary_provider(kb_provider, tmp_path, monkeypatch)
     assert res.ok is True
     assert len(prompts) == 1
     assert prompts[0].lower().startswith(CRAYON_STYLE_PREFIX.lower()[:20])
+    # Wide images keep the composition; square ones get vertically cropped.
+    assert sizes == ["1792x1024"]
 
 
 def test_ref_image_copy_and_dynamic_kenburns_duration(kb_provider, tmp_path, monkeypatch):
@@ -108,11 +112,26 @@ def test_ref_image_copy_and_dynamic_kenburns_duration(kb_provider, tmp_path, mon
     assert res.video_path == out
     assert len(captured_cmds) == 1
 
-    frames = int(duration * 25)  # 175
-    vf = next(c for c in captured_cmds[0] if c.startswith("zoompan="))
-    assert f"d={frames}" in vf
-    assert f"zoom+{0.15 / frames:.6f}" in vf
+    graph = captured_cmds[0][captured_cmds[0].index("-filter_complex") + 1]
+    assert "zoompan=" in graph
+    assert "s=1920x1080" in graph
+    assert "scale=2304:1296" in graph
+    assert "crop=2304:1296" in graph
+    # 7s -> 175 frames split around the mid-clip reframe cut
+    assert "d=87" in graph and "d=88" in graph
     assert f"{duration:.2f}" in captured_cmds[0]
+
+
+def test_camera_moves_vary_between_shots():
+    from services.image_kenburns_provider import build_kenburns_filter
+
+    short = [build_kenburns_filter(seed, 4.0) for seed in range(6)]
+    assert len(set(short)) == len(short)
+    long = [build_kenburns_filter(seed, 8.0) for seed in range(6)]
+    assert len(set(long)) == len(long)
+    # Long shots cut to a second framing mid-clip; short ones do not.
+    assert all("concat=n=2" in g for g in long)
+    assert all("concat=n=2" not in g for g in short)
 
 
 def test_duration_clamped_between_2_and_15(kb_provider, tmp_path, monkeypatch):
@@ -135,8 +154,9 @@ def test_duration_clamped_between_2_and_15(kb_provider, tmp_path, monkeypatch):
         prompt="scene", out_path=out, session_file=None, ref_image=ref, duration=60.0
     )
     assert res.ok is True
-    # 60s clamped to 15s -> 375 frames
-    assert "d=375" in next(c for c in captured_cmds[0] if c.startswith("zoompan="))
+    # 60s clamped to 15s -> 375 frames, split 187/188 around the reframe cut
+    graph = captured_cmds[0][captured_cmds[0].index("-filter_complex") + 1]
+    assert "d=187" in graph and "d=188" in graph
 
 
 def test_crayon_style_prefix_blocks_photorealism():

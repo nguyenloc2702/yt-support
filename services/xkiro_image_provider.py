@@ -50,14 +50,14 @@ def _api_key() -> Optional[str]:
     return get_llm_api_key()
 
 
-def _submit_job(prompt: str, model: str, headers: dict, base: str) -> dict:
+def _submit_job(prompt: str, model: str, headers: dict, base: str, size: str = "1024x1024") -> dict:
     import requests
 
     payload = {
         "model": model,
         "prompt": prompt,
         "n": 1,
-        "size": "1024x1024",
+        "size": size,
     }
     for attempt in range(1, RATE_LIMIT_RETRIES + 1):
         resp = requests.post(
@@ -69,6 +69,15 @@ def _submit_job(prompt: str, model: str, headers: dict, base: str) -> dict:
                 model, RATE_LIMIT_WAIT_SECONDS, attempt, RATE_LIMIT_RETRIES,
             )
             time.sleep(RATE_LIMIT_WAIT_SECONDS)
+            continue
+        if resp.status_code == 400 and size != "1024x1024":
+            # Fallback models may not accept wide sizes; a square image still
+            # beats a failed shot.
+            logger.warning(
+                "xKiro image model %s rejected size %s, retrying at 1024x1024",
+                model, size,
+            )
+            payload["size"] = "1024x1024"
             continue
         if resp.status_code not in (200, 202):
             raise ImageGenerationError(
@@ -138,9 +147,10 @@ def _submit_with_heal(
     base: str,
     explicit_key: bool,
     key: str,
+    size: str,
 ) -> tuple[dict, Optional[str]]:
     try:
-        return _submit_job(prompt, model, headers, base), None
+        return _submit_job(prompt, model, headers, base, size), None
     except ImageGenerationError as exc:
         msg = str(exc)
         if explicit_key or ("status 401" not in msg and "status 403" not in msg):
@@ -153,7 +163,7 @@ def _submit_with_heal(
         if not retry_key or retry_key == key:
             raise
         headers["Authorization"] = f"Bearer {retry_key}"
-        return _submit_job(prompt, model, headers, base), retry_key
+        return _submit_job(prompt, model, headers, base, size), retry_key
 
 
 def generate_xkiro_image(
@@ -163,6 +173,7 @@ def generate_xkiro_image(
     fallback_model: Optional[str] = None,
     poll_timeout: float = DEFAULT_JOB_TIMEOUT_SECONDS,
     api_key: Optional[str] = None,
+    size: str = "1024x1024",
 ) -> str:
     """Generate one image and write it to out_path; returns the model used.
 
@@ -187,7 +198,7 @@ def generate_xkiro_image(
     for idx, candidate in enumerate(models):
         try:
             job, new_key = _submit_with_heal(
-                prompt, candidate, headers, base, explicit_key, key
+                prompt, candidate, headers, base, explicit_key, key, size
             )
             if new_key:
                 key = new_key

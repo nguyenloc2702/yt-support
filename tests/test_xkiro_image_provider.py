@@ -142,3 +142,57 @@ def test_generate_image_rejects_tiny_payload(tmp_path, monkeypatch, provider):
         )
     assert not out.exists()
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def _succeed_on_second_request(monkeypatch, provider, posts):
+    def fake_post(url, json=None, headers=None, timeout=None):
+        posts.append(json["size"])
+        return _resp(202, {"id": "job-wide"})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(
+        "requests.get",
+        lambda url, **k: (
+            _resp(200, content=b"img" * 1000)
+            if url.startswith("https://cdn.test/")
+            else _resp(200, {"status": "succeeded", "data": [{"url": "https://cdn.test/x.png"}]})
+        ),
+    )
+
+
+def test_landscape_size_is_forwarded(tmp_path, monkeypatch, provider):
+    posts = []
+    _succeed_on_second_request(monkeypatch, provider, posts)
+
+    out = tmp_path / "shot.jpg"
+    provider.generate_xkiro_image("wide crayon scene", out, size="1792x1024")
+
+    assert posts == ["1792x1024"]
+    assert out.exists()
+
+
+def test_unsupported_size_retries_square(tmp_path, monkeypatch, provider):
+    sizes = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sizes.append(json["size"])
+        if json["size"] == "1792x1024":
+            return _resp(400, {"error": {"message": "invalid size"}}, text="invalid size")
+        return _resp(202, {"id": "job-square"})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(
+        "requests.get",
+        lambda url, **k: (
+            _resp(200, content=b"img" * 1000)
+            if url.startswith("https://cdn.test/")
+            else _resp(200, {"status": "succeeded", "data": [{"url": "https://cdn.test/x.png"}]})
+        ),
+    )
+
+    out = tmp_path / "shot.jpg"
+    used = provider.generate_xkiro_image("wide crayon scene", out, size="1792x1024")
+
+    assert used == provider.DEFAULT_IMAGE_MODEL
+    assert sizes == ["1792x1024", "1024x1024"]
+    assert out.exists()
