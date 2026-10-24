@@ -30,6 +30,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
 from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE, WPM_RANGE
+from services.hook_formulas import hook_formula_catalog, narration_laws_block
+from services.hook_scoring import score_hook
 from services.prompt_sanitizer import ensure_crayon_style
 from services.script_auditor import (
     BUDGET_RATIO_FLOOR,
@@ -550,6 +552,7 @@ class ScriptFactory:
 
         feedback = ""
         calls = 0
+        formula_id = ""
         for _ in range(MAX_REPAIR_ROUNDS):
             if self._hook_compliant(scenes_vi):
                 break
@@ -566,6 +569,9 @@ class ScriptFactory:
                 f"{feedback}"
                 f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
                 f"TRANSCRIPT NGUỒN (chỉ dùng sự kiện từ đây):\n\"\"\"{transcript_text[:4000]}\"\"\"\n\n"
+                "CHỌN ĐÚNG MỘT CÔNG THỨC HOOK dưới đây và viết 4 cảnh theo đúng công thức đó "
+                "(ghi \"cong_thuc\": \"<id>\" vào JSON trả về):\n"
+                f"{hook_formula_catalog()}\n\n"
                 "BỐN CẢNH MỞ ĐẦU CẦN VIẾT LẠI (HOOK 30 GIÂY):\n"
                 f"{json.dumps(items, ensure_ascii=False, indent=1)}\n\n"
                 f"Yêu cầu: giữ nguyên index và thứ tự. MỖI voiceover_vi {HOOK_MIN_WORDS}-{HOOK_MAX_WORDS} từ; "
@@ -574,7 +580,7 @@ class ScriptFactory:
                 "Đan xen câu ngắn dứt khoát (<= 6 từ), không chào hỏi, chỉ dùng số liệu có trong transcript. "
                 f"voiceover_en tối đa {EN_MAX_WORDS} từ, khớp ý từng cảnh.\n"
                 "Trả về duy nhất JSON object: "
-                '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}]}'
+                '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}], "cong_thuc": "<id>"}'
             )
             try:
                 parsed = chat_json(
@@ -585,6 +591,8 @@ class ScriptFactory:
             except Exception as exc:
                 logger.warning("Hook repair call failed: %s", exc)
                 break
+            if isinstance(parsed, dict):
+                formula_id = str(parsed.get("cong_thuc") or "").strip() or formula_id
             repaired = parsed.get("scenes") if isinstance(parsed, dict) else None
             if not isinstance(repaired, list):
                 continue
@@ -638,7 +646,9 @@ class ScriptFactory:
             "applicable": True,
             "calls": calls,
             "trimmed": trimmed,
+            "formula": formula_id,
             "word_counts": self._hook_counts(scenes_vi),
+            "machine_hook_score": score_hook(str(scenes_vi[0].get("text", ""))),
             "duration_acc": round(acc, 2),
             "ok": self._hook_compliant(scenes_vi) and acc <= 32.0,
         }
@@ -1081,7 +1091,8 @@ class ScriptFactory:
             "không bịa chi tiết mới.\n\n"
             f"GÓC KỂU CHUYÊN CỦA BẠN — {angle['label']}: {angle['brief']}\n"
             "STYLE BIBLE VISUAL (bắt buộc cho visual_prompt): Whimsical hand-drawn crayon "
-            "editorial cartoon, flat 2D, giấy vẽ sần, TUYỆT ĐỐI KHÔNG photorealistic/3D."
+            "editorial cartoon, flat 2D, giấy vẽ sần, TUYỆT ĐỐI KHÔNG photorealistic/3D.\n\n"
+            + narration_laws_block()
         )
         if feedback_brief:
             system_prompt += f"\n\n{feedback_brief}"
@@ -1161,9 +1172,19 @@ class ScriptFactory:
             f"Cảnh {sc['index']} ({sc['duration']:.1f}s): {sc['text']}"
             for sc in variant.scenes_vi
         )
+        # The LLM judge is soft on weak hooks; give it the machine verdict on
+        # the five measurable properties and force it to enforce the floor.
+        hook_report = score_hook(str(variant.scenes_vi[0].get("text", "")))
+        machine_hook = (
+            f"\n\nĐIỂM HOOK MÁY (thang 0-100 = 60% trung bình 5 chỉ tiêu + 40% chỉ tiêu yếu nhất): "
+            f"{hook_report['verdict']}; yếu nhất: {hook_report['weakest']}. "
+            "Hook dưới 70 PHẢI bị trừ điểm mục 'hook' và feedback phải chỉ đúng chỉ tiêu yếu nhất cần sửa."
+        )
         user_prompt = (
             (f"{feedback_brief}\n\n" if feedback_brief else "")
-            + f"GÓC KỂ: {variant.angle['label']} — {variant.angle['brief']}\n\n"
+            + f"GÓC KỂ: {variant.angle['label']} — {variant.angle['brief']}\n"
+            + machine_hook
+            + "\n\n"
             + f"TRANSCRIPT NGUỒN (để kiểm tra GROUNDED):\n\"\"\"{transcript_text[:5000]}\"\"\"\n\n"
             f"KỊCH BẢN CẦN CHẤM:\n{script_lines}"
         )

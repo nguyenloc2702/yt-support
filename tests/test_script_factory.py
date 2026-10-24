@@ -85,19 +85,23 @@ class Router:
         self.repair_prompts = []
         self.repair_calls = 0
         self.hook_calls = 0
+        self.hook_prompts = []
         self.callback_calls = 0
         self.judge_calls = 0
         self.judge_prompts = []
         self.rewrite_calls = 0
+        self.rewrite_systems = []
 
     def __call__(self, system_prompt, user_prompt, **kw):
         import re
 
         if "(HOOK 30 GIÂY):" in user_prompt:
             self.hook_calls += 1
+            self.hook_prompts.append(user_prompt)
             m = re.search(r"\(HOOK 30 GIÂY\):\n(\[.*?\])\n\n", user_prompt, re.DOTALL)
             items = json.loads(m.group(1)) if m else []
             return {
+                "cong_thuc": "the-statistic",
                 "scenes": [
                     {
                         "index": item["index"],
@@ -183,6 +187,7 @@ class Router:
             angle = "teacher"
         self.rewrite_calls += 1
         self.rewrite_prompts.append(user_prompt)
+        self.rewrite_systems.append(system_prompt)
         if self.rewrite_error:
             raise RuntimeError(self.rewrite_error)
         import re
@@ -294,6 +299,45 @@ def test_hook_window_and_callback_repairs_satisfy_qa(factory, monkeypatch):
     assert result["post_repairs"]["hook"]["ok"] is True
     assert result["post_repairs"]["callback"]["ok"] is True
     assert router.hook_calls >= 1 and router.callback_calls >= 1
+
+    hook_rep = result["post_repairs"]["hook"]
+    assert hook_rep["formula"] == "the-statistic"
+    assert hook_rep["machine_hook_score"]["verdict"] >= 0
+    assert hook_rep["machine_hook_score"]["weakest"] in {
+        "specificity", "address", "stakes", "curiosity", "brevity",
+    }
+    # The repair prompt must carry the 21-formula catalog for the model to pick from
+    assert all("CÔNG THỨC HOOK" in p and "the-statistic" in p for p in router.hook_prompts)
+
+
+def test_judge_prompt_carries_the_machine_hook_verdict(factory, monkeypatch):
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3)
+
+    assert router.judge_prompts
+    for p in router.judge_prompts:
+        m = re.search(
+            r"ĐIỂM HOOK MÁY .*?: (\d+); yếu nhất: "
+            r"(specificity|address|stakes|curiosity|brevity)", p,
+        )
+        assert m, p[-600:]
+        assert 0 <= int(m.group(1)) <= 100
+        assert "Hook dưới 70 PHẢI bị trừ điểm mục 'hook'" in p
+
+
+def test_rewrite_system_prompt_carries_the_narration_laws(factory, monkeypatch):
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3)
+
+    assert router.rewrite_systems
+    assert all(
+        "LUẬT NARRATION" in s and "Mở bằng tình huống cụ thể" in s
+        for s in router.rewrite_systems
+    )
 
 
 def test_duration_expansion_tops_up_short_script(factory, monkeypatch):
