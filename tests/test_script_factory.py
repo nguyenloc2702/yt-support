@@ -575,14 +575,16 @@ def test_variant_accepted_with_five_percent_outliers(factory, monkeypatch):
     assert variant.budget_report["vi_low"] == 1
 
 
-def test_variant_rejected_once_outliers_pass_the_ratio(factory, monkeypatch):
-    variant, _ = _variant(
+def test_variant_survives_outliers_beyond_the_ratio_and_reports_target(factory, monkeypatch):
+    """QA has no per-scene word check: the ratio aims pacing, it does not veto."""
+    variant, router = _variant(
         factory, monkeypatch, 20, word_plan={3: 9, 8: 9, 13: 9}, repair_echo=True
     )
 
-    assert variant.valid is False
-    assert "3/20 scenes out of budget" in variant.invalid_reason
-    assert "ratio 0.85" in variant.invalid_reason
+    assert variant.valid is True, variant.invalid_reason
+    assert variant.budget_report["ratio"] == 0.85
+    assert variant.budget_report["target_met"] is False
+    assert router.repair_calls == sf.MAX_REPAIR_ROUNDS  # echoed output never fixes it
 
 
 def test_mean_scene_duration_is_enforced_absolute(factory, monkeypatch):
@@ -634,8 +636,9 @@ def test_en_only_violation_counts_in_ratio_not_killer(factory, monkeypatch):
     two_lines, _ = _variant(
         factory, monkeypatch, 20, en_word_plan={5: 30, 9: 30}, repair_echo=True
     )
-    assert two_lines.valid is False
-    assert "2/20 scenes out of budget" in two_lines.invalid_reason
+    assert two_lines.valid is True, two_lines.invalid_reason
+    assert two_lines.budget_report["en_high"] == 2
+    assert two_lines.budget_report["target_met"] is False
 
 
 # --- W4: a blank line goes through split-retry, not variant death ---------
@@ -758,6 +761,22 @@ def test_hook_window_fit_never_compresses_a_scene_below_its_reading_time():
     natural = 24 / sf.WORDS_PER_SECOND
     assert all(sc["duration"] >= natural - 1e-3 for sc in scenes_vi)  # durations round to ms
     assert acc <= 32.0
+
+
+def test_hook_window_pads_a_short_hook_so_the_s16_window_closes_inside_it():
+    """Live S16 fail: 28.86s of hook let scene 5 into the window (33.15s)."""
+    scenes_vi = [
+        {"index": i + 1, "text": " ".join(["từ"] * 24), "duration": 6.858}
+        for i in range(4)
+    ]
+    scenes_en = [{"index": i + 1, "text": "short", "duration": 6.858} for i in range(4)]
+
+    acc = sf.ScriptFactory._fit_hook_window(scenes_vi, scenes_en)
+
+    assert 30.0 <= acc <= 32.0
+    assert all(4.0 <= sc["duration"] <= 8.0 for sc in scenes_vi)
+    assert all(sc["duration"] >= 24 / sf.WORDS_PER_SECOND - 1e-3 for sc in scenes_vi)
+    assert [sc["duration"] for sc in scenes_en] == [sc["duration"] for sc in scenes_vi]
 
 
 def test_shot_prompts_leave_the_factory_carrying_the_crayon_look(factory, monkeypatch):

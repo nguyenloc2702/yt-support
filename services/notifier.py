@@ -83,6 +83,35 @@ class TelegramNotifier:
 
         return self._send_single_message(text, parse_mode, reply_markup=reply_markup)
 
+    @staticmethod
+    def _sanitize_markup(reply_markup: Optional[dict]) -> Optional[dict]:
+        """Drop inline buttons Telegram would reject: callback_data is 1-64 bytes.
+
+        One oversized payload fails the whole sendMessage request, so a character
+        whose id is a Vietnamese name silently killed the Gate 3 notification.
+        """
+        if not isinstance(reply_markup, dict) or "inline_keyboard" not in reply_markup:
+            return reply_markup
+        markup = dict(reply_markup)
+        rows = []
+        for row in markup.get("inline_keyboard") or []:
+            kept = [
+                btn for btn in row
+                if "callback_data" not in btn
+                or 1 <= len(str(btn["callback_data"]).encode("utf-8")) <= 64
+            ]
+            if len(kept) != len(row):
+                logger.warning(
+                    "Dropping Telegram button(s) with callback_data outside 1-64 bytes: %s",
+                    [btn.get("text") for btn in row if btn not in kept],
+                )
+            if kept:
+                rows.append(kept)
+        if not rows:
+            return None
+        markup["inline_keyboard"] = rows
+        return markup
+
     def _send_single_message(self, text: str, parse_mode: str = "HTML", reply_markup: Optional[dict] = None) -> bool:
         url = f"{self.base_url}/sendMessage"
         payload = {
@@ -91,6 +120,7 @@ class TelegramNotifier:
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
+        reply_markup = self._sanitize_markup(reply_markup)
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         try:

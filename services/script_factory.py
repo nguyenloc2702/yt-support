@@ -415,11 +415,15 @@ class ScriptFactory:
     def _acceptance_report(
         self, scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Budget verdict derived from the QA scorecard rather than a stricter copy.
+        """Variant verdict derived from the QA scorecard, not a stricter copy.
 
-        Per-scene compliance is a coin flip weighted by model quality, so the
-        scene rule is a ratio. The mean scene duration is a stable statistic over
-        the whole script and is what QA S10 grades, so it is enforced absolutely.
+        S09 grades scene durations and S10 the mean, and both are already
+        enforced by deriving every duration from its word count inside the 4-8s
+        window — a 13-word scene is a legal 195 WPM read at the 4s floor. The
+        per-scene word ratio is a repair target (it aims the script at ~6s
+        scenes), never a veto: rejecting on it discarded two of three variants
+        in a live run, spending a third of the script phase on rewrites whose
+        only flaw was pacing the scorecard accepts.
         """
         total = len(scenes_vi)
         if not total:
@@ -432,11 +436,6 @@ class ScriptFactory:
         wpm = float(metrics.get("estimated_wpm") or 0.0)
         mean_dur = float(metrics.get("mean_scene_duration") or 0.0)
         problems: List[str] = []
-        if ratio < MIN_BUDGET_RATIO:
-            problems.append(
-                f"{offenders}/{total} scenes out of budget "
-                f"(ratio {ratio:.2f} < {MIN_BUDGET_RATIO})"
-            )
         if not MEAN_DUR_RANGE[0] <= mean_dur <= MEAN_DUR_RANGE[1]:
             problems.append(
                 f"mean scene duration {mean_dur:.2f}s outside "
@@ -444,6 +443,7 @@ class ScriptFactory:
             )
         return {
             "ok": not problems,
+            "target_met": ratio >= MIN_BUDGET_RATIO,
             "reason": "; ".join(problems),
             "ratio": round(ratio, 3),
             "offenders": offenders,
@@ -681,32 +681,52 @@ class ScriptFactory:
     def _fit_hook_window(
         scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
     ) -> float:
-        """Nudge durations so the 30s boundary lands at HOOK_BOUNDARY_SEC."""
-        acc = 0.0
-        crossing = None
-        for i, sc in enumerate(scenes_vi):
-            acc += float(sc.get("duration", 0.0))
-            if acc >= HOOK_BOUNDARY_SEC:
-                crossing = i
-                break
-        if crossing is None:
-            return acc
-        delta = acc - HOOK_BOUNDARY_SEC
-        for i in range(crossing, -1, -1):
-            if abs(delta) < 0.05:
-                break
-            current = float(scenes_vi[i].get("duration", 0.0))
-            if delta > 0:
-                # Never squeeze a scene below the time its words need: 24 words
-                # in 4s is a 357 WPM read, and the aggregate then breaks S08.
-                natural = _reading_duration(len(str(scenes_vi[i].get("text", "")).split()))
-                new_dur = min(current, max(natural, current - delta))
-            else:
-                new_dur = min(MAX_SCENE_DURATION, current - delta)
-            delta -= current - new_dur
-            scenes_vi[i]["duration"] = round(new_dur, 3)
-            scenes_en[i]["duration"] = round(new_dur, 3)
-        return sum(float(sc.get("duration", 0.0)) for sc in scenes_vi[: crossing + 1])
+        """Land QA S16's 30s window inside the hook and under its 32s ceiling.
+
+        S16 reads the cumulative duration up to the scene that reaches 30s. Four
+        hook scenes adding up to less than that push the window into scene 5,
+        where one more scene overshoots 32s (live: 28.86s of hook + a 4.3s scene
+        5 = 33.15s). Durations are placeholders that Gate 2 re-derives from real
+        speech, so the hook may be stretched inside the 4-8s band.
+        """
+        hook_count = min(HOOK_SCENE_COUNT, len(scenes_vi))
+        if not hook_count:
+            return 0.0
+        hook = scenes_vi[:hook_count]
+        acc = sum(float(sc.get("duration", 0.0)) for sc in hook)
+
+        if acc < HOOK_BOUNDARY_SEC:
+            # Stretch back from the last hook scene: it is the scene that decides
+            # where the 30s window closes.
+            need = HOOK_BOUNDARY_SEC + 0.05 - acc
+            for i in range(hook_count - 1, -1, -1):
+                if need <= 0.0005:
+                    break
+                current = float(hook[i].get("duration", 0.0))
+                grow = min(MAX_SCENE_DURATION - current, need)
+                if grow <= 0:
+                    continue
+                new_dur = round(current + grow, 3)
+                hook[i]["duration"] = new_dur
+                if i < len(scenes_en):
+                    scenes_en[i]["duration"] = new_dur
+                need -= new_dur - current
+        elif acc > HOOK_BOUNDARY_SEC + 1.2:
+            # Over the ceiling: trim, but never below the natural reading time or
+            # the aggregate rate breaks S08.
+            overshoot = acc - (HOOK_BOUNDARY_SEC + 0.4)
+            for i in range(hook_count - 1, -1, -1):
+                if overshoot <= 0.0005:
+                    break
+                current = float(hook[i].get("duration", 0.0))
+                natural = _reading_duration(len(str(hook[i].get("text", "")).split()))
+                new_dur = round(max(natural, current - overshoot), 3)
+                overshoot -= current - new_dur
+                hook[i]["duration"] = new_dur
+                if i < len(scenes_en):
+                    scenes_en[i]["duration"] = new_dur
+
+        return sum(float(sc.get("duration", 0.0)) for sc in hook)
 
     def _repair_callback(
         self,
@@ -913,9 +933,10 @@ class ScriptFactory:
             if i < len(scenes_en)
         }
         for _ in range(MAX_REPAIR_ROUNDS):
-            # Stop as soon as the variant would be accepted: chasing the last
-            # few scenes one LLM call at a time is what used to burn the budget.
-            if self._acceptance_report(scenes_vi, scenes_en)["ok"]:
+            # The word ratio is a repair target, not a veto: keep rewriting while
+            # it is short of 95%, but never spend calls once it is met.
+            report = self._acceptance_report(scenes_vi, scenes_en)
+            if report["ok"] and report["target_met"]:
                 return
             offenders = self._budget_offenders(scenes_vi, scenes_en)
             if not offenders:
@@ -978,7 +999,7 @@ class ScriptFactory:
                     if text_en:
                         en["text"] = text_en
         report = self._acceptance_report(scenes_vi, scenes_en)
-        if not report["ok"]:
+        if not report["ok"] or not report["target_met"]:
             logger.warning(
                 "Word-budget repair left %d/%d scenes out of budget "
                 "(vi_low=%d vi_high=%d en_high=%d WPM=%.0f mean=%.2fs) — first: %s | %s",
