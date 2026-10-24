@@ -19,18 +19,12 @@ from typing import Optional
 
 from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.video_provider import ErrorKind, ProviderResult, SessionValidationResult, VideoProvider
-from services.prompt_sanitizer import sanitize_veo_prompt
+from services.prompt_sanitizer import (
+    CRAYON_STYLE_PREFIX,
+    sanitize_veo_prompt,
+)
 
 logger = logging.getLogger("image_kenburns_provider")
-
-# Crayon Style Bible prefix for every generated still (matches the Veo prompt style).
-CRAYON_STYLE_PREFIX = (
-    "Whimsical hand-drawn editorial cartoon illustration, rough wax crayon and "
-    "colored pencil sketch strokes, grainy paper texture, flat 2D minimalist "
-    "composition, generous negative space around subject, limited muted color "
-    "palette with vibrant yellow and red crayon accents, off-white textured "
-    "sketchbook paper background, no gradients, no 3D shading, no photorealism. "
-)
 
 
 class ImageKenBurnsProvider(VideoProvider):

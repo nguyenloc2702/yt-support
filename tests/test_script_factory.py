@@ -64,7 +64,7 @@ class Router:
     def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=(),
                  short_rewrites=False, fail_chunks_above=None, repair_words=None,
                  word_plan=None, repair_echo=False, empty_scene_in_chunks_above=None,
-                 en_word_plan=None):
+                 en_word_plan=None, plain_visual_for=()):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.rewrite_error = rewrite_error
@@ -75,6 +75,8 @@ class Router:
         # word_plan: {absolute scene index: word count} for rewrite output
         self.word_plan = word_plan or {}
         self.en_word_plan = en_word_plan or {}
+        # Scenes whose visual_prompt drops the crayon style (QA S13 regression).
+        self.plain_visual_for = set(plain_visual_for)
         # repair_echo: answer a repair request by echoing the same lines back,
         # i.e. a model that cannot fix the scene. Lets tests see the raw verdict.
         self.repair_echo = repair_echo
@@ -199,7 +201,11 @@ class Router:
                     "voiceover_vi": self._vi_for(items, i),
                     "voiceover_en": self._en_for(items, i),
                     "estimated_duration": 5.0,
-                    "visual_prompt": "Whimsical hand-drawn crayon editorial cartoon",
+                    "visual_prompt": (
+                        "Extreme close-up of a chalkboard with numbers, no photorealistic details"
+                        if self._abs_index(items, i) in self.plain_visual_for
+                        else "Whimsical hand-drawn crayon editorial cartoon"
+                    ),
                 }
                 for i in range(max(0, count))
             ]
@@ -721,3 +727,71 @@ def test_judge_sees_the_whole_script_not_just_the_first_9000_chars(factory, monk
     assert len(prompt) > 9000
     assert "Cảnh 150" in prompt  # last scene survives intact
     assert "Cảnh 150 (5.0s): Cảnh số 150" in prompt
+
+
+def test_trim_to_word_cap_keeps_the_opening_number_and_closing_question():
+    """A 34-word hook line cannot be read in an 8s scene (QA S08/S09)."""
+    line = (
+        "84% tin ngân hàng trung ương tạo tiền. Sai. "
+        "2014, giáo sư Werner bước vào ngân hàng Đức. "
+        "Yêu cầu: Ngồi đây. Theo dõi khoản vay. "
+        "Tiền sinh ra từ hư vô? Thật không?"
+    )
+    capped = sf._trim_to_word_cap(line, 28)
+
+    assert len(capped.split()) <= 28
+    assert capped.startswith("84%")
+    assert capped.endswith("?")
+    assert sf._trim_to_word_cap("Ngắn gọn thôi.", 28) == "Ngắn gọn thôi."
+
+
+def test_hook_window_fit_never_compresses_a_scene_below_its_reading_time():
+    """Fitting the 30s boundary must not invent a 357 WPM read."""
+    scenes_vi = [
+        {"index": i + 1, "text": " ".join(["từ"] * 24), "duration": 8.0}
+        for i in range(4)
+    ]
+    scenes_en = [{"index": i + 1, "text": "short", "duration": 8.0} for i in range(4)]
+
+    acc = sf.ScriptFactory._fit_hook_window(scenes_vi, scenes_en)
+
+    natural = 24 / sf.WORDS_PER_SECOND
+    assert all(sc["duration"] >= natural - 1e-3 for sc in scenes_vi)  # durations round to ms
+    assert acc <= 32.0
+
+
+def test_shot_prompts_leave_the_factory_carrying_the_crayon_look(factory, monkeypatch):
+    """QA S13 rejects a prompt with no crayon keyword or a photoreal phrase."""
+    from services.algorithm_qa import CRAYON_KEYWORDS, PHOTO_KEYWORDS
+
+    router = Router(
+        {"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]}, plain_visual_for={2}
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, _ = factory.run(
+        [{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3, project_dir=None
+    )
+
+    for scene in (*vi, *en):
+        prompt = scene["prompt"].lower()
+        assert any(k in prompt for k in CRAYON_KEYWORDS), scene["prompt"]
+        assert not any(k in prompt for k in PHOTO_KEYWORDS), scene["prompt"]
+
+
+def test_reading_rate_fit_pads_room_left_by_a_capped_scene():
+    """A 30-word scene capped at 8s alone breaks the 210 WPM ceiling."""
+    vi = [
+        {"index": 1, "text": " ".join(["từ"] * 30), "duration": 8.0},
+        {"index": 2, "text": " ".join(["từ"] * 20), "duration": 5.714},
+    ]
+    en = [{"index": 1, "text": "short", "duration": 8.0},
+          {"index": 2, "text": "short", "duration": 5.714}]
+
+    added = sf.ScriptFactory._fit_reading_rate(vi, en)
+
+    dur = sum(sc["duration"] for sc in vi)
+    assert added > 0
+    assert (50 / dur * 60) <= 210.0
+    assert all(4.0 <= sc["duration"] <= 8.0 for sc in vi)
+    assert en[1]["duration"] == vi[1]["duration"]

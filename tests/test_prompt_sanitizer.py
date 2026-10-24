@@ -40,3 +40,26 @@ def test_sanitize_veo_prompt_slang_and_violence():
     assert "put them out of their misery" not in prompt.lower()
     assert "hunted" not in prompt.lower()
     assert "concluded the prolonged standoff" in prompt.lower()
+
+
+def test_ensure_crayon_style_prefixes_prompts_that_lost_the_style():
+    from services.algorithm_qa import CRAYON_KEYWORDS, PHOTO_KEYWORDS
+    from services.prompt_sanitizer import ensure_crayon_style
+
+    styled = ensure_crayon_style("Extreme close-up of a chalkboard with numbers")
+
+    assert any(k in styled.lower() for k in CRAYON_KEYWORDS)
+    assert not any(k in styled.lower() for k in PHOTO_KEYWORDS)
+
+
+def test_ensure_crayon_style_strips_a_negated_photoreal_phrase():
+    from services.algorithm_qa import PHOTO_KEYWORDS
+    from services.prompt_sanitizer import ensure_crayon_style
+
+    styled = ensure_crayon_style(
+        "A whimsical hand-drawn crayon cartoon: dream house, flat 2D, no photorealistic details"
+    )
+
+    assert "no photorealistic" not in styled.lower()
+    assert not any(k in styled.lower() for k in PHOTO_KEYWORDS)
+    assert styled.startswith("A whimsical hand-drawn crayon cartoon")

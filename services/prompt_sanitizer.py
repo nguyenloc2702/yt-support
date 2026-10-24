@@ -85,6 +85,27 @@ SENSITIVE_PATTERNS: List[Tuple[str, str]] = [
 ]
 
 
+# Crayon Style Bible prefix for every still and shot prompt (QA S13).
+CRAYON_STYLE_PREFIX = (
+    "Whimsical hand-drawn editorial cartoon illustration, rough wax crayon and "
+    "colored pencil sketch strokes, grainy paper texture, flat 2D minimalist "
+    "composition, generous negative space around subject, limited muted color "
+    "palette with vibrant yellow and red crayon accents, off-white textured "
+    "sketchbook paper background, no gradients, no 3D shading, no photorealism. "
+)
+_PHOTO_REPLACEMENTS = {
+    "photorealistic": "crayon-textured",
+    "hyperrealistic": "hand-drawn",
+    "photo of": "crayon drawing of",
+    "4k photo": "crayon sketch",
+    "dslr": "crayon sketch",
+}
+_NEGATED_PHOTO = re.compile(
+    r"\bno\s+(?:photorealistic|hyperrealistic|realistic|photo|photography|dslr)\b",
+    re.IGNORECASE,
+)
+
+
 def clean_narration_for_tts(text: str) -> str:
     """Removes subtitle artifacts, VTT metadata headers, sound tags, and bracketed notes for clean TTS voiceover."""
     if not text:
@@ -168,6 +189,26 @@ def sanitize_veo_prompt(
         f"35mm master lens, photorealistic atmospheric depth, dramatic cinematic lighting, silent, no audio."
     )
     return prompt
+
+
+def ensure_crayon_style(prompt: str) -> str:
+    """Guarantee a shot prompt reads as crayon artwork (QA S13).
+
+    The rewrite model sometimes drops the style prefix and sometimes repeats a
+    photoreal phrase while forbidding it ("no photorealistic details"); the
+    scorecard rejects both, so the prompt is normalized before it is stored.
+    """
+    from services.algorithm_qa import CRAYON_KEYWORDS, PHOTO_KEYWORDS
+
+    text = _NEGATED_PHOTO.sub("", prompt or "").strip(" ,.;:")
+    for keyword in sorted(PHOTO_KEYWORDS, key=len, reverse=True):
+        text = re.sub(
+            re.escape(keyword), _PHOTO_REPLACEMENTS[keyword], text, flags=re.IGNORECASE
+        )
+    text = re.sub(r"\s+", " ", text).strip()
+    if text and not any(k in text.lower() for k in CRAYON_KEYWORDS):
+        text = f"{CRAYON_STYLE_PREFIX}{text}"
+    return text
 
 
 def sanitize_filename(name: str, max_length: int = 80) -> str:

@@ -21,6 +21,7 @@ No silent fallbacks: slicing or all-invalid variants raise ScriptFactoryError.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -28,7 +29,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
-from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE
+from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE, WPM_RANGE
+from services.prompt_sanitizer import ensure_crayon_style
 from services.script_auditor import (
     BUDGET_RATIO_FLOOR,
     EN_MAX_WORDS_ALGORITHM,
@@ -156,6 +158,46 @@ def _scene_violations(
     if en_words > EN_MAX_WORDS:
         kinds.append("en_high")
     return tuple(kinds)
+
+
+def _reading_duration(word_count: int) -> float:
+    """Scene seconds for a word count, rounded up to the millisecond.
+
+    Durations are derived from words so a compliant script reads at exactly the
+    plan rate. Rounding down even a little puts the aggregate fractionally above
+    the 210 WPM ceiling QA S08 enforces.
+    """
+    natural = word_count / WORDS_PER_SECOND
+    if natural >= MAX_SCENE_DURATION:
+        return MAX_SCENE_DURATION
+    return max(MIN_SCENE_DURATION, math.ceil(natural * 1000) / 1000)
+
+
+def _trim_to_word_cap(text: str, max_words: int) -> str:
+    """Drop whole sentences until the line fits `max_words`.
+
+    Hook repair overshoots its own 24-28 band; the 8s scene ceiling then forces
+    a >210 WPM read and QA S08 fails. The closing sentence is kept first because
+    it carries the opening question, then earlier sentences are added while they
+    fit, so the paradox at the front survives too.
+    """
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()]
+    if len(sentences) > 1:
+        tail = sentences[-1]
+        head = []
+        budget = max_words - (len(tail.split()) if len(tail.split()) <= max_words else 0)
+        for sentence in sentences[:-1]:
+            size = len(sentence.split())
+            if size <= budget:
+                head.append(sentence)
+                budget -= size
+        kept = head + ([tail] if len(tail.split()) <= max_words else [])
+        if kept:
+            return " ".join(kept)
+    return " ".join(words[:max_words])
 
 
 def _beat(on_progress: Optional[Callable[[], None]]) -> None:
@@ -441,12 +483,25 @@ class ScriptFactory:
         expansion = self._expand_toward_target(
             best.angle, vi, en, transcript_text, target_duration, on_progress
         )
+        # QA S13 keys off crayon keywords, and the rewrite model drops the style
+        # prefix on some scenes and repeats "photorealistic" even when forbidding
+        # it. Normalize once here so every stored shot prompt carries the look.
+        restyled = 0
+        for scene in (*vi, *en):
+            before = str(scene.get("prompt", ""))
+            after = ensure_crayon_style(before)
+            if after != before:
+                scene["prompt"] = after
+                restyled += 1
+        padded = self._fit_reading_rate(vi, en)
         best.metrics = self._mechanical_metrics(vi)
         logger.info(
-            "Post-repairs: hook=%s callback=%s expansion=%s",
+            "Post-repairs: hook=%s callback=%s expansion=%s restyled_prompts=%d padded_sec=%.2f",
             {k: hook.get(k) for k in ("word_counts", "duration_acc", "ok")},
             {k: callback.get(k) for k in ("ok", "has_close")},
             {k: expansion.get(k) for k in ("calls", "final_duration_sec", "final_drift")},
+            restyled,
+            padded,
         )
         return {"hook": hook, "callback": callback, "duration_expansion": expansion}
 
@@ -547,10 +602,7 @@ class ScriptFactory:
                 text_en = str(rec.get("voiceover_en", "")).strip()
                 if text_vi:
                     scenes_vi[pos]["text"] = text_vi
-                    dur = max(
-                        MIN_SCENE_DURATION,
-                        min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
-                    )
+                    dur = _reading_duration(len(text_vi.split()))
                     scenes_vi[pos]["duration"] = dur
                     scenes_en[pos]["duration"] = dur
                 if text_en:
@@ -562,6 +614,20 @@ class ScriptFactory:
                 f"{HOOK_TARGET_WORDS[0]}-{HOOK_TARGET_WORDS[1]}.\n\n"
             )
 
+        # The repair loop above accepts whatever the model last returned. A
+        # 34-word line cannot be read inside the 8s scene ceiling, so cap the
+        # four hook scenes deterministically before fitting the 30s window.
+        trimmed = 0
+        for i in range(HOOK_SCENE_COUNT):
+            text = str(scenes_vi[i].get("text", ""))
+            capped = _trim_to_word_cap(text, HOOK_MAX_WORDS)
+            if capped != text:
+                scenes_vi[i]["text"] = capped
+                dur = _reading_duration(len(capped.split()))
+                scenes_vi[i]["duration"] = dur
+                scenes_en[i]["duration"] = dur
+                trimmed += 1
+
         if not self._hook_compliant(scenes_vi):
             logger.warning(
                 "Hook repair left counts %s (target %s, total %s)",
@@ -571,10 +637,45 @@ class ScriptFactory:
         return {
             "applicable": True,
             "calls": calls,
+            "trimmed": trimmed,
             "word_counts": self._hook_counts(scenes_vi),
             "duration_acc": round(acc, 2),
             "ok": self._hook_compliant(scenes_vi) and acc <= 32.0,
         }
+
+    @staticmethod
+    def _fit_reading_rate(
+        scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]]
+    ) -> float:
+        """Stretch placeholder durations until the aggregate rate clears S08.
+
+        A scene over the word window is capped at 8s, which on its own pushes the
+        whole script above the 210 WPM ceiling. Durations are planning
+        placeholders (Gate 2 re-derives them from real speech), so the missing
+        seconds go to scenes that still have room inside the 4-8s window.
+        """
+        words = sum(len(str(sc.get("text", "")).split()) for sc in scenes_vi)
+        total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
+        if not words or not total:
+            return 0.0
+        needed = words * 60.0 / WPM_RANGE[1] - total
+        added = 0.0
+        for i, scene in enumerate(scenes_vi):
+            if needed - added <= 0.0005:
+                break
+            current = float(scene.get("duration", 0.0))
+            headroom = MAX_SCENE_DURATION - current
+            if headroom <= 0:
+                continue
+            stretched = min(
+                MAX_SCENE_DURATION,
+                math.ceil((current + min(headroom, needed - added)) * 1000) / 1000,
+            )
+            scene["duration"] = stretched
+            if i < len(scenes_en):
+                scenes_en[i]["duration"] = stretched
+            added += stretched - current
+        return round(added, 3)
 
     @staticmethod
     def _fit_hook_window(
@@ -596,7 +697,10 @@ class ScriptFactory:
                 break
             current = float(scenes_vi[i].get("duration", 0.0))
             if delta > 0:
-                new_dur = max(MIN_SCENE_DURATION, current - delta)
+                # Never squeeze a scene below the time its words need: 24 words
+                # in 4s is a 357 WPM read, and the aggregate then breaks S08.
+                natural = _reading_duration(len(str(scenes_vi[i].get("text", "")).split()))
+                new_dur = min(current, max(natural, current - delta))
             else:
                 new_dur = min(MAX_SCENE_DURATION, current - delta)
             delta -= current - new_dur
@@ -654,10 +758,7 @@ class ScriptFactory:
                 text_en = str(rec.get("voiceover_en", "")).strip()
                 if text_vi:
                     last["text"] = text_vi
-                    dur = max(
-                        MIN_SCENE_DURATION,
-                        min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
-                    )
+                    dur = _reading_duration(len(text_vi.split()))
                     last["duration"] = dur
                     scenes_en[-1]["duration"] = dur
                 if text_en:
@@ -787,10 +888,7 @@ class ScriptFactory:
             text_en = str(rec.get("voiceover_en", "")).strip()
             if text_vi:
                 scenes_vi[pos]["text"] = text_vi
-                dur = max(
-                    MIN_SCENE_DURATION,
-                    min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
-                )
+                dur = _reading_duration(len(text_vi.split()))
                 scenes_vi[pos]["duration"] = dur
                 scenes_en[pos]["duration"] = dur
                 updated += 1
@@ -874,10 +972,7 @@ class ScriptFactory:
                     text_en = str(rec.get("voiceover_en", "")).strip()
                     if text_vi:
                         vi["text"] = text_vi
-                        dur = max(
-                            MIN_SCENE_DURATION,
-                            min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
-                        )
+                        dur = _reading_duration(len(text_vi.split()))
                         vi["duration"] = dur
                         en["duration"] = dur
                     if text_en:
@@ -1012,10 +1107,7 @@ class ScriptFactory:
                     f"scene {chunk_start + i + 1} returned an empty voiceover_vi"
                 )
             text_en = str(sc.get("voiceover_en", "") or text_vi).strip()
-            dur = max(
-                MIN_SCENE_DURATION,
-                min(len(text_vi.split()) / WORDS_PER_SECOND, MAX_SCENE_DURATION),
-            )
+            dur = _reading_duration(len(text_vi.split()))
             prompt = str(sc.get("visual_prompt", "")).strip() or str(base.get("prompt", "")).strip()
             vi_out.append({
                 "index": chunk_start + i + 1,
