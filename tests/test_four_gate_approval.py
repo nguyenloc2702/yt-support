@@ -726,3 +726,81 @@ def test_audio_tolerance_uses_shots_plan_baseline_not_beat_placeholder(test_env)
     ])
     ok, errs = asm.approve_audio("vi", approver="lead_editor")
     assert ok is True, errs
+
+
+# =============================================================================
+# TEST I: LOST-UPDATE SAFETY (stale instances must not clobber fresh writes)
+# =============================================================================
+
+def _setup_approved_script(p_dir: Path, job_id: str) -> None:
+    beats = [
+        BeatIntent(id=1, text_vi="Câu một.", text_en="Sentence one.", duration=4.75),
+        BeatIntent(id=2, text_vi="Câu hai.", text_en="Sentence two.", duration=4.75),
+    ]
+    asm = ApprovalStateMachine(p_dir, job_id)
+    asm.set_script(
+        script_vi="Câu một. Câu hai.",
+        script_en="Sentence one. Sentence two.",
+        beats=beats,
+        required_characters=["Richard Werner"],
+    )
+    ok, errs = asm.approve_script("tester")
+    assert ok is True, errs
+
+
+def test_stale_audio_write_does_not_clobber_character_reference(tmp_path: Path):
+    """Regression: EN audio save (10:39) erased the 10:32 character reference."""
+    p_dir = tmp_path / "proj"
+    job_id = "job_race_ref"
+    _setup_approved_script(p_dir, job_id)
+
+    # asm_b snapshots the state BEFORE the character reference is written,
+    # exactly like the long-lived audio ASM instance in the factory.
+    asm_b = ApprovalStateMachine(p_dir, job_id)
+
+    asm_a = ApprovalStateMachine(p_dir, job_id)
+    char_dir = p_dir / "characters" / "richard_werner"
+    char_dir.mkdir(parents=True)
+    ref = char_dir / "reference.png"
+    ref.write_bytes(b"\x89PNG" + b"\x00" * 200)
+    asm_a.set_character_reference("richard_werner", ref)
+
+    audio = p_dir / "audio_vi_full.mp3"
+    audio.write_bytes(b"ID3" + b"\x00" * 200)
+    asm_b.set_audio_generated("vi", audio, 30.0, "vi-VN-NamMinhNeural")
+
+    fresh = ApprovalStateMachine(p_dir, job_id)
+    ref_path = fresh.characters["richard_werner"].reference_image_path
+    assert ref_path, "character reference was clobbered by the stale audio write"
+    assert Path(ref_path).is_file()
+    assert fresh.audio_vi.status == AudioStatus.GENERATED
+
+
+def test_character_approval_survives_stale_audio_write(tmp_path: Path):
+    """Regression: a stale audio save must not un-approve an approved character."""
+    p_dir = tmp_path / "proj"
+    job_id = "job_race_appr"
+    _setup_approved_script(p_dir, job_id)
+
+    asm_a = ApprovalStateMachine(p_dir, job_id)
+    char_dir = p_dir / "characters" / "richard_werner"
+    char_dir.mkdir(parents=True)
+    ref = char_dir / "reference.png"
+    ref.write_bytes(b"\x89PNG" + b"\x00" * 200)
+    asm_a.set_character_reference("richard_werner", ref)
+
+    # asm_b snapshots BEFORE the reference existed; the atomic reload inside
+    # approve_character must still see it.
+    asm_b = ApprovalStateMachine(p_dir, job_id)
+    ok, errs = asm_b.approve_character("richard_werner", "tester")
+    assert ok is True, errs
+
+    # asm_c snapshots BEFORE the approval; its audio write must not undo it.
+    asm_c = ApprovalStateMachine(p_dir, job_id)
+    audio = p_dir / "audio_vi_full.mp3"
+    audio.write_bytes(b"ID3" + b"\x00" * 200)
+    asm_c.set_audio_generated("vi", audio, 30.0, "vi-VN-NamMinhNeural")
+
+    fresh = ApprovalStateMachine(p_dir, job_id)
+    assert fresh.characters["richard_werner"].status == CharacterStatus.APPROVED
+    assert fresh.audio_vi.status == AudioStatus.GENERATED

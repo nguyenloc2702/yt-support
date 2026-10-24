@@ -18,6 +18,7 @@ Quy tắc cốt lõi:
 import contextlib
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+import functools
 import hashlib
 import json
 import logging
@@ -28,6 +29,26 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("approval_state_machine")
+
+
+def _atomic_mutator(method):
+    """Runs a state mutator as reload -> mutate -> write under one lock scope.
+
+    Gate 2/3 writers hold ASM instances for minutes (audio synthesis, audits)
+    while other instances and the bot process mutate the same file; without
+    the reload, a stale in-memory snapshot overwrites those writes on save.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        lock_file = self.project_dir / "approval_state.lock"
+        with file_lock(lock_file):
+            self._read_state_unlocked()
+            result = method(self, *args, **kwargs)
+            self._write_state_unlocked()
+            return result
+
+    return wrapper
 
 
 @contextlib.contextmanager
@@ -404,10 +425,14 @@ class ApprovalStateMachine:
         self.project_dir.mkdir(parents=True, exist_ok=True)
         lock_file = self.project_dir / "approval_state.lock"
         with file_lock(lock_file):
-            temp_file = self.project_dir / f"approval_state_{time.time_ns()}.tmp"
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
-            temp_file.replace(self.state_file)
+            return self._write_state_unlocked()
+
+    def _write_state_unlocked(self) -> Path:
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = self.project_dir / f"approval_state_{time.time_ns()}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        temp_file.replace(self.state_file)
         return self.state_file
 
     def load(self) -> bool:
@@ -415,9 +440,14 @@ class ApprovalStateMachine:
         if not self.state_file.exists():
             return False
         lock_file = self.project_dir / "approval_state.lock"
+        with file_lock(lock_file):
+            return self._read_state_unlocked()
+
+    def _read_state_unlocked(self) -> bool:
         try:
-            with file_lock(lock_file):
-                data = json.loads(self.state_file.read_text(encoding="utf-8"))
+            if not self.state_file.exists():
+                return False
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
             sg = data.get("script_gate", {})
             self.script_version = int(sg.get("version", 1))
             self.script_status_vi = ScriptStatus(sg.get("status_vi", ScriptStatus.DRAFT.value))
@@ -606,6 +636,7 @@ class ApprovalStateMachine:
     # GATE 2: AUDIO APPROVAL (VI / EN)
     # -------------------------------------------------------------------------
 
+    @_atomic_mutator
     def set_audio_generated(
         self,
         language: str,
@@ -633,9 +664,9 @@ class ApprovalStateMachine:
 
         # Reset video readiness
         self._reset_video_readiness(reason=f"Audio {lang.upper()} regenerated")
-        self.save()
         return True
 
+    @_atomic_mutator
     def approve_audio(self, language: str, approver: str = "user") -> Tuple[bool, List[str]]:
         """Approves audio for a specific language (VI or EN)."""
         lang = language.lower().strip()
@@ -677,16 +708,15 @@ class ApprovalStateMachine:
                     )
 
         if errors:
-            self.save()
             return False, errors
 
         track.status = AudioStatus.APPROVED
         track.approved_at = time.time()
         track.approver = approver
         logger.info("Audio %s approved by %s for job %s", lang.upper(), approver, self.job_id)
-        self.save()
         return True, []
 
+    @_atomic_mutator
     def reject_audio(self, language: str, reason: str = "Rejected", approver: str = "user") -> Tuple[bool, List[str]]:
         """Rejects audio for a specific language."""
         lang = language.lower().strip()
@@ -697,7 +727,6 @@ class ApprovalStateMachine:
         track.rejection_reason = reason
         track.approver = approver
         self._reset_video_readiness(reason=f"Audio {lang.upper()} rejected")
-        self.save()
         return True, []
 
     def is_audio_gate_passed(self) -> bool:
@@ -748,6 +777,7 @@ class ApprovalStateMachine:
         self.save()
         return char
 
+    @_atomic_mutator
     def set_character_reference(self, char_id: str, image_path: Path):
         """Sets the canonical reference image for a character."""
         cid = char_id.lower().replace(" ", "_")
@@ -764,8 +794,8 @@ class ApprovalStateMachine:
         char.script_version = self.script_version
 
         self._reset_video_readiness(reason=f"Character {cid} reference updated")
-        self.save()
 
+    @_atomic_mutator
     def approve_character(self, char_id: str, approver: str = "user") -> Tuple[bool, List[str]]:
         """Approves a single character's canonical reference sheet."""
         cid = char_id.lower().replace(" ", "_")
@@ -784,14 +814,12 @@ class ApprovalStateMachine:
                 errors.append(f"Ảnh tham chiếu của '{char.name}' bị rỗng hoặc hỏng.")
 
         if errors:
-            self.save()
             return False, errors
 
         char.status = CharacterStatus.APPROVED
         char.approved_at = time.time()
         char.approver = approver
         logger.info("Character %s approved by %s for job %s", cid, approver, self.job_id)
-        self.save()
         return True, []
 
     def approve_all_characters(self, approver: str = "user") -> Tuple[bool, List[str]]:
@@ -807,6 +835,7 @@ class ApprovalStateMachine:
             return False, all_errors
         return True, []
 
+    @_atomic_mutator
     def reject_character(self, char_id: str, reason: str = "Rejected", approver: str = "user"):
         """Rejects a character's reference image."""
         cid = char_id.lower().replace(" ", "_")
@@ -815,7 +844,6 @@ class ApprovalStateMachine:
             self.characters[cid].rejection_reason = reason
             self.characters[cid].approver = approver
             self._reset_video_readiness(reason=f"Character {cid} rejected")
-            self.save()
 
     def is_character_gate_passed(self) -> bool:
         """Gate 3 passes when all non-optional required characters have approved valid reference images."""
@@ -857,11 +885,11 @@ class ApprovalStateMachine:
     # GATE 4: VIDEO READINESS & GENERATION MANIFEST
     # -------------------------------------------------------------------------
 
+    @_atomic_mutator
     def set_shots_plan(self, shots: List[Dict[str, Any]]):
         """Sets the shot plan for the video."""
         self.shots_plan = shots
         self._reset_video_readiness(reason="Shots plan updated")
-        self.save()
 
     def check_video_readiness(self, algorithm_mode: bool = False) -> Tuple[bool, List[str], List[str]]:
         """
