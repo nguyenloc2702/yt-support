@@ -163,11 +163,10 @@ def test_long_xkiro_failure_falls_back_whole_track(tmp_path, monkeypatch):
     monkeypatch.setattr(
         tts, "_concat_audio_parts", lambda parts, out: out.write_bytes(b"joined")
     )
-    edge = {}
+    edge_calls = []
 
     def fake_edge(text, voice, out):
-        edge["voice"] = voice
-        edge["len"] = len(text)
+        edge_calls.append((voice, len(text)))
         out.write_bytes(b"edge")
 
     monkeypatch.setattr(tts, "_edge_tts_save", fake_edge)
@@ -178,8 +177,10 @@ def test_long_xkiro_failure_falls_back_whole_track(tmp_path, monkeypatch):
     )
 
     assert used == "vi-VN-NamMinhNeural"
-    assert edge["len"] == len(text)
-    assert (tmp_path / "out.mp3").read_bytes() == b"edge"
+    # The fallback re-synthesizes per sentence, then joins the track.
+    assert len(edge_calls) == 500
+    assert edge_calls[0] == ("vi-VN-NamMinhNeural", len("Câu số 0 nói về dòng tiền."))
+    assert (tmp_path / "out.mp3").read_bytes() == b"joined"
 
 
 def test_rate_fit_slows_fast_narration_in_place(tmp_path, monkeypatch):
@@ -484,7 +485,7 @@ def test_rate_fit_targets_documentary_pace_for_english_voices(tmp_path, monkeypa
     assert audio_vi.read_bytes() == b"vi"
 
 
-def test_full_narration_synthesizes_line_by_line_with_fixed_breaths(tmp_path, monkeypatch):
+def test_full_narration_synthesizes_sentence_by_sentence_with_fixed_breaths(tmp_path, monkeypatch):
     import pipeline.tts as tts
 
     line_texts = []
@@ -505,15 +506,17 @@ def test_full_narration_synthesizes_line_by_line_with_fixed_breaths(tmp_path, mo
     )
 
     out = tmp_path / "full.mp3"
-    tts._edge_tts_save_natural("Cản một.\nCảnh hai.\nCảnh ba.", "vi-VN-NamMinhNeural", out)
+    tts._edge_tts_save_natural("Cảnh một.\nCảnh hai. Cảnh hai rưỡi nhé.\nCảnh ba.", "vi-VN-NamMinhNeural", out)
 
-    assert line_texts == ["Cản một.", "Cảnh hai.", "Cảnh ba."]
+    assert line_texts == ["Cảnh một.", "Cảnh hai.", "Cảnh hai rưỡi nhé.", "Cảnh ba."]
+    # 0.6s paragraph breaks between lines, 0.35s breath inside the middle line.
     assert concat_lists == [[
-        "line_000.mp3", "pause.mp3", "line_001.mp3", "pause.mp3", "line_002.mp3",
+        "line_000.mp3", "pause_para.mp3", "line_001.mp3", "pause.mp3",
+        "line_002.mp3", "pause_para.mp3", "line_003.mp3",
     ]]
     assert out.read_bytes() == b"joined"
 
-    # Single line: no parts ceremony, one direct save.
+    # Single sentence: no parts ceremony, one direct save.
     single = tmp_path / "one.mp3"
     line_texts.clear()
     concat_lists.clear()
@@ -521,6 +524,62 @@ def test_full_narration_synthesizes_line_by_line_with_fixed_breaths(tmp_path, mo
     assert line_texts == ["Chỉ một dòng."]
     assert concat_lists == []
     assert single.read_bytes() == b"line"
+
+
+def test_narration_units_keep_decimal_numbers_whole():
+    import pipeline.tts as tts
+
+    units = tts._narration_units("Năm 2014 ngân hàng Đức duyệt 10.000 euro. Tiền sinh ra không dấu vết.")
+    texts = [t for t, _ in units]
+    assert texts == ["Năm 2014 ngân hàng Đức duyệt 10.000 euro.", "Tiền sinh ra không dấu vết."]
+    assert units[0][1] == tts.FULL_NARRATION_PAUSE_SEC
+    assert units[-1][1] == 0.0
+
+
+def test_edge_save_trims_room_tone_off_both_ends(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    out = tmp_path / "utt.mp3"
+    out.write_bytes(b"raw")
+    calls = []
+
+    def fake_ffmpeg(args):
+        calls.append(args)
+        Path(args[-1]).write_bytes(b"trimmed")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", fake_ffmpeg)
+
+    def fake_run(coro):
+        coro.close()
+
+    monkeypatch.setattr(tts.asyncio, "run", fake_run)
+
+    tts._edge_tts_save("Câu hỏi?", "vi-VN-NamMinhNeural", out)
+
+    assert out.read_bytes() == b"trimmed"
+    af = calls[0][calls[0].index("-af") + 1]
+    assert af.count("silenceremove") == 2 and af.count("areverse") == 2
+    assert not out.with_name("utt.trim.mp3").exists()
+
+
+def test_edge_save_retries_then_raises_rendererror(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    out = tmp_path / "utt.mp3"
+    attempts = []
+
+    def failing_run(coro):
+        coro.close()
+        attempts.append(1)
+        raise RuntimeError("No audio was received.")
+
+    monkeypatch.setattr(tts.asyncio, "run", failing_run)
+    monkeypatch.setattr(tts.time, "sleep", lambda s: None)
+
+    with pytest.raises(tts.RenderError, match="3 attempts"):
+        tts._edge_tts_save("Text.", "en-US-ChristopherNeural", out)
+    assert len(attempts) == tts.EDGE_TTS_RETRIES
+    assert not out.exists()
 
 
 def test_rate_fit_caps_speedup_at_naturalness_limit(tmp_path, monkeypatch):

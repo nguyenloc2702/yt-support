@@ -78,6 +78,14 @@ XKIRO_TO_EDGE = {
     "announcer": "en-US-GuyNeural",
 }
 
+EDGE_TO_XKIRO = {
+    "vi-VN-NamMinhNeural": "confident-male-vietnamese",
+    "vi-VN-HoaiMyNeural": "sweet-female-vietnamese",
+    "en-US-GuyNeural": "male-voice",
+    "en-US-JennyNeural": "female-voice",
+    "en-US-ChristopherNeural": "deep-male",
+}
+
 
 def is_xkiro_voice(voice_id: str) -> bool:
     """Returns True if voice_id belongs to xKiro catalog."""
@@ -117,10 +125,12 @@ MIN_ATEMPO = 0.75
 # ~360 WPM articulation with 0.6s pauses left over — machine-gun bursts.
 FIT_MAX_ATEMPO = 1.35
 MIN_WORDS_FOR_RATE_FIT = 8
-# Inter-line gap for full narration. edge-tts hangs ~0.6-1.0s of silence on
-# every newline (measured 48% silence on the owner's rejected audio), so lines
-# are synthesized separately and joined with this fixed breath instead.
+# Inter-sentence gaps for full narration. edge-tts hangs ~0.6-1.0s of silence
+# after every sentence AND every newline (measured 48-50% silence on the
+# owner's rejected audio), so narration is synthesized per sentence and joined
+# with these fixed breaths: 0.35s inside a paragraph, 0.6s at a line break.
 FULL_NARRATION_PAUSE_SEC = 0.35
+PARAGRAPH_NARRATION_PAUSE_SEC = 0.6
 
 
 def _wpm_band(voice_id: str) -> tuple[float, float, float]:
@@ -341,6 +351,9 @@ def _fit_narration_rate(text: str, audio_path: Path, voice_id: str = "vi-VN") ->
     return native_wpm
 
 
+EDGE_TTS_RETRIES = 3
+
+
 def _edge_tts_save(text: str, edge_voice: str, out_path: Path) -> None:
     async def _edge() -> None:
         import edge_tts
@@ -348,7 +361,19 @@ def _edge_tts_save(text: str, edge_voice: str, out_path: Path) -> None:
         comm = edge_tts.Communicate(text, edge_voice)
         await comm.save(str(out_path))
 
-    asyncio.run(_edge())
+    last_exc: Exception | None = None
+    for attempt in range(EDGE_TTS_RETRIES):
+        try:
+            asyncio.run(_edge())
+            if out_path.is_file() and out_path.stat().st_size > 0:
+                _trim_edge_silence(out_path)
+                return
+            last_exc = RenderError(f"edge-tts produced an empty file for {edge_voice}")
+        except Exception as exc:  # noqa: BLE001 - edge-tts raises assorted errors
+            last_exc = exc
+        out_path.unlink(missing_ok=True)
+        time.sleep(0.8 * (attempt + 1))
+    raise RenderError(f"edge-tts failed after {EDGE_TTS_RETRIES} attempts: {last_exc}")
 
 
 def _make_silence_mp3(duration: float, out_path: Path) -> None:
@@ -361,15 +386,62 @@ def _make_silence_mp3(duration: float, out_path: Path) -> None:
     )
 
 
-def _edge_tts_save_natural(text: str, edge_voice: str, out_path: Path) -> None:
-    """Synthesize line-by-line and join with a fixed breath.
+def _trim_edge_silence(audio: Path) -> None:
+    """Strip the room tone edge-tts pads onto the ends of every utterance.
 
-    edge-tts hangs 0.6-1.0s of room tone on every newline (measured 48% silence
-    on the audio the owner rejected); synthesizing each line and concatenating
-    with FULL_NARRATION_PAUSE_SEC keeps the rhythm in the code's hands.
+    edge-tts bakes ~0.5-1.0s of trailing (and sometimes leading) silence into
+    each saved utterance; joined untrimmed it reproduces the 50%+ dead air even
+    when the inter-sentence gaps are code-controlled. Both ends are trimmed to
+    a 0.05s pad via silenceremove + areverse.
     """
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) <= 1:
+    from pipeline.ffmpeg import run_ffmpeg
+
+    trimmed = audio.with_name(f"{audio.stem}.trim.mp3")
+    keep = "start_periods=1:start_silence=0.05:start_threshold=-45dB"
+    run_ffmpeg(
+        ["-i", str(audio), "-af",
+         f"silenceremove={keep},areverse,silenceremove={keep},areverse",
+         "-c:a", "libmp3lame", "-q:a", "2", str(trimmed)]
+    )
+    if trimmed.is_file() and trimmed.stat().st_size > 0:
+        trimmed.replace(audio)
+    else:
+        trimmed.unlink(missing_ok=True)
+
+
+def _narration_units(text: str) -> list[tuple[str, float]]:
+    """Split narration into sentence units, each tagged with the pause AFTER it.
+
+    edge-tts hangs 0.6-1.0s of room tone after every sentence AND every newline
+    (measured 48-50% silence on the audio the owner rejected), so the only way
+    to own the rhythm is to synthesize per sentence and join with fixed breaths:
+    FULL_NARRATION_PAUSE_SEC between sentences, PARAGRAPH_NARRATION_PAUSE_SEC
+    at the script's own line breaks.
+    """
+    import re
+
+    units: list[tuple[str, float]] = []
+    paragraphs = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for p_idx, para in enumerate(paragraphs):
+        sentences = re.split(r"(?<=[.!?…])\s+", para)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        for s_idx, sentence in enumerate(sentences):
+            last_of_para = s_idx == len(sentences) - 1
+            last_overall = last_of_para and p_idx == len(paragraphs) - 1
+            if last_overall:
+                pause = 0.0
+            elif last_of_para:
+                pause = PARAGRAPH_NARRATION_PAUSE_SEC
+            else:
+                pause = FULL_NARRATION_PAUSE_SEC
+            units.append((sentence, pause))
+    return units
+
+
+def _edge_tts_save_natural(text: str, edge_voice: str, out_path: Path) -> None:
+    """Synthesize sentence-by-sentence and join with fixed breaths."""
+    units = _narration_units(text)
+    if len(units) <= 1:
         _edge_tts_save(text, edge_voice, out_path)
         return
     import shutil
@@ -379,15 +451,17 @@ def _edge_tts_save_natural(text: str, edge_voice: str, out_path: Path) -> None:
     parts_dir = out_path.parent / f".edge_parts_{uuid.uuid4().hex[:8]}"
     parts_dir.mkdir(parents=True, exist_ok=True)
     try:
-        silence = parts_dir / "pause.mp3"
-        _make_silence_mp3(FULL_NARRATION_PAUSE_SEC, silence)
+        breath = parts_dir / "pause.mp3"
+        _make_silence_mp3(FULL_NARRATION_PAUSE_SEC, breath)
+        para_break = parts_dir / "pause_para.mp3"
+        _make_silence_mp3(PARAGRAPH_NARRATION_PAUSE_SEC, para_break)
         parts: list[Path] = []
-        for i, line in enumerate(lines):
+        for i, (sentence, pause_after) in enumerate(units):
             part = parts_dir / f"line_{i:03d}.mp3"
-            _edge_tts_save(line, edge_voice, part)
+            _edge_tts_save(sentence, edge_voice, part)
             parts.append(part)
-            if i < len(lines) - 1:
-                parts.append(silence)
+            if pause_after > 0:
+                parts.append(breath if pause_after == FULL_NARRATION_PAUSE_SEC else para_break)
         _concat_audio_parts(parts, out_path)
     finally:
         shutil.rmtree(parts_dir, ignore_errors=True)
@@ -464,7 +538,18 @@ def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path)
     directly through edge-tts — no gateway call is spent probing it.
     """
     if is_edge_voice(voice_id):
-        _edge_tts_save_natural(text, voice_id, out_path)
+        try:
+            _edge_tts_save_natural(text, voice_id, out_path)
+        except Exception as exc:
+            edge_voice = EDGE_TO_XKIRO.get(voice_id)
+            if not edge_voice:
+                raise
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "edge-tts failed for voice '%s' (%s) — falling back to xKiro '%s'",
+                voice_id, exc, edge_voice,
+            )
+            synthesize_one_xkiro(text, edge_voice, out_path)
         _fit_narration_rate(text, out_path, voice_id)
         return voice_id
     if len(text.strip()) > XKIRO_TTS_MAX_CHARS:
