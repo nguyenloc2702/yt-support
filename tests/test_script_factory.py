@@ -85,6 +85,7 @@ class Router:
         self.hook_calls = 0
         self.callback_calls = 0
         self.judge_calls = 0
+        self.judge_prompts = []
         self.rewrite_calls = 0
 
     def __call__(self, system_prompt, user_prompt, **kw):
@@ -154,6 +155,7 @@ class Router:
         if "Chấm kịch bản" in system_prompt:
             round_idx = self.judge_calls // len(self.score_plan)
             self.judge_calls += 1
+            self.judge_prompts.append(user_prompt)
             labels = [
                 ("analyst", "Nhà phân tích"),
                 ("dramatist", "Dramatist"),
@@ -691,3 +693,31 @@ def test_on_progress_heartbeats_while_the_script_is_being_written(factory, monke
 
     assert len(beats) >= 6  # at least one beat per rewrite chunk of every variant
     assert sf._beat(None) is None  # heartbeat must tolerate no callback
+
+
+def test_judge_sees_the_whole_script_not_just_the_first_9000_chars(factory, monkeypatch):
+    """Rubric items 2 (open loops) and 7 (callback) live in the ending.
+
+    The old prompt cut the script at 9000 chars; a 173-scene script is ~17k, so
+    the judge scored the back half blind and its breakdown could not sum to its
+    score (observed: 8.8 vs 7.8).
+    """
+    router = Router({"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    scenes = [
+        {
+            "index": i + 1,
+            "text": f"Cảnh số {i + 1} kể về dòng tiền guilders và hậu quả khó tin của nó.",
+            "duration": 5.0,
+        }
+        for i in range(150)
+    ]
+    variant = sf.Variant(angle=sf.VARIANT_ANGLES[0], scenes_vi=scenes, valid=True)
+
+    factory._judge(variant, TRANSCRIPT)
+
+    prompt = router.judge_prompts[0]
+    assert len(prompt) > 9000
+    assert "Cảnh 150" in prompt  # last scene survives intact
+    assert "Cảnh 150 (5.0s): Cảnh số 150" in prompt

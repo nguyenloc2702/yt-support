@@ -736,7 +736,12 @@ class AutomatedFactory:
                 shots_en_file.write_text(json.dumps(en_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
 
                 from services.script_auditor import ScriptAuditor
-                audit_res = ScriptAuditor(algorithm_mode=True).audit_script("\n".join(s.get("text", "") for s in shots))
+                # target_scenes must be the count this run actually planned, or
+                # the audit's length cap (target + 20) rejects the factory's own
+                # output on long videos.
+                audit_res = ScriptAuditor(
+                    target_scenes=target_shots, algorithm_mode=True
+                ).audit_script("\n".join(s.get("text", "") for s in shots))
 
             # Character detection across scripts — LLM-based (replaces regex that
             # flooded fake characters). Raises on gateway failure (no silent fakes).

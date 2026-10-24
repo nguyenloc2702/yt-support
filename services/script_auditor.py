@@ -55,6 +55,10 @@ MAX_WORDS_PER_SHOT_ALGORITHM = GENERATED_WORD_WINDOW[1]
 # than VI. Shared by the slicer prompt and the factory's rewrite prompts.
 EN_MAX_WORDS_ALGORITHM = 16
 TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
+# Share of scenes allowed outside the word window. The factory gate and the
+# Gate 1 audit must agree, or a script the factory accepted gets rejected one
+# step later for the same outlier.
+BUDGET_RATIO_FLOOR = 0.95
 
 # Voice mapping defaults — xKiro-first (Phase 1). All VI voices and EN narration
 # go through the xKiro gateway (`xkiro-voice` TTS model); edge-tts is only an
@@ -330,6 +334,26 @@ class ScriptAuditor:
                 scenes.append(bundle)
         return scenes
 
+    @staticmethod
+    def _scene_marker(line: str, pattern: re.Pattern) -> Optional[re.Match]:
+        """Accept a scene prefix only when it is decorated ("Cảnh 3:", "[CẢNH 3]", "3.").
+
+        The pattern's keywords and brackets are all optional, so a bare "84% …"
+        matches it too. Treating that as a marker split a 173-line narration into
+        6 scenes of several hundred words and failed the Gate 1 audit.
+        """
+        m = pattern.match(line)
+        if not m:
+            return None
+        prefix = m.group(0).strip()
+        if re.fullmatch(r"\d+", prefix):
+            return None  # "84% tin …": a number in the narration, not a scene.
+        if re.fullmatch(r"\d{4,}[.)]", prefix):
+            return None  # "2014. …" is prose; scenes are numbered 1-3 digits.
+        if line[m.end():m.end() + 1].isdigit():
+            return None  # "10.000 đô la": the prefix is a decimal, not "scene 10."
+        return m
+
     def parse_raw_script(self, raw_text: str) -> List[str]:
         """
         Parses raw text into individual scene narrations.
@@ -368,8 +392,8 @@ class ScriptAuditor:
                 if started:
                     if l_str.startswith("===") or "TOÀN BỘ LỜI THOẠI" in l_str.upper():
                         break
-                    m = scene_prefix_pattern.match(l_str)
-                    if m and m.group(0).strip():
+                    m = self._scene_marker(l_str, scene_prefix_pattern)
+                    if m:
                         content = l_str[m.end():].strip()
                         scenes.append(content)
                     elif l_str:
@@ -395,12 +419,12 @@ class ScriptAuditor:
             return []
 
         # 4. Fallback numbered lines or freeform text
-        has_numbered_scenes = any(scene_prefix_pattern.match(l) for l in lines)
+        has_numbered_scenes = any(self._scene_marker(l, scene_prefix_pattern) for l in lines)
         scenes: List[str] = []
         if has_numbered_scenes:
             for l in lines:
-                m = scene_prefix_pattern.match(l)
-                if m and m.group(0).strip():
+                m = self._scene_marker(l, scene_prefix_pattern)
+                if m:
                     content = l[m.end():].strip()
                     scenes.append(content)
                 else:
@@ -494,6 +518,16 @@ class ScriptAuditor:
                 "is_key_scene": True,
                 "word_count": word_count,
             })
+
+        # Algorithm mode applies the same predicate the script factory already
+        # enforced: a tolerated tail of outliers is not a blocker. An absolute
+        # per-scene check here would reject at Gate 1 a script the factory
+        # accepted, for the very outlier the ratio rule allows.
+        if self.algorithm_mode and num_scenes:
+            offenders = len(too_long_scenes) + len(too_short_scenes)
+            if (num_scenes - offenders) / num_scenes >= BUDGET_RATIO_FLOOR:
+                too_long_scenes = []
+                too_short_scenes = []
 
         if too_long_scenes:
             max_words_display = self.max_words_per_shot

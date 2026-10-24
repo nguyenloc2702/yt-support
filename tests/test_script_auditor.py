@@ -331,3 +331,75 @@ def test_slicer_prompt_states_the_derived_budget_not_a_hardcoded_one(monkeypatch
     assert f"MỖI cảnh {lo}-{hi} từ" in seen["prompt"]
     assert f"{lo / sa.SCENE_WORDS_PER_SECOND:.1f}-{hi / sa.SCENE_WORDS_PER_SECOND:.1f} giây" in seen["prompt"]
     assert f"tối đa {sa.EN_MAX_WORDS_ALGORITHM} từ" in seen["prompt"]
+
+
+def _narration(lines):
+    return "\n".join(lines)
+
+
+def _sentence(words, seed="câu chuyện dòng tiền"):
+    filler = (seed.split() * 40)[:words]
+    return " ".join(filler) + "."
+
+
+def test_parser_does_not_treat_a_leading_number_as_a_scene_marker():
+    """A 173-line narration became 6 'scenes' of 675 words because '84% …' matched."""
+    import services.script_auditor as sa
+
+    lines = [_sentence(16) for _ in range(20)]
+    lines[0] = "84% tin ngân hàng trung ương tạo tiền. Sai. " + _sentence(10)
+    lines[4] = "10.000 đô la không tồn tại nay xuất hiện. " + _sentence(8)
+
+    parsed = sa.ScriptAuditor(algorithm_mode=True).parse_raw_script(_narration(lines))
+
+    assert len(parsed) == len(lines)
+
+
+def test_parser_still_reads_decorated_scene_prefixes():
+    import services.script_auditor as sa
+
+    text = "[CẢNH 1] " + _sentence(16) + "\n[CẢNH 2] " + _sentence(16) + "\n3. " + _sentence(16)
+
+    parsed = sa.ScriptAuditor(algorithm_mode=True).parse_raw_script(text)
+
+    assert len(parsed) == 3
+    assert parsed[2].endswith(".")
+
+
+def test_algorithm_audit_tolerates_the_same_tail_the_factory_accepts():
+    import services.script_auditor as sa
+
+    lines = [_sentence(18) for _ in range(20)]
+    lines[5] = _sentence(40)
+
+    result = sa.ScriptAuditor(target_scenes=20, algorithm_mode=True).audit_script(_narration(lines))
+
+    assert result.total_scenes == 20
+    assert result.is_valid is True, result.issues
+
+
+def test_algorithm_audit_rejects_once_outliers_pass_the_ratio():
+    import services.script_auditor as sa
+
+    lines = [_sentence(18) for _ in range(20)]
+    for idx in (2, 7, 13):
+        lines[idx] = _sentence(40)
+
+    result = sa.ScriptAuditor(target_scenes=20, algorithm_mode=True).audit_script(_narration(lines))
+
+    assert result.is_valid is False
+    assert any("quá dài" in issue for issue in result.issues)
+
+
+def test_audit_length_cap_follows_the_scene_count_it_was_given():
+    """A 1000s video plans ~168 scenes; the old default cap of 120 rejected it."""
+    import services.script_auditor as sa
+
+    lines = [_sentence(18) for _ in range(173)]
+
+    strict = sa.ScriptAuditor(algorithm_mode=True).audit_script(_narration(lines))
+    sized = sa.ScriptAuditor(target_scenes=168, algorithm_mode=True).audit_script(_narration(lines))
+
+    assert strict.is_valid is False
+    assert any("quá dài (173 cảnh)" in issue for issue in strict.issues)
+    assert sized.is_valid is True, sized.issues

@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from core.logging_config import get_logger
 from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE
 from services.script_auditor import (
+    BUDGET_RATIO_FLOOR,
     EN_MAX_WORDS_ALGORITHM,
     GENERATED_WORD_WINDOW,
     RECOMMENDED_WORDS_PER_SHOT_ALGORITHM,
@@ -66,7 +67,7 @@ EN_MAX_WORDS = EN_MAX_WORDS_ALGORITHM
 # Acceptance mirrors the scorecard instead of out-tightening it: a flat AND over
 # every scene asks ~170 independent LLM draws to land in one narrow window at
 # once, which is unwinnable (measured 55-65% per-scene compliance => ~1e-32).
-MIN_BUDGET_RATIO = 0.95
+MIN_BUDGET_RATIO = BUDGET_RATIO_FLOOR
 # Aggregate WPM is recorded, never vetoed here: scene duration is derived from
 # the word count, so a compliant script is exactly 210 WPM by construction and
 # the only way to cross S08's ceiling is the <=5% outliers the ratio rule
@@ -1039,6 +1040,10 @@ class ScriptFactory:
     ) -> Tuple[float, Dict[str, float], str]:
         from pipeline.llm_client import chat_json
 
+        # The judge must see the ending: rubric items 2 (open loops) and 7
+        # (callback) are unjudgeable on a truncated script, and the 173-scene
+        # scripts here are ~17k chars, so the old 9000-char cap hid the whole
+        # back half.
         script_lines = "\n".join(
             f"Cảnh {sc['index']} ({sc['duration']:.1f}s): {sc['text']}"
             for sc in variant.scenes_vi
@@ -1047,7 +1052,7 @@ class ScriptFactory:
             (f"{feedback_brief}\n\n" if feedback_brief else "")
             + f"GÓC KỂ: {variant.angle['label']} — {variant.angle['brief']}\n\n"
             + f"TRANSCRIPT NGUỒN (để kiểm tra GROUNDED):\n\"\"\"{transcript_text[:5000]}\"\"\"\n\n"
-            f"KỊCH BẢN CẦN CHẤM:\n{script_lines[:9000]}"
+            f"KỊCH BẢN CẦN CHẤM:\n{script_lines}"
         )
         parsed = chat_json(
             JUDGE_RUBRIC, user_prompt, temperature=0.2, max_tokens=1000, model=self.model
