@@ -1,7 +1,8 @@
 """Image Ken Burns Provider (B-roll & Graceful Fallback).
 
-Generates a still image (via Imagen 3 or DALL-E 3, crayon Style Bible) and applies
-a Ken Burns pan/zoom effect sized to the shot's planned duration using FFmpeg.
+Generates a still image (via xKiro image, Imagen 3 or DALL-E 3, crayon Style
+Bible) and applies a Ken Burns pan/zoom effect sized to the shot's planned
+duration using FFmpeg.
 Used for:
 1. Secondary B-roll shots in Mode 2.
 2. Graceful fallback when a Veo video shot fails 3 times, allowing the documentary to complete.
@@ -60,6 +61,23 @@ class ImageKenBurnsProvider(VideoProvider):
                 logger.info("Ken Burns using canonical character reference image: %s", ref_image)
             except Exception as e:
                 logger.warning("Failed to copy reference image %s: %s", ref_image, e)
+
+        # Priority 1: xKiro image gateway (gpt-image-2.5 -> Sensenova). This is
+        # the provider that actually works when Gemini cookies are stale.
+        if not has_image:
+            try:
+                from services.xkiro_image_provider import generate_xkiro_image
+
+                used_model = generate_xkiro_image(
+                    f"{CRAYON_STYLE_PREFIX}{safe_prompt}", img_path
+                )
+                if img_path.exists() and img_path.stat().st_size > 1000:
+                    has_image = True
+                    logger.info("Ken Burns image via xKiro (%s): %s", used_model, img_path)
+            except Exception as e:
+                logger.warning(
+                    "xKiro image generation failed (%s). Trying Gemini WebAPI.", e
+                )
 
         # Attempt to generate image via gemini_webapi if session provided
         if not has_image and session_file and session_file.exists():

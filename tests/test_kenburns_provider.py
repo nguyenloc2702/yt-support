@@ -20,6 +20,10 @@ def test_no_provider_fails_loudly_without_placeholder(kb_provider, tmp_path, mon
     """Zero-fake policy: with no Imagen session, no ref image and no OPENAI key,
     generation must FAIL with FATAL — never render a placeholder caption card."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "services.xkiro_image_provider.generate_xkiro_image",
+        lambda prompt, out_path: (_ for _ in ()).throw(RuntimeError("xKiro image down")),
+    )
 
     out = tmp_path / "shots" / "shot_01.mp4"
     res = kb_provider.generate(
@@ -35,6 +39,40 @@ def test_no_provider_fails_loudly_without_placeholder(kb_provider, tmp_path, mon
     # No placeholder artifacts on disk
     assert not out.exists()
     assert not out.with_suffix(".jpg").exists()
+
+
+def test_xkiro_image_is_the_primary_provider(kb_provider, tmp_path, monkeypatch):
+    """xKiro must carry shots when Gemini cookies are stale and no DALL-E key
+    exists (the exact production failure on job remake_1792831087_55d0ea)."""
+    out = tmp_path / "shots" / "shot_04.mp4"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    prompts = []
+
+    def fake_xkiro(prompt, out_path):
+        prompts.append(prompt)
+        Path(out_path).write_bytes(b"jpg" * 600)
+        return "openai/gpt-image-2.5"
+
+    monkeypatch.setattr("services.xkiro_image_provider.generate_xkiro_image", fake_xkiro)
+    monkeypatch.setattr(
+        "services.image_kenburns_provider.subprocess.run",
+        lambda cmd, check, capture_output, timeout: (
+            out.write_bytes(b"x" * 10000) or MagicMock(returncode=0)
+        ),
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    res = kb_provider.generate(
+        prompt="A banker counting coins",
+        out_path=out,
+        session_file=None,
+        ref_image=None,
+        duration=6.0,
+    )
+
+    assert res.ok is True
+    assert len(prompts) == 1
+    assert prompts[0].lower().startswith(CRAYON_STYLE_PREFIX.lower()[:20])
 
 
 def test_ref_image_copy_and_dynamic_kenburns_duration(kb_provider, tmp_path, monkeypatch):
