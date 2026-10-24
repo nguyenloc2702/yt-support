@@ -4,6 +4,7 @@ Uploads rendered raw shots directly to Google Drive, then deletes
 the local temporary video to conserve VPS disk space (Zero Disk Waste).
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -28,6 +29,37 @@ class StorageUploader:
     @property
     def is_rclone_available(self) -> bool:
         return self.rclone_bin is not None
+
+    def _remote_size(self, remote_path: str, timeout: int = 30) -> Optional[int]:
+        """Size of one remote object, or None when it is absent/unreadable.
+
+        Exact-path lookups on the Drive remote retry a not-found with
+        exponential backoff, so `lsf <file>` hangs past the timeout and the
+        upload never reaches `copyto`. `size --json` with capped retries
+        surfaces not-found in seconds.
+        """
+        cmd = [
+            self.rclone_bin,
+            "size",
+            remote_path,
+            "--json",
+            "--retries", "1",
+            "--low-level-retries", "1",
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning("rclone size timed out after %ds for %s", timeout, remote_path)
+            return None
+        if res.returncode != 0:
+            return None
+        try:
+            payload = json.loads((res.stdout or "").strip() or "{}")
+            count = int(payload.get("count") or 0)
+            size = int(payload.get("bytes") or 0)
+        except (TypeError, ValueError):
+            return None
+        return size if count == 1 else None
 
     def upload_and_clean(
         self,
@@ -77,30 +109,26 @@ class StorageUploader:
 
         try:
             # 1. Idempotency Check: Pre-check if remote file already exists with EXACT size and MD5
-            verify_cmd = [
-                self.rclone_bin,
-                "lsf",
-                "--format", "s",
-                f"{remote_dest}/{dest_name}",
-            ]
-            pre_check = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
-            if pre_check.returncode == 0 and pre_check.stdout.strip().isdigit():
-                existing_size = int(pre_check.stdout.strip())
-                if existing_size == local_size:
-                    # Check MD5 if possible
-                    local_md5 = _get_local_md5(local_file)
-                    md5_res = subprocess.run([self.rclone_bin, "md5sum", f"{remote_dest}/{dest_name}"], capture_output=True, text=True, timeout=30)
-                    remote_md5 = md5_res.stdout.strip().split()[0].lower() if (md5_res.returncode == 0 and md5_res.stdout.strip()) else None
+            remote_path = f"{remote_dest}/{dest_name}"
+            existing_size = self._remote_size(remote_path)
+            if existing_size is not None and existing_size == local_size:
+                # Check MD5 if possible
+                local_md5 = _get_local_md5(local_file)
+                md5_res = subprocess.run(
+                    [self.rclone_bin, "md5sum", remote_path, "--retries", "1", "--low-level-retries", "1"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                remote_md5 = md5_res.stdout.strip().split()[0].lower() if (md5_res.returncode == 0 and md5_res.stdout.strip()) else None
 
-                    if not remote_md5 or remote_md5 == local_md5:
-                        logger.info("⚡ Remote object %s/%s exists with exact size (%d bytes) & matching MD5. Skipping re-upload.",
-                                    dest_folder, dest_name, existing_size)
-                        if clean_local:
-                            try:
-                                local_file.unlink()
-                            except Exception:
-                                pass
-                        return True, f"gdrive://{dest_folder}/{dest_name}"
+                if not remote_md5 or remote_md5 == local_md5:
+                    logger.info("⚡ Remote object %s/%s exists with exact size (%d bytes) & matching MD5. Skipping re-upload.",
+                                dest_folder, dest_name, existing_size)
+                    if clean_local:
+                        try:
+                            local_file.unlink()
+                        except Exception:
+                            pass
+                    return True, f"gdrive://{dest_folder}/{dest_name}"
 
             # 2. Execute 'rclone copyto'
             cmd = [
@@ -118,32 +146,32 @@ class StorageUploader:
                 return False, None
 
             # 3. Verify remote file exists and size matches local file EXACTLY (P1.7)
-            v_res = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
-            remote_size_str = v_res.stdout.strip()
-            if v_res.returncode != 0 or not remote_size_str:
-                logger.error("rclone remote verification failed for %s/%s: %s", dest_folder, dest_name, v_res.stderr)
+            remote_size = self._remote_size(remote_path)
+            if remote_size is None:
+                logger.error("rclone remote verification failed for %s/%s (missing or unreadable)", dest_folder, dest_name)
                 return False, None
 
-            if remote_size_str.isdigit():
-                remote_size = int(remote_size_str)
-                if remote_size == 0:
-                    logger.error("rclone verified file is 0 bytes (empty/corrupted): %s/%s", dest_folder, dest_name)
-                    return False, None
-                if remote_size != local_size:
-                    logger.error("rclone size mismatch! Local: %d bytes, Remote: %d bytes", local_size, remote_size)
-                    return False, None
+            if remote_size == 0:
+                logger.error("rclone verified file is 0 bytes (empty/corrupted): %s/%s", dest_folder, dest_name)
+                return False, None
+            if remote_size != local_size:
+                logger.error("rclone size mismatch! Local: %d bytes, Remote: %d bytes", local_size, remote_size)
+                return False, None
 
             # Check MD5 hash post-upload
             if local_md5 is None:
                 local_md5 = _get_local_md5(local_file)
-            post_md5_res = subprocess.run([self.rclone_bin, "md5sum", f"{remote_dest}/{dest_name}"], capture_output=True, text=True, timeout=30)
+            post_md5_res = subprocess.run(
+                [self.rclone_bin, "md5sum", remote_path, "--retries", "1", "--low-level-retries", "1"],
+                capture_output=True, text=True, timeout=30,
+            )
             if post_md5_res.returncode == 0 and post_md5_res.stdout.strip():
                 post_remote_md5 = post_md5_res.stdout.strip().split()[0].lower()
                 if len(post_remote_md5) == 32 and post_remote_md5 != local_md5:
                     logger.error("rclone MD5 mismatch! Local: %s, Remote: %s", local_md5, post_remote_md5)
                     return False, None
 
-            logger.info("Uploaded and verified successfully on Google Drive: %s/%s (%s bytes)", dest_folder, dest_name, remote_size_str)
+            logger.info("Uploaded and verified successfully on Google Drive: %s/%s (%d bytes)", dest_folder, dest_name, remote_size)
 
             # Delete local file only if requested
             if clean_local:
