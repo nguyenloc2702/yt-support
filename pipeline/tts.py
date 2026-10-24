@@ -366,7 +366,13 @@ def _edge_tts_save(text: str, edge_voice: str, out_path: Path) -> None:
         try:
             asyncio.run(_edge())
             if out_path.is_file() and out_path.stat().st_size > 0:
-                _trim_edge_silence(out_path)
+                try:
+                    _trim_edge_silence(out_path)
+                except Exception as exc:  # noqa: BLE001 - untrimmed beats no audio
+                    logging.getLogger(__name__).warning(
+                        "silence trim failed for %s (%s) — keeping raw edge audio",
+                        out_path.name, exc,
+                    )
                 return
             last_exc = RenderError(f"edge-tts produced an empty file for {edge_voice}")
         except Exception as exc:  # noqa: BLE001 - edge-tts raises assorted errors
