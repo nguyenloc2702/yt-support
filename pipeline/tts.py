@@ -89,17 +89,37 @@ def is_xkiro_voice(voice_id: str) -> bool:
     )
 
 
+def is_edge_voice(voice_id: str) -> bool:
+    """True for edge-tts neural voices (vi-VN-*, en-US-*), picked via audition."""
+    if not voice_id:
+        return False
+    v = voice_id.lower().strip()
+    return v.endswith("neural") and not is_xkiro_voice(v)
+
+
 XKIRO_TTS_MAX_CHARS = 4000  # gateway hard limit is 4096 per speech request
 # Skill-pack pacing. The gateway ignores a speed parameter and its VI voices
 # speak 232-300 WPM natively, so audio is fitted locally. Naturalness wins over
 # hitting the exact target: never slow a voice below 0.75x (atempo), even when
 # that leaves it above TARGET_NARRATION_WPM. Remaining timeline time is handled
 # with per-beat pauses by the audio audit, not by stretching the voice further.
+# EN narration keeps its own band: documentary English reads ~150-165 WPM, and
+# forcing the VI 205 band onto it speeds the voice into a sell-read.
 TARGET_NARRATION_WPM = 205.0
 MIN_NARRATION_WPM = 195.0
 MAX_NARRATION_WPM = 214.0
+EN_TARGET_NARRATION_WPM = 160.0
+EN_MIN_NARRATION_WPM = 145.0
+EN_MAX_NARRATION_WPM = 175.0
 MIN_ATEMPO = 0.75
 MIN_WORDS_FOR_RATE_FIT = 8
+
+
+def _wpm_band(voice_id: str) -> tuple[float, float, float]:
+    """Target/min/max WPM for a voice: EN voices keep a documentary band."""
+    if not _is_vietnamese_voice(voice_id):
+        return EN_TARGET_NARRATION_WPM, EN_MIN_NARRATION_WPM, EN_MAX_NARRATION_WPM
+    return TARGET_NARRATION_WPM, MIN_NARRATION_WPM, MAX_NARRATION_WPM
 
 
 def _read_llm_key() -> Optional[str]:
@@ -221,11 +241,11 @@ def _write_rate_fit_sidecar(audio_path: Path, payload: Dict[str, Any]) -> None:
         )
 
 
-def _fit_narration_rate(text: str, audio_path: Path) -> float:
+def _fit_narration_rate(text: str, audio_path: Path, voice_id: str = "vi-VN") -> float:
     """Fit narration into the pacing band without unnatural slow-down.
 
     The slowdown is capped at MIN_ATEMPO (0.75x). If the native voice is so fast
-    that reaching TARGET_NARRATION_WPM would require going below the cap, the
+    that reaching the language target would require going below the cap, the
     audio keeps the capped rate and the remaining timeline time is filled with
     pauses by the audio audit. Returns the pre-fit WPM (0.0 when skipped).
     """
@@ -236,15 +256,16 @@ def _fit_narration_rate(text: str, audio_path: Path) -> float:
     if old_duration <= 0:
         return 0.0
 
+    target_wpm, min_wpm, max_wpm = _wpm_band(voice_id)
     native_wpm = words / old_duration * 60.0
-    desired = TARGET_NARRATION_WPM / native_wpm if native_wpm > 0 else 1.0
+    desired = target_wpm / native_wpm if native_wpm > 0 else 1.0
     factor = max(MIN_ATEMPO, min(MAX_TEMPO, desired))
     slowdown_capped = desired < MIN_ATEMPO
     action = "in_band"
     fitted_wpm = native_wpm
     fitted_duration = old_duration
 
-    if not (MIN_NARRATION_WPM <= native_wpm <= MAX_NARRATION_WPM) and abs(factor - 1.0) >= 0.01:
+    if not (min_wpm <= native_wpm <= max_wpm) and abs(factor - 1.0) >= 0.01:
         tmp = audio_path.with_name(f"{audio_path.stem}.rate.mp3")
         from pipeline.ffmpeg import run_ffmpeg
 
@@ -276,8 +297,8 @@ def _fit_narration_rate(text: str, audio_path: Path) -> float:
     _write_rate_fit_sidecar(
         audio_path,
         {
-            "target_wpm": TARGET_NARRATION_WPM,
-            "band_wpm": [MIN_NARRATION_WPM, MAX_NARRATION_WPM],
+            "target_wpm": target_wpm,
+            "band_wpm": [min_wpm, max_wpm],
             "min_atempo": MIN_ATEMPO,
             "native_wpm": round(native_wpm, 1),
             "fitted_wpm": round(fitted_wpm, 1),
@@ -359,8 +380,7 @@ def _synthesize_chunked_xkiro_with_fallback(text: str, voice_id: str, out_path: 
             synthesize_one_xkiro(chunk, voice_id, part)
             parts.append(part)
         _concat_audio_parts(parts, out_path)
-        if _is_vietnamese_voice(voice_id):
-            _fit_narration_rate(text, out_path)
+        _fit_narration_rate(text, out_path, voice_id)
         return voice_id
     except Exception as exc:
         edge_voice = XKIRO_TO_EDGE.get(voice_id)
@@ -382,13 +402,18 @@ def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path)
 
     Returns the voice id actually used. The xKiro->edge swap is always logged
     (never silent) and the fallback edge voice is the mapped neural equivalent.
+    A voice chosen from the edge catalog (auditioned via /voice) synthesizes
+    directly through edge-tts — no gateway call is spent probing it.
     """
+    if is_edge_voice(voice_id):
+        _edge_tts_save(text, voice_id, out_path)
+        _fit_narration_rate(text, out_path, voice_id)
+        return voice_id
     if len(text.strip()) > XKIRO_TTS_MAX_CHARS:
         return _synthesize_chunked_xkiro_with_fallback(text, voice_id, out_path)
     try:
         synthesize_one_xkiro(text, voice_id, out_path)
-        if _is_vietnamese_voice(voice_id):
-            _fit_narration_rate(text, out_path)
+        _fit_narration_rate(text, out_path, voice_id)
         return voice_id
     except Exception as exc:
         edge_voice = XKIRO_TO_EDGE.get(voice_id)
@@ -616,8 +641,7 @@ def synthesize_narration(
                 cached = _cache_lookup(text, voice, item_rate, None, mp3_path)
                 if not cached:
                     synthesize_one_xkiro(text, voice, mp3_path)
-                    if _is_vietnamese_voice(voice):
-                        _fit_narration_rate(text, mp3_path)
+                    _fit_narration_rate(text, mp3_path, voice)
                     _cache_store(text, voice, item_rate, None, mp3_path)
             else:
                 # Edge-tts randomly returns NoAudioReceived ~5-10% of requests, even

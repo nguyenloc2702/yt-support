@@ -412,3 +412,73 @@ def test_generate_and_overlay_cue_items_contained_in_clip_windows(monkeypatch):
     ends = [c["output_start"] + c["clip_duration"] for c in items_cues]
     assert max(ends) <= 60.0 + 1e-6
     assert captured == []  # synthesis stub only exercised via synthesize_narration
+
+
+def test_edge_voice_synthesizes_directly_without_a_gateway_call(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    gateway_calls = []
+
+    def boom(text, voice, out, api_key=None):
+        gateway_calls.append(voice)
+        raise AssertionError("an edge voice must never be probed against the gateway")
+
+    monkeypatch.setattr(tts, "synthesize_one_xkiro", boom)
+    edge_voices = []
+
+    def fake_edge(text, voice, out):
+        edge_voices.append(voice)
+        out.write_bytes(b"edge")
+
+    monkeypatch.setattr(tts, "_edge_tts_save", fake_edge)
+    fit_voices = []
+    monkeypatch.setattr(
+        tts, "_fit_narration_rate", lambda text, path, vid: fit_voices.append(vid)
+    )
+
+    used = tts.synthesize_one_xkiro_with_fallback(
+        "Câu để đọc.", "vi-VN-NamMinhNeural", tmp_path / "out.mp3"
+    )
+
+    assert used == "vi-VN-NamMinhNeural"
+    assert edge_voices == ["vi-VN-NamMinhNeural"]
+    assert fit_voices == ["vi-VN-NamMinhNeural"]
+    assert gateway_calls == []
+    assert (tmp_path / "out.mp3").read_bytes() == b"edge"
+
+
+def test_rate_fit_targets_documentary_pace_for_english_voices(tmp_path, monkeypatch):
+    import json
+
+    import pipeline.tts as tts
+
+    audio = tmp_path / "en.mp3"
+    audio.write_bytes(b"en")
+    # 60 words in 20s = 180 WPM: outside the EN band (145-175), inside VI band.
+    monkeypatch.setattr(tts, "_probe_duration", lambda p: 20.0)
+    calls = []
+
+    def fake_ffmpeg(args):
+        calls.append(args)
+        Path(args[-1]).write_bytes(b"fitted")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", fake_ffmpeg)
+
+    wpm = tts._fit_narration_rate("word " * 60, audio, "en-US-GuyNeural")
+
+    assert wpm == pytest.approx(180.0)
+    assert "atempo=0.8889" in calls[0]
+    sidecar = json.loads(tts.rate_fit_sidecar_path(audio).read_text(encoding="utf-8"))
+    assert sidecar["target_wpm"] == pytest.approx(tts.EN_TARGET_NARRATION_WPM)
+    assert sidecar["band_wpm"] == [tts.EN_MIN_NARRATION_WPM, tts.EN_MAX_NARRATION_WPM]
+
+    # The same 180 WPM audio with a VI voice needs no touch (195-214 band).
+    audio_vi = tmp_path / "vi.mp3"
+    audio_vi.write_bytes(b"vi")
+
+    def boom(args):
+        raise AssertionError("VI voice at 180 WPM is in band; ffmpeg must not run")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", boom)
+    assert tts._fit_narration_rate("từ " * 60, audio_vi, "vi-VN-NamMinhNeural") == pytest.approx(180.0)
+    assert audio_vi.read_bytes() == b"vi"

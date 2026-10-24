@@ -51,9 +51,14 @@ MIN_WORDS_PER_SHOT_ALGORITHM = 12
 # 18-24 words = 5.1-6.9s, which keeps the mean scene duration inside QA S10.
 RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (18, 24)
 MAX_WORDS_PER_SHOT_ALGORITHM = GENERATED_WORD_WINDOW[1]
-# The gateway's English voices run slow, so EN lines are budgeted far tighter
-# than VI. Shared by the slicer prompt and the factory's rewrite prompts.
-EN_MAX_WORDS_ALGORITHM = 16
+# EN lines follow the EN voice pace, not the VI one: documentary EN reads
+# ~160 wpm (edge) so a 4-8s scene carries 12-22 words. Capping EN at the old
+# 16 left every line 60% the length of its VI twin and the EN audio gasping
+# between sentences. Shared by the slicer prompt and the factory's rewrite.
+EN_MAX_WORDS_ALGORITHM = 22
+# EN instruction floor: shorter lines leave the EN voice gasping between
+# sentences (the dead air the owner rejected in job 7fb1a8).
+EN_MIN_WORDS = 12
 TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
 # Share of scenes allowed outside the word window. The factory gate and the
 # Gate 1 audit must agree, or a script the factory accepted gets rejected one
@@ -730,7 +735,7 @@ Yêu cầu định dạng đầu ra:
 - CHIA ĐÚNG {scenes_per_block} CẢNH cho khối này (sai số tối đa ±1), dựa trên sự chuyển biến của tình huống cụ thể. Không gộp nhiều ý vào một cảnh.
 - situation: Mô tả tình huống cụ thể (hành động, bối cảnh diễn ra).
 - voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. MỖI cảnh {rec_lo}-{rec_hi} từ ({rec_sec_lo:.1f}-{rec_sec_hi:.1f} giây ở nhịp {plan_wpm:.0f} WPM), đan xen câu ngắn dứt khoát (<= 6 từ). Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
-- voiceover_en: Bản dịch đối chiếu tiếng Anh chuẩn xác, tối đa {EN_MAX_WORDS_ALGORITHM} từ mỗi cảnh.
+- voiceover_en: Bản EN trọn ý, mạch kể tự nhiên như người dẫn chương trình (không dịch word-by-word, không cụt câu): {EN_MIN_WORDS}-{EN_MAX_WORDS_ALGORITHM} từ mỗi cảnh vì giọng EN đọc ~160 wpm.
 - estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ {rec_sec_lo:.1f} đến {rec_sec_hi:.1f} giây).
 - visual_prompt: Prompt tiếng Anh chi tiết theo STYLE BIBLE crayon hand-drawn cho Veo.
 

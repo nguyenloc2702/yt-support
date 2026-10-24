@@ -205,3 +205,20 @@ def test_save_and_load_roundtrip(tmp_path):
     assert loaded.scenes[1].duration_sec == result.scenes[1].duration_sec
     assert loaded.timing_map == result.timing_map
     assert load_audio_audit(tmp_path / "missing.json") is None
+
+
+def test_wpm_band_is_language_aware(tmp_path):
+    # Same 160-WPM articulation: out of band for VI, natural for EN.
+    plan = _plan(n=1)
+    words, duration = _fake_timings([plan[0]["text"]], word_dur=0.375)
+    audio = _audio(tmp_path)
+
+    vi = audit_audio(audio, plan, "vi", transcriber=_transcriber(words, duration))
+    en = audit_audio(audio, plan, "en", transcriber=_transcriber(words, duration))
+
+    assert any("lệch xa band" in e for e in vi.errors)
+    assert not any("band" in e for e in en.errors)
+    assert not any("band" in w for w in en.warnings)
+    assert en.naturalness["band_wpm"] == [145.0, 175.0]
+    assert en.naturalness["wpm_in_band"] is True
+    assert vi.naturalness["band_wpm"] == [195.0, 214.0]

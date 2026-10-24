@@ -32,7 +32,17 @@ logger = get_logger(__name__)
 TARGET_WPM = 205.0
 MIN_WPM = 195.0
 MAX_WPM = 214.0
+EN_TARGET_WPM = 160.0
+EN_MIN_WPM = 145.0
+EN_MAX_WPM = 175.0
 MIN_ATEMPO = 0.75
+
+
+def wpm_band(language: str) -> Tuple[float, float, float]:
+    """Per-language narration band: documentary EN reads far slower than VI."""
+    if (language or "").lower().startswith("en"):
+        return EN_TARGET_WPM, EN_MIN_WPM, EN_MAX_WPM
+    return TARGET_WPM, MIN_WPM, MAX_WPM
 SCENE_MIN_DUR = 4.0
 SCENE_MAX_DUR = 8.0
 MIN_PAUSE_SEC = 0.15
@@ -155,12 +165,13 @@ class AudioAuditResult:
         return data
 
     def summary_vi(self) -> str:
+        _tgt, band_min, band_max = wpm_band(self.language)
         lines = [
             f"🎧 AUDIO AUDIT ({self.language.upper()}): WER {self.wer:.1%} | "
             f"{self.audio_duration_sec:.1f}s / plan {self.plan_duration_sec:.1f}s "
             f"(drift {self.duration_drift:+.1%})",
             f"🗣 WPM cục bộ {self.local_wpm_mean:.1f} ± {self.local_wpm_std:.1f} "
-            f"(mục tiêu {TARGET_WPM:.0f}, band {MIN_WPM:.0f}-{MAX_WPM:.0f}) | "
+            f"(band {band_min:.0f}-{band_max:.0f}) | "
             f"{self.pause_count} khoảng nghỉ",
         ]
         if self.atempo is not None:
@@ -430,16 +441,17 @@ def audit_audio(
     duration_drift = (
         (audio_duration - plan_total) / plan_total if plan_total > 0 else 0.0
     )
+    band_target, band_min, band_max = wpm_band(language)
     if abs(duration_drift) > DRIFT_ERROR:
         errors.append(
             f"Tổng audio lệch plan {duration_drift:+.1%} (>{DRIFT_ERROR:.0%})"
         )
     elif abs(duration_drift) > DRIFT_WARN:
         warnings.append(f"Tổng audio lệch plan {duration_drift:+.1%}")
-    if local_wpm_mean >= MAX_WPM + 20 or (local_wpm_mean and local_wpm_mean <= MIN_WPM - 20):
+    if local_wpm_mean >= band_max + 20 or (local_wpm_mean and local_wpm_mean <= band_min - 20):
         errors.append(f"Tốc độ đọc cục bộ {local_wpm_mean:.0f} WPM lệch xa band")
-    elif local_wpm_mean and not (MIN_WPM <= local_wpm_mean <= MAX_WPM):
-        warnings.append(f"Tốc độ đọc cục bộ {local_wpm_mean:.0f} WPM ngoài band {MIN_WPM:.0f}-{MAX_WPM:.0f}")
+    elif local_wpm_mean and not (band_min <= local_wpm_mean <= band_max):
+        warnings.append(f"Tốc độ đọc cục bộ {local_wpm_mean:.0f} WPM ngoài band {band_min:.0f}-{band_max:.0f}")
 
     pauses = _pause_stats(asr_words, audio_duration)
     if pauses["ratio"] > 0.25:
@@ -448,8 +460,8 @@ def audit_audio(
     rate_fit = load_rate_fit(audio_path)
     atempo = None
     naturalness: Dict[str, Any] = {
-        "target_wpm": TARGET_WPM,
-        "band_wpm": [MIN_WPM, MAX_WPM],
+        "target_wpm": band_target,
+        "band_wpm": [band_min, band_max],
         "min_atempo": MIN_ATEMPO,
     }
     if rate_fit:
@@ -473,7 +485,7 @@ def audit_audio(
     # WPM higher, so a correctly fitted 206 WPM audio was failing at 222.
     naturalness["measured_wpm"] = round(global_wpm, 1)
     naturalness["articulation_wpm"] = round(local_wpm_mean, 1)
-    naturalness["wpm_in_band"] = bool(global_wpm and MIN_WPM <= global_wpm <= MAX_WPM)
+    naturalness["wpm_in_band"] = bool(global_wpm and band_min <= global_wpm <= band_max)
 
     return AudioAuditResult(
         language=language,

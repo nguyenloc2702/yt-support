@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +69,9 @@ VI_MIN_WORDS, VI_MAX_WORDS = GENERATED_WORD_WINDOW
 # being the thing that invalidates a variant. Only the edges above are enforced.
 VI_TARGET_WORDS = RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
 EN_MAX_WORDS = EN_MAX_WORDS_ALGORITHM
+# EN instruction floor: a line shorter than this leaves the EN voice gasping
+# between sentences (the 48%-pause "dead air" the owner rejected).
+EN_MIN_WORDS = 12
 # Acceptance mirrors the scorecard instead of out-tightening it: a flat AND over
 # every scene asks ~170 independent LLM draws to land in one narrow window at
 # once, which is unwinnable (measured 55-65% per-scene compliance => ~1e-32).
@@ -1103,14 +1107,18 @@ class ScriptFactory:
             f"trên tổng {total_scenes}):\n"
             f"{json.dumps(compact_base, ensure_ascii=False, indent=1)}\n\n"
             f"Yêu cầu: viết lại TỪNG cảnh đúng thứ tự, GIỮ NGUYÊN SỐ LƯỢNG CẢNH. Với mỗi cảnh:\n"
-            f"- voiceover_vi: lời thoại mượt mà trọn câu theo góc kể và bộ quy tắc; câu ngắn dứt khoát "
-            f"(<= 6 từ) xen kẽ tạo nhịp; không lặp từ, không cụt lủn. MỖI cảnh "
+            f"- voiceover_vi: viết như người kể chuyện đang kể cho một người bạn thông minh, "
+            f"không đọc kiểu báo cáo: nối ý bằng từ nối tự nhiên ('Nhưng', 'Mà', 'Và rồi', 'Thực ra', "
+            f"'Vậy là', 'Điều đáng nói là'), mỗi cảnh có ít nhất một câu dài có mệnh đề phụ; "
+            f"câu rất ngắn (<= 6 từ) chỉ dùng làm đòn nhịp, TỐI ĐA 1 câu mỗi cảnh; "
+            f"cấm 3 câu liên tiếp cùng cấu trúc cùng độ dài. MỖI cảnh "
             f"{VI_MIN_WORDS}-{VI_MAX_WORDS} từ ({MIN_SCENE_DURATION:.1f}-{MAX_SCENE_DURATION:.1f} giây tại nhịp "
             f"210 WPM), ưu tiên {VI_TARGET_WORDS[0]}-{VI_TARGET_WORDS[1]} từ để tổng kịch bản đủ dài; "
             f"TUYỆT ĐỐI KHÔNG dồn quá {VI_MAX_WORDS} từ vào một cảnh.\n"
-            f"- voiceover_en: bản EN đối chiếu chuẩn xác, giữ nguyên số liệu, diễn lại NGẮN GỌN theo "
-            f"nguyên ý (không dịch word-by-word): tối đa {EN_MAX_WORDS} từ mỗi cảnh vì giọng đọc EN của gateway "
-            f"chỉ ~110 wpm (chậm gần gấp đôi giọng VI ~200 wpm) — vượt budget sẽ lệch timeline.\n"
+            f"- voiceover_en: bản EN trọn ý, giữ mạch kể tự nhiên như người dẫn chương trình "
+            f"(không dịch word-by-word, không cụt câu): {EN_MIN_WORDS}-"
+            f"{EN_MAX_WORDS} từ mỗi cảnh vì giọng EN đọc ~160 wpm — dòng quá ngắn làm "
+            f"audio EN lửng thở giữa các câu.\n"
             f"- estimated_duration: {MIN_SCENE_DURATION:.1f}-{MAX_SCENE_DURATION:.1f} giây, tự nhiên theo độ dài lời thoại.\n"
             "- situation: tình huống cụ thể để dựng hình.\n"
             "- visual_prompt: prompt tiếng Anh theo STYLE BIBLE crayon.\n\n"
@@ -1180,10 +1188,21 @@ class ScriptFactory:
             f"{hook_report['verdict']}; yếu nhất: {hook_report['weakest']}. "
             "Hook dưới 70 PHẢI bị trừ điểm mục 'hook' và feedback phải chỉ đúng chỉ tiêu yếu nhất cần sửa."
         )
+        nat = self._naturalness_report(
+            "\n".join(str(sc.get("text", "")) for sc in variant.scenes_vi)
+        )
+        rhythm = (
+            f"\n\nNHỊP ĐỌC MÁY: CV độ dài câu {nat['cv']:.2f} (tự nhiên >= {self.NATURAL_MIN_CV}); "
+            f"{nat['punch_pct']:.0f}% câu đòn <= 6 từ (tự nhiên <= {self.NATURAL_MAX_PUNCH_PCT:.0f}%); "
+            f"{nat['connectors_per_100']:.1f} từ nối/100 từ (tự nhiên >= {self.NATURAL_MIN_CONNECTORS}). "
+            "Chỉ số nào dưới ngưỡng thì kịch bản đang đọc CỨNG như máy — trừ điểm mục "
+            "'pacing_54_46' và feedback chỉ đúng lỗi nhịp cần sửa."
+        )
         user_prompt = (
             (f"{feedback_brief}\n\n" if feedback_brief else "")
             + f"GÓC KỂ: {variant.angle['label']} — {variant.angle['brief']}\n"
             + machine_hook
+            + rhythm
             + "\n\n"
             + f"TRANSCRIPT NGUỒN (để kiểm tra GROUNDED):\n\"\"\"{transcript_text[:5000]}\"\"\"\n\n"
             f"KỊCH BẢN CẦN CHẤM:\n{script_lines}"
@@ -1201,6 +1220,38 @@ class ScriptFactory:
         return score, breakdown, feedback
 
     # ------------------------------------------------------------ metrics
+
+    # Spoken-rhythm fingerprints. A stiff script reads as machine-gun prose:
+    # every sentence the same length, no connective tissue, half the sentences
+    # <= 6 words. The judge sees these numbers next to the script.
+    _NATURAL_CONNECTOR_RE = re.compile(
+        r"\b(nhưng|mà\b|và rồi|thực ra|điều đáng nói|vậy là|cuối cùng|hóa ra"
+        r"|bởi vậy|chính vì|ngoài ra|vì thế|nói cách khác|vấn đề là|điều đó nghĩa là)\b",
+        re.IGNORECASE,
+    )
+    NATURAL_MIN_CV = 0.45
+    NATURAL_MAX_PUNCH_PCT = 40.0
+    NATURAL_MIN_CONNECTORS = 1.5
+
+    @classmethod
+    def _naturalness_report(cls, script_text: str) -> Dict[str, float]:
+        sentences = [
+            s.strip() for s in re.split(r"[.!?…]+", str(script_text)) if s.strip()
+        ]
+        if len(sentences) < 4:
+            return {"cv": 0.0, "punch_pct": 100.0, "connectors_per_100": 0.0, "sentences": len(sentences)}
+        lengths = [len(s.split()) for s in sentences]
+        mean = statistics.fmean(lengths)
+        cv = (statistics.pstdev(lengths) / mean) if mean else 0.0
+        punch_pct = 100.0 * sum(1 for n in lengths if n <= 6) / len(lengths)
+        words = sum(lengths)
+        connectors = len(cls._NATURAL_CONNECTOR_RE.findall(script_text))
+        return {
+            "cv": round(cv, 3),
+            "punch_pct": round(punch_pct, 1),
+            "connectors_per_100": round(connectors / words * 100.0, 2) if words else 0.0,
+            "sentences": len(sentences),
+        }
 
     def _mechanical_metrics(self, scenes_vi: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Skill-pack metrics computed in code (recorded for the Phase 4 scorecard)."""

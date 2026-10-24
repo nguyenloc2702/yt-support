@@ -98,6 +98,7 @@ NARRATION_LAWS = (
     "Giọng người kể vừa phát hiện ra điều thú vị, đang nói với một người bạn thông minh: chữ bình dân, có chính kiến, dám thừa nhận chỗ chưa chắc chắn.",
     "Thuật ngữ: giải thích bằng chữ thường trước rồi mới gắn tên; tên gắn ra mà không dùng lại thì không cần gắn.",
     "Stakes phải xuất hiện trong phút đầu; kết quay về cảnh mở đầu với hiểu biết mới (callback), không liệt kê tổng kết.",
+    "Mỗi cảnh có ít nhất một câu dài có mệnh đề phụ ('khi mà', 'vì', 'nên', 'nhưng rồi'); nối ý bằng từ nối tự nhiên, cấm 3 câu liên tiếp mở đầu bằng chủ ngữ + động từ.",
 )
 
 

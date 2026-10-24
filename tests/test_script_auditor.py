@@ -330,7 +330,7 @@ def test_slicer_prompt_states_the_derived_budget_not_a_hardcoded_one(monkeypatch
 
     assert f"MỖI cảnh {lo}-{hi} từ" in seen["prompt"]
     assert f"{lo / sa.SCENE_WORDS_PER_SECOND:.1f}-{hi / sa.SCENE_WORDS_PER_SECOND:.1f} giây" in seen["prompt"]
-    assert f"tối đa {sa.EN_MAX_WORDS_ALGORITHM} từ" in seen["prompt"]
+    assert f"{sa.EN_MIN_WORDS}-{sa.EN_MAX_WORDS_ALGORITHM} từ mỗi cảnh" in seen["prompt"]
 
 
 def _narration(lines):

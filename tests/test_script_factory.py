@@ -858,3 +858,55 @@ def test_reading_rate_fit_pads_room_left_by_a_capped_scene():
     assert (50 / dur * 60) <= 210.0
     assert all(4.0 <= sc["duration"] <= 8.0 for sc in vi)
     assert en[1]["duration"] == vi[1]["duration"]
+
+
+def test_rewrite_prompt_budgets_each_language_for_its_own_voice(factory, monkeypatch):
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3)
+
+    assert router.rewrite_prompts
+    for p in router.rewrite_prompts:
+        # EN reads ~160 wpm: full sentences 12-22 words, not the old 16 cap
+        assert f"{sf.EN_MIN_WORDS}-{sf.EN_MAX_WORDS} từ mỗi cảnh" in p
+        assert "~160 wpm" in p
+        assert "NGẮN GỌN" not in p
+        # VI: at most one <=6-word punch per scene, story-teller connectors
+        assert "TỐI ĐA 1 câu mỗi cảnh" in p
+        assert "người kể chuyện" in p
+
+
+def test_judge_sees_the_machine_rhythm_report(factory, monkeypatch):
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3)
+
+    assert router.judge_prompts
+    for p in router.judge_prompts:
+        m = re.search(r"NHỊP ĐỌC MÁY: CV độ dài câu ([\d.]+)", p)
+        assert m, p[-600:]
+        assert 0 <= float(m.group(1)) <= 2.0
+        assert "pacing_54_46" in p
+
+
+def test_naturalness_report_flags_staccato_prose():
+    stiff = " ".join(
+        "Tiền sinh ra không gốc. Hệ thống ghi sổ. Werner nhìn màn hình. "
+        "Số dư nhảy lên. Không ai giải thích. Câu hỏi đặt ra."
+        for _ in range(3)
+    )
+    natural = (
+        "Năm 2014, một ngân hàng Đức phê duyệt khoản vay mà không ai từng thấy trước đó, "
+        "và rồi 10.000 euro xuất hiện trên màn hình. Nhưng tiền đó đến từ đâu? "
+        "Thực ra hệ thống chỉ gõ vài phím, vậy là số dư nhảy lên. "
+        "Điều đáng nói là không một tờ tiền vật lý nào được in ra, vì khoản vay này chỉ tồn tại trong sổ sách."
+    )
+    stiff_rep = ScriptFactory._naturalness_report(stiff)
+    nat_rep = ScriptFactory._naturalness_report(natural)
+
+    assert stiff_rep["punch_pct"] > ScriptFactory.NATURAL_MAX_PUNCH_PCT
+    assert stiff_rep["cv"] < ScriptFactory.NATURAL_MIN_CV
+    assert nat_rep["cv"] >= ScriptFactory.NATURAL_MIN_CV
+    assert nat_rep["connectors_per_100"] >= ScriptFactory.NATURAL_MIN_CONNECTORS
