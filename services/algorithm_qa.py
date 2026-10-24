@@ -286,14 +286,20 @@ def c_wpm(pd: Path, ctx):
 @_check("S09", "Kịch bản", "Duration từng cảnh 4.0-8.0s", "script")
 def c_scene_dur(pd: Path, ctx):
     plan = ctx.get("plan") or []
-    bad = sum(1 for sc in plan if not (SCENE_DUR_RANGE[0] <= float(sc.get("duration", 0)) <= SCENE_DUR_RANGE[1]))
+    # Grade the PLANNED durations the script was built on. After Gate 2 the
+    # `duration` field holds the real narration audio (audio-first timeline);
+    # the audio reality is policed by Gate 4 readiness, not by this script law.
+    bad = sum(
+        1 for sc in plan
+        if not (SCENE_DUR_RANGE[0] <= float(sc.get("planned_duration", sc.get("duration", 0))) <= SCENE_DUR_RANGE[1])
+    )
     return bad == 0, bad, "= 0 cảnh ngoài 4-8s"
 
 
 @_check("S10", "Kịch bản", "Duration trung bình 4.5-6.5s", "script")
 def c_mean_dur(pd: Path, ctx):
     plan = ctx.get("plan") or []
-    durs = [float(sc.get("duration", 0)) for sc in plan]
+    durs = [float(sc.get("planned_duration", sc.get("duration", 0))) for sc in plan]
     mean = sum(durs) / len(durs) if durs else 0.0
     return MEAN_DUR_RANGE[0] <= mean <= MEAN_DUR_RANGE[1], mean, "4.5-6.5"
 

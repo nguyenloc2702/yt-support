@@ -273,3 +273,24 @@ def test_scorecard_save_and_telegram_report(tmp_path):
     report = card.format_telegram_report()
     assert "ALGORITHM SCORECARD" in report
     assert "/10" in report
+
+
+def test_audio_first_real_durations_do_not_break_script_checks(tmp_path):
+    """After Gate 2 the plan carries the real narration audio in `duration`;
+    S09/S10 grade the planned durations the script was built on (flexibility
+    law: audio wins the timeline, the script law stays measurable)."""
+    plan = _seed_project(tmp_path)
+    audio_corrected = []
+    for sc in plan:
+        corrected = dict(sc)
+        corrected["planned_duration"] = sc["duration"]
+        corrected["duration"] = round(sc["duration"] + 3.4, 2)  # real audio past 8s
+        audio_corrected.append(corrected)
+    (tmp_path / "shots_plan.json").write_text(json.dumps(audio_corrected, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "shots_plan_vi.json").write_text(json.dumps(audio_corrected, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "shots_plan_en.json").write_text(json.dumps(audio_corrected, ensure_ascii=False), encoding="utf-8")
+
+    card = compute_scorecard(tmp_path, stage="script")
+    failed = {r.id for r in card.failed()}
+    assert "S09" not in failed
+    assert "S10" not in failed

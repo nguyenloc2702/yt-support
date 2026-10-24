@@ -139,7 +139,9 @@ def test_four_gate_happy_path(test_env):
 
 
 def test_readiness_uses_algorithm_window_when_marker_present(test_env):
-    """Remake plans allow 4-8s scenes; legacy 1-20s window only applies without the marker."""
+    """Remake plans tolerate audio-real durations (3-10.5s hard window with a
+    4-8s warning band); only physically broken clips are rejected. The legacy
+    1-20s window still applies without the marker."""
     p_dir = test_env["project_dir"]
     asm = ApprovalStateMachine(p_dir, test_env["job_id"])
     asm.set_script(
@@ -164,12 +166,20 @@ def test_readiness_uses_algorithm_window_when_marker_present(test_env):
 
     (p_dir / "algorithm_result.json").write_text("{}", encoding="utf-8")
     out_of_window = [
-        {"index": 1, "prompt": "p", "duration": 3.0, "character_ids": []}
+        {"index": 1, "prompt": "p", "duration": 2.5, "character_ids": []}
     ]
     asm.set_shots_plan(out_of_window)
     ready, errors, _ = asm.check_video_readiness()
     assert ready is False
-    assert any("4.0s - 8.0s" in e for e in errors)
+    assert any("2.5s bất thường" in e for e in errors)
+
+    # A 3.0s punch scene is legitimate: warned, not rejected.
+    asm.set_shots_plan(
+        [{"index": 1, "prompt": "p", "duration": 3.0, "character_ids": []}]
+    )
+    ready, errors, warnings = asm.check_video_readiness()
+    assert ready is True, errors
+    assert any("3.0s ngoài band 4-8s" in w for w in warnings)
 
 
 # =============================================================================
@@ -654,3 +664,65 @@ def test_factory_custom_script_and_ai_genesis_branches(tmp_path: Path):
     ok, errs = asm.approve_script()
     assert ok is False
     assert any("EN" in e for e in errs)
+
+
+# =============================================================================
+# TEST N: DURATION FLEXIBILITY — AUDIO-REAL DURATIONS ARE NOT REJECTED
+# =============================================================================
+
+def test_gate4_accepts_audio_real_durations_outside_band(test_env):
+    """Gate 2 rewrites plan durations from the real narration audio; Gate 4 must
+    warn (not reject) when an approved scene reads past the 4-8s band and only
+    fail on physically broken values."""
+    p_dir = test_env["project_dir"]
+    asm = ApprovalStateMachine(p_dir, test_env["job_id"])
+    beats = [
+        BeatIntent(id=1, text_vi="Câu một.", text_en="Sentence one.", duration=4.75),
+        BeatIntent(id=2, text_vi="Câu hai.", text_en="Sentence two.", duration=4.75),
+    ]
+    asm.set_script(
+        script_vi="Câu một. Câu hai.",
+        script_en="Sentence one. Sentence two.",
+        beats=beats,
+    )
+    ok, _ = asm.approve_script(approver="lead_editor")
+    assert ok is True
+    asm.set_audio_generated("vi", test_env["audio_vi"], duration=21.0, voice_id="vi-VN-NamMinhNeural")
+    asm.set_audio_generated("en", test_env["audio_en"], duration=21.0, voice_id="en-US-ChristopherNeural")
+    asm.set_shots_plan([
+        {"index": 1, "prompt": "crayon scene one", "duration": 9.2, "character_ids": []},
+        {"index": 2, "prompt": "crayon scene two", "duration": 11.8, "character_ids": []},
+    ])
+
+    ready, errors, warnings = asm.check_video_readiness(algorithm_mode=True)
+    assert any("9.2s ngoài band 4-8s" in w for w in warnings)
+    assert not any("9.2s bất thường" in e for e in errors)
+    assert any("11.8s bất thường" in e for e in errors)
+    assert ready is False  # 11.8s clip is broken; the 9.2s one is fine
+
+
+def test_audio_tolerance_uses_shots_plan_baseline_not_beat_placeholder(test_env):
+    """The Gate 2 duration tolerance compares the real audio against the
+    shots_plan estimate (script truth), not the beats' 5.0s placeholder."""
+    p_dir = test_env["project_dir"]
+    asm = ApprovalStateMachine(p_dir, test_env["job_id"])
+    beats = [
+        BeatIntent(id=1, text_vi="Câu một.", text_en="Sentence one.", duration=4.75),
+        BeatIntent(id=2, text_vi="Câu hai.", text_en="Sentence two.", duration=4.75),
+    ]
+    asm.set_script(
+        script_vi="Câu một. Câu hai.",
+        script_en="Sentence one. Sentence two.",
+        beats=beats,
+    )
+    ok, _ = asm.approve_script(approver="lead_editor")
+    assert ok is True
+    # Real narration: 2 scenes x ~15s = 30s; plan estimated it honestly at 15s/scene.
+    # The beats placeholder (2 x 4.75 = 9.5s) would flag a 20.5s "drift" error.
+    asm.set_audio_generated("vi", test_env["audio_vi"], duration=30.0, voice_id="vi-VN-NamMinhNeural")
+    asm.set_shots_plan([
+        {"index": 1, "prompt": "p1", "duration": 15.0, "character_ids": []},
+        {"index": 2, "prompt": "p2", "duration": 15.0, "character_ids": []},
+    ])
+    ok, errs = asm.approve_audio("vi", approver="lead_editor")
+    assert ok is True, errs

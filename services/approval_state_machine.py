@@ -663,8 +663,11 @@ class ApprovalStateMachine:
         if track.duration <= 0.0:
             errors.append(f"Thời lượng audio {lang.upper()} không hợp lệ ({track.duration}s).")
         else:
-            # Check duration tolerance against planned timeline
-            planned_dur = sum(b.duration for b in self.beats) if self.beats else 0.0
+            # Check duration tolerance against planned timeline. Baseline is the
+            # shots_plan the script was built on (beats carry a 5.0s placeholder).
+            planned_dur = sum(float(s.get("duration", 0.0)) for s in self.shots_plan)
+            if planned_dur <= 0 and self.beats:
+                planned_dur = sum(b.duration for b in self.beats)
             if planned_dur > 0:
                 diff = abs(track.duration - planned_dur)
                 max_diff = max(15.0, planned_dur * 0.3)
@@ -900,12 +903,18 @@ class ApprovalStateMachine:
         if not self.shots_plan:
             errors.append("Gate 4: Danh sách shot plan rỗng.")
         else:
-            min_dur = 4.0 if algorithm_mode else 1.0
-            max_dur = 8.0 if algorithm_mode else 20.0
+            # Gate 2 rewrote plan durations from the real narration audio the
+            # human already approved; a fixed 4-8s band here would reject that
+            # audio for being what it naturally reads. Hard-fail only on
+            # physically broken values, warn on algorithm-band drift.
+            min_dur = 3.0 if algorithm_mode else 1.0
+            max_dur = 10.5 if algorithm_mode else 20.0
             for idx, s in enumerate(self.shots_plan, 1):
                 dur = float(s.get("duration", 0.0))
                 if dur < min_dur or dur > max_dur:
-                    errors.append(f"Shot {idx}: Thời lượng {dur}s nằm ngoài giới hạn cho phép ({min_dur}s - {max_dur}s).")
+                    errors.append(f"Shot {idx}: Thời lượng {dur}s bất thường (ngoài {min_dur}s-{max_dur}s).")
+                elif algorithm_mode and not (4.0 <= dur <= 8.0):
+                    warnings.append(f"Shot {idx}: Thời lượng {dur}s ngoài band 4-8s (theo audio thật đã duyệt ở Gate 2).")
                 if not s.get("prompt"):
                     errors.append(f"Shot {idx}: Thiếu visual prompt.")
 

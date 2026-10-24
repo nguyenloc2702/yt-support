@@ -23,10 +23,12 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
+from pipeline.tts import EN_TARGET_NARRATION_WPM
 from pipeline.youtube import download_video, probe_youtube_title
 from services.job_queue import JobQueueManager
 from services.notifier import TelegramNotifier
 from pipeline.output_validator import validate_rendered_output
+from services.script_auditor import MAX_SHOT_DURATION_ALGORITHM, MIN_SHOT_DURATION_ALGORITHM
 from services.storage_uploader import StorageUploader
 from services.prompt_sanitizer import clean_narration_for_tts, sanitize_veo_prompt
 
@@ -653,14 +655,20 @@ class AutomatedFactory:
                 parsed_scenes = auditor.parse_raw_script(custom_script)
                 target_shots = len(parsed_scenes)
                 detected_lang = detect_language(custom_script)
+                # Duration follows the script: estimate from the scene's own word
+                # count at the narration pace of its language (EN reads ~160 wpm).
+                est_wps = 3.5 if detected_lang == "vi" else (EN_TARGET_NARRATION_WPM / 60.0)
                 for idx, text in enumerate(parsed_scenes, 1):
                     clean_text = clean_narration_for_tts(text)
                     prompt = sanitize_veo_prompt(clean_text, scene_idx=idx, total_scenes=target_shots)
+                    natural_dur = len(clean_text.split()) / est_wps
                     scene_item = {
                         "index": idx,
                         "text": clean_text,
                         "prompt": prompt,
-                        "duration": default_shot_duration,
+                        "duration": round(
+                            min(MAX_SHOT_DURATION_ALGORITHM, max(MIN_SHOT_DURATION_ALGORITHM, natural_dur)), 2
+                        ),
                         "is_key_scene": True,
                         "character_ids": [],
                     }
@@ -962,7 +970,7 @@ class AutomatedFactory:
                     f"🆔 Job: <code>{job_id}</code>\n"
                     f"📺 Tiêu đề: <b>{source_title or 'Video'}</b>\n\n"
                     f"⏱ Thời lượng: <b>~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)</b> (dài tương xứng video gốc!)\n"
-                    f"📊 Tổng số cảnh: <b>{len(shots)} cảnh</b> ({default_shot_duration}s/cảnh) | {total_words_vi} từ\n"
+                    f"📊 Tổng số cảnh: <b>{len(shots)} cảnh</b> (~{est_total_duration / len(shots):.1f}s/cảnh trung bình) | {total_words_vi} từ\n"
                     f"🌟 <b>{key_count} cảnh Veo điện ảnh</b> + 🖼 <b>{broll_count} cảnh Ken Burns</b>\n"
                     f"{char_info}"
                     f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b>\n\n"
@@ -1178,6 +1186,11 @@ class AutomatedFactory:
             for entry in report.timing_map:
                 sc = by_index.get(int(entry["index"]))
                 if sc is not None:
+                    # Keep the script-stage estimate: the QA scorecard grades the
+                    # planned durations (the algorithm law), while `duration`
+                    # becomes the real narration audio (audio-first timeline).
+                    if "planned_duration" not in sc:
+                        sc["planned_duration"] = float(sc.get("duration", 0.0))
                     sc["duration"] = float(entry["duration_sec"])
 
         for lang, report in reports.items():
