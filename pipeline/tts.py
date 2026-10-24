@@ -555,7 +555,13 @@ def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path)
                 "edge-tts failed for voice '%s' (%s) — falling back to xKiro '%s'",
                 voice_id, exc, edge_voice,
             )
+            # Full-narration text exceeds the gateway limit: chunk it the same
+            # way the xKiro-first branch does, or xKiro 400s at 4096 chars.
+            if len(text.strip()) > XKIRO_TTS_MAX_CHARS:
+                return _synthesize_chunked_xkiro_with_fallback(text, edge_voice, out_path)
             synthesize_one_xkiro(text, edge_voice, out_path)
+            _fit_narration_rate(text, out_path, edge_voice)
+            return edge_voice
         _fit_narration_rate(text, out_path, voice_id)
         return voice_id
     if len(text.strip()) > XKIRO_TTS_MAX_CHARS:

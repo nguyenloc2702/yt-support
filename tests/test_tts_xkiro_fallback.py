@@ -6,6 +6,7 @@ import pytest
 
 from pipeline.tts import (
     XKIRO_TO_EDGE,
+    XKIRO_TTS_MAX_CHARS,
     is_xkiro_voice,
     synthesize_one_xkiro_with_fallback,
 )
@@ -75,3 +76,71 @@ def test_edge_mapping_covers_full_xkiro_catalog():
     from pipeline.tts import XKIRO_VOICES
 
     assert XKIRO_TO_EDGE.keys() >= XKIRO_VOICES
+
+
+def test_edge_fallback_chunks_long_narration_before_xkiro(tmp_path: Path, monkeypatch):
+    """Regression: the 18082-char 400. Edge fallback must respect the 4096 limit."""
+    out = tmp_path / "full.mp3"
+    monkeypatch.setattr(
+        "pipeline.tts._edge_tts_save_natural",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("edge-tts down")),
+    )
+
+    chunk_sizes = []
+
+    def fake_xkiro(text, voice_id, out_path, api_key=None):
+        assert voice_id == "confident-male-vietnamese"
+        assert len(text) <= XKIRO_TTS_MAX_CHARS
+        chunk_sizes.append(len(text))
+        out_path.write_bytes(b"part")
+
+    monkeypatch.setattr("pipeline.tts.synthesize_one_xkiro", fake_xkiro)
+    monkeypatch.setattr(
+        "pipeline.tts._concat_audio_parts",
+        lambda parts, out: out.write_bytes(b"joined"),
+    )
+    fits = []
+    monkeypatch.setattr(
+        "pipeline.tts._fit_narration_rate",
+        lambda text, path, voice_id: fits.append(voice_id),
+    )
+
+    text = " ".join(
+        f"Câu số {i} nói về dòng tiền của ngân hàng trung ương." for i in range(100)
+    )
+    assert len(text.strip()) > XKIRO_TTS_MAX_CHARS
+
+    used = synthesize_one_xkiro_with_fallback(
+        text, "vi-VN-NamMinhNeural", out
+    )
+
+    assert used == "confident-male-vietnamese"
+    assert len(chunk_sizes) > 1
+    assert out.read_bytes() == b"joined"
+    assert fits == ["confident-male-vietnamese"]
+
+
+def test_edge_fallback_short_text_calls_xkiro_directly(tmp_path: Path, monkeypatch):
+    out = tmp_path / "full.mp3"
+    monkeypatch.setattr(
+        "pipeline.tts._edge_tts_save_natural",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("edge-tts down")),
+    )
+    calls = []
+
+    def fake_xkiro(text, voice_id, out_path, api_key=None):
+        calls.append((text, voice_id))
+        out_path.write_bytes(b"short")
+
+    monkeypatch.setattr("pipeline.tts.synthesize_one_xkiro", fake_xkiro)
+    monkeypatch.setattr(
+        "pipeline.tts._fit_narration_rate", lambda text, path, voice_id: None
+    )
+
+    used = synthesize_one_xkiro_with_fallback(
+        "Một câu ngắn thôi.", "vi-VN-NamMinhNeural", out
+    )
+
+    assert used == "confident-male-vietnamese"
+    assert calls == [("Một câu ngắn thôi.", "confident-male-vietnamese")]
+    assert out.read_bytes() == b"short"
