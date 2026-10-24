@@ -468,7 +468,12 @@ def audit_audio(
             warnings.append("Audio phải làm chậm tới mức tối đa (atempo 0.75) — kiểm tra độ tự nhiên")
     naturalness["atempo"] = atempo
     naturalness["atempo_ok"] = atempo is None or atempo >= MIN_ATEMPO - 1e-6
-    naturalness["wpm_in_band"] = bool(local_wpm_mean and MIN_WPM <= local_wpm_mean <= MAX_WPM)
+    # T11 grades delivery speed, the same quantity S08 and T07 use. local_wpm_mean
+    # is articulation inside each scene (inter-scene gaps excluded) and reads ~15
+    # WPM higher, so a correctly fitted 206 WPM audio was failing at 222.
+    naturalness["measured_wpm"] = round(global_wpm, 1)
+    naturalness["articulation_wpm"] = round(local_wpm_mean, 1)
+    naturalness["wpm_in_band"] = bool(global_wpm and MIN_WPM <= global_wpm <= MAX_WPM)
 
     return AudioAuditResult(
         language=language,

@@ -151,6 +151,28 @@ def test_rate_fit_sidecar_drives_naturalness(tmp_path):
     assert result2.errors == []
 
 
+def test_naturalness_grades_delivery_rate_not_articulation(tmp_path):
+    """T11 must read the rate the listener hears, not speech inside each scene.
+
+    Live case: fitted 206.1 WPM delivery, per-scene articulation 221.7, and the
+    check failed the audio the rate-fit had just brought into band.
+    """
+    plan = _plan(n=20, duration=5.51)
+    words, duration = _fake_timings(
+        [sc["text"] for sc in plan], word_dur=0.27, scene_gap=0.25
+    )
+    result = audit_audio(
+        _audio(tmp_path), plan, "vi",
+        transcriber=_transcriber(words, duration),
+    )
+
+    assert result.local_wpm_mean > 214.0  # articulation alone is out of band
+    assert 195.0 <= result.global_wpm <= 214.0
+    assert result.naturalness["measured_wpm"] == result.global_wpm
+    assert result.naturalness["articulation_wpm"] == result.local_wpm_mean
+    assert result.naturalness["wpm_in_band"] is True
+
+
 def test_missing_audio_returns_error_without_raising(tmp_path):
     result = audit_audio(tmp_path / "nope.mp3", _plan(), "vi",
                          transcriber=_transcriber([], 0.0))

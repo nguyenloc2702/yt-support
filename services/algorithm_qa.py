@@ -630,12 +630,21 @@ def c_audio_natural(pd: Path, ctx):
     if not naturalness:
         return True, None, "n/a (chưa có rate-fit)"
     atempo_ok = bool(naturalness.get("atempo_ok", True))
-    wpm_in_band = bool(naturalness.get("wpm_in_band", True))
     capped = bool(naturalness.get("slowdown_capped", False))
+    # Delivery rate, not articulation: local_wpm_mean excludes inter-scene pauses
+    # and reads ~15 WPM high, which failed audio the rate-fit had brought to 206.
+    wpm = float(
+        audit.get("global_wpm")
+        or naturalness.get("measured_wpm")
+        or audit.get("local_wpm_mean")
+        or 0.0
+    )
+    band = naturalness.get("band_wpm") or [195.0, 214.0]
+    wpm_in_band = bool(wpm and float(band[0]) <= wpm <= float(band[1]))
     ok = atempo_ok and wpm_in_band and not capped
     value = {
         "atempo": audit.get("atempo"),
-        "wpm": audit.get("local_wpm_mean"),
+        "wpm": round(wpm, 1),
         "capped": capped,
     }
     return ok, value, "atempo >= 0.75, WPM 195-214, không chạm sàn"

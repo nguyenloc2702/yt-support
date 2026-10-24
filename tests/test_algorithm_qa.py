@@ -142,7 +142,7 @@ def test_audio_stage_skips_gracefully_without_files(tmp_path):
 
 
 def _audio_sync_payload(wer=0.04, missing_scenes=0, atempo=0.92, capped=False,
-                        wpm=205.0, wpm_in_band=True):
+                        wpm=205.0, wpm_in_band=True, global_wpm=None):
     scenes = [
         {"index": i + 1, "missing": i < missing_scenes}
         for i in range(10)
@@ -152,6 +152,7 @@ def _audio_sync_payload(wer=0.04, missing_scenes=0, atempo=0.92, capped=False,
         "wer": wer,
         "asr_words": 180,
         "local_wpm_mean": wpm,
+        "global_wpm": wpm if global_wpm is None else global_wpm,
         "atempo": atempo,
         "naturalness": {
             "atempo_ok": atempo is None or atempo >= 0.75,
@@ -172,6 +173,20 @@ def test_audio_sync_checks_pass_on_clean_audit(tmp_path):
     t11 = next(r for r in card.results if r.id == "T11")
     assert t10.passed, t10.value
     assert t11.passed, t11.value
+
+
+def test_audio_natural_grades_measured_delivery_rate_not_the_stale_flag(tmp_path):
+    """Live: fitted 206.1 WPM delivery, stale wpm_in_band=False from articulation 222."""
+    _seed_project(tmp_path)
+    (tmp_path / "audio_sync_vi.json").write_text(
+        json.dumps(_audio_sync_payload(wpm=221.7, wpm_in_band=False, global_wpm=206.1)),
+        encoding="utf-8",
+    )
+    card = compute_scorecard(tmp_path, stage="audio")
+    t11 = next(r for r in card.results if r.id == "T11")
+
+    assert t11.passed, t11.value
+    assert t11.value["wpm"] == 206.1
 
 
 def test_audio_sync_checks_flag_bad_audio(tmp_path):
