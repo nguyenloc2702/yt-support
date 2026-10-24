@@ -112,7 +112,15 @@ EN_TARGET_NARRATION_WPM = 160.0
 EN_MIN_NARRATION_WPM = 145.0
 EN_MAX_NARRATION_WPM = 175.0
 MIN_ATEMPO = 0.75
+# Speed-up cap for the full-narration fit. The 1.6x ceiling is for squeezing a
+# cue into its timeline window; stretching a whole narration 1.6x reads at
+# ~360 WPM articulation with 0.6s pauses left over — machine-gun bursts.
+FIT_MAX_ATEMPO = 1.35
 MIN_WORDS_FOR_RATE_FIT = 8
+# Inter-line gap for full narration. edge-tts hangs ~0.6-1.0s of silence on
+# every newline (measured 48% silence on the owner's rejected audio), so lines
+# are synthesized separately and joined with this fixed breath instead.
+FULL_NARRATION_PAUSE_SEC = 0.35
 
 
 def _wpm_band(voice_id: str) -> tuple[float, float, float]:
@@ -259,8 +267,9 @@ def _fit_narration_rate(text: str, audio_path: Path, voice_id: str = "vi-VN") ->
     target_wpm, min_wpm, max_wpm = _wpm_band(voice_id)
     native_wpm = words / old_duration * 60.0
     desired = target_wpm / native_wpm if native_wpm > 0 else 1.0
-    factor = max(MIN_ATEMPO, min(MAX_TEMPO, desired))
+    factor = max(MIN_ATEMPO, min(FIT_MAX_ATEMPO, desired))
     slowdown_capped = desired < MIN_ATEMPO
+    speed_capped = desired > FIT_MAX_ATEMPO
     action = "in_band"
     fitted_wpm = native_wpm
     fitted_duration = old_duration
@@ -304,6 +313,7 @@ def _fit_narration_rate(text: str, audio_path: Path, voice_id: str = "vi-VN") ->
             "fitted_wpm": round(fitted_wpm, 1),
             "atempo": round(factor, 4),
             "slowdown_capped": slowdown_capped,
+            "speed_capped": speed_capped,
             "words": words,
             "native_duration_sec": round(old_duration, 3),
             "fitted_duration_sec": round(fitted_duration, 3),
@@ -316,6 +326,12 @@ def _fit_narration_rate(text: str, audio_path: Path, voice_id: str = "vi-VN") ->
             "Rate fit %s: native %.1f WPM needs atempo %.2f (< %.2f cap) — "
             "keeping %.1f WPM for naturalness; use pauses for the remaining time",
             audio_path.name, native_wpm, desired, MIN_ATEMPO, fitted_wpm,
+        )
+    elif speed_capped:
+        logger.warning(
+            "Rate fit %s: native %.1f WPM would need %.2fx (> %.2f naturalness "
+            "cap) — keeping %.1f WPM; normalize pauses instead of stretching",
+            audio_path.name, native_wpm, desired, FIT_MAX_ATEMPO, fitted_wpm,
         )
     else:
         logger.info(
@@ -333,6 +349,48 @@ def _edge_tts_save(text: str, edge_voice: str, out_path: Path) -> None:
         await comm.save(str(out_path))
 
     asyncio.run(_edge())
+
+
+def _make_silence_mp3(duration: float, out_path: Path) -> None:
+    from pipeline.ffmpeg import run_ffmpeg
+
+    run_ffmpeg(
+        ["-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+         "-t", f"{duration:.3f}", "-c:a", "libmp3lame", "-q:a", "2",
+         str(out_path)]
+    )
+
+
+def _edge_tts_save_natural(text: str, edge_voice: str, out_path: Path) -> None:
+    """Synthesize line-by-line and join with a fixed breath.
+
+    edge-tts hangs 0.6-1.0s of room tone on every newline (measured 48% silence
+    on the audio the owner rejected); synthesizing each line and concatenating
+    with FULL_NARRATION_PAUSE_SEC keeps the rhythm in the code's hands.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) <= 1:
+        _edge_tts_save(text, edge_voice, out_path)
+        return
+    import shutil
+    import uuid
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    parts_dir = out_path.parent / f".edge_parts_{uuid.uuid4().hex[:8]}"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        silence = parts_dir / "pause.mp3"
+        _make_silence_mp3(FULL_NARRATION_PAUSE_SEC, silence)
+        parts: list[Path] = []
+        for i, line in enumerate(lines):
+            part = parts_dir / f"line_{i:03d}.mp3"
+            _edge_tts_save(line, edge_voice, part)
+            parts.append(part)
+            if i < len(lines) - 1:
+                parts.append(silence)
+        _concat_audio_parts(parts, out_path)
+    finally:
+        shutil.rmtree(parts_dir, ignore_errors=True)
 
 
 def _concat_audio_parts(parts: list[Path], out_path: Path) -> None:
@@ -391,7 +449,7 @@ def _synthesize_chunked_xkiro_with_fallback(text: str, voice_id: str, out_path: 
             "edge-tts '%s' for the whole track",
             len(chunks), exc, edge_voice,
         )
-        _edge_tts_save(text, edge_voice, out_path)
+        _edge_tts_save_natural(text, edge_voice, out_path)
         return edge_voice
     finally:
         shutil.rmtree(parts_dir, ignore_errors=True)
@@ -406,7 +464,7 @@ def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path)
     directly through edge-tts — no gateway call is spent probing it.
     """
     if is_edge_voice(voice_id):
-        _edge_tts_save(text, voice_id, out_path)
+        _edge_tts_save_natural(text, voice_id, out_path)
         _fit_narration_rate(text, out_path, voice_id)
         return voice_id
     if len(text.strip()) > XKIRO_TTS_MAX_CHARS:
@@ -424,7 +482,7 @@ def synthesize_one_xkiro_with_fallback(text: str, voice_id: str, out_path: Path)
             "xKiro TTS failed for voice '%s' (%s) — falling back to edge-tts '%s'",
             voice_id, exc, edge_voice,
         )
-        _edge_tts_save(text, edge_voice, out_path)
+        _edge_tts_save_natural(text, edge_voice, out_path)
         return edge_voice
 
 

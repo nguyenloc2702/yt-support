@@ -482,3 +482,69 @@ def test_rate_fit_targets_documentary_pace_for_english_voices(tmp_path, monkeypa
     monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", boom)
     assert tts._fit_narration_rate("từ " * 60, audio_vi, "vi-VN-NamMinhNeural") == pytest.approx(180.0)
     assert audio_vi.read_bytes() == b"vi"
+
+
+def test_full_narration_synthesizes_line_by_line_with_fixed_breaths(tmp_path, monkeypatch):
+    import pipeline.tts as tts
+
+    line_texts = []
+
+    def fake_edge(text, voice, out):
+        line_texts.append(text)
+        out.write_bytes(b"line")
+
+    monkeypatch.setattr(tts, "_edge_tts_save", fake_edge)
+    monkeypatch.setattr(
+        tts, "_make_silence_mp3",
+        lambda dur, out: out.write_bytes(b"silence"),
+    )
+    concat_lists = []
+    monkeypatch.setattr(
+        tts, "_concat_audio_parts",
+        lambda parts, out: concat_lists.append([p.name for p in parts]) or out.write_bytes(b"joined"),
+    )
+
+    out = tmp_path / "full.mp3"
+    tts._edge_tts_save_natural("Cản một.\nCảnh hai.\nCảnh ba.", "vi-VN-NamMinhNeural", out)
+
+    assert line_texts == ["Cản một.", "Cảnh hai.", "Cảnh ba."]
+    assert concat_lists == [[
+        "line_000.mp3", "pause.mp3", "line_001.mp3", "pause.mp3", "line_002.mp3",
+    ]]
+    assert out.read_bytes() == b"joined"
+
+    # Single line: no parts ceremony, one direct save.
+    single = tmp_path / "one.mp3"
+    line_texts.clear()
+    concat_lists.clear()
+    tts._edge_tts_save_natural("Chỉ một dòng.", "vi-VN-NamMinhNeural", single)
+    assert line_texts == ["Chỉ một dòng."]
+    assert concat_lists == []
+    assert single.read_bytes() == b"line"
+
+
+def test_rate_fit_caps_speedup_at_naturalness_limit(tmp_path, monkeypatch):
+    import json
+
+    import pipeline.tts as tts
+
+    audio = tmp_path / "slow_en.mp3"
+    audio.write_bytes(b"slow")
+    # 60 words in 46.2s = 77.9 WPM -> reaching 160 needs 2.05x; cap 1.35x.
+    monkeypatch.setattr(tts, "_probe_duration", lambda p: 46.2)
+    calls = []
+
+    def fake_ffmpeg(args):
+        calls.append(args)
+        Path(args[-1]).write_bytes(b"fitted")
+
+    monkeypatch.setattr("pipeline.ffmpeg.run_ffmpeg", fake_ffmpeg)
+
+    wpm = tts._fit_narration_rate("word " * 60, audio, "en-US-ChristopherNeural")
+
+    assert wpm == pytest.approx(77.9, abs=0.1)
+    assert f"atempo={tts.FIT_MAX_ATEMPO:.4f}" in calls[0]
+    sidecar = json.loads(tts.rate_fit_sidecar_path(audio).read_text(encoding="utf-8"))
+    assert sidecar["speed_capped"] is True
+    assert sidecar["atempo"] == pytest.approx(tts.FIT_MAX_ATEMPO)
+    assert sidecar["slowdown_capped"] is False

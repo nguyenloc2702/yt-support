@@ -65,19 +65,19 @@ TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
 # step later for the same outlier.
 BUDGET_RATIO_FLOOR = 0.95
 
-# Voice mapping defaults — xKiro-first (Phase 1). All VI voices and EN narration
-# go through the xKiro gateway (`xkiro-voice` TTS model); edge-tts is only an
-# explicit availability fallback (see pipeline.tts.XKIRO_TO_EDGE).
+# Voice mapping defaults. The owner auditioned both languages and picked the
+# free edge voices (2026-10-24): Nam Minh for VI (sample C), Christopher for
+# EN. xKiro voices remain available through the Gate 1 audition (/voice).
 VOICE_MAP = {
     "vi": {
-        "male": "confident-male-vietnamese",
-        "female": "sweet-female-vietnamese",
-        "default": "confident-male-vietnamese",
+        "male": "vi-VN-NamMinhNeural",
+        "female": "vi-VN-HoaiMyNeural",
+        "default": "vi-VN-NamMinhNeural",
     },
     "en": {
-        "male": "male-voice",
-        "female": "female-voice",
-        "default": "male-voice",
+        "male": "en-US-ChristopherNeural",
+        "female": "en-US-JennyNeural",
+        "default": "en-US-ChristopherNeural",
     },
 }
 
@@ -99,6 +99,14 @@ def _voice_display_name(voice: str) -> str:
         return "Nữ Documentary (xKiro EN)"
     if "NamMinh" in voice:
         return "Nam Minh (Nam, edge-tts)"
+    if "Christopher" in voice:
+        return "Christopher trầm (Nam EN, edge-tts)"
+    if "Guy" in voice:
+        return "Guy (Nam EN, edge-tts)"
+    if "HoaiMy" in voice:
+        return "Hoài My (Nữ, edge-tts)"
+    if "Jenny" in voice:
+        return "Jenny (Nữ EN, edge-tts)"
     return f"{voice} (edge-tts)"
 
 

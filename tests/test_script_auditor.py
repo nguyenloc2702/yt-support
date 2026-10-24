@@ -192,7 +192,7 @@ def test_audit_valid_script():
     res = auditor.audit_script(raw)
     assert res.is_valid is True
     assert res.language == "vi"
-    assert res.recommended_voice == "confident-male-vietnamese"
+    assert res.recommended_voice == "vi-VN-NamMinhNeural"
     assert len(res.scenes) == 3
 
 
@@ -403,3 +403,13 @@ def test_audit_length_cap_follows_the_scene_count_it_was_given():
     assert strict.is_valid is False
     assert any("quá dài (173 cảnh)" in issue for issue in strict.issues)
     assert sized.is_valid is True, sized.issues
+
+
+def test_voice_map_defaults_are_the_auditioned_edge_voices():
+    from pipeline.tts import is_edge_voice
+    from services.script_auditor import VOICE_MAP
+
+    assert VOICE_MAP["vi"]["default"] == "vi-VN-NamMinhNeural"
+    assert VOICE_MAP["en"]["default"] == "en-US-ChristopherNeural"
+    assert is_edge_voice(VOICE_MAP["vi"]["default"])
+    assert is_edge_voice(VOICE_MAP["en"]["default"])

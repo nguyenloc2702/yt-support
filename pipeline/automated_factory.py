@@ -927,12 +927,12 @@ class AutomatedFactory:
                 inline_markup = {
                     "inline_keyboard": [
                         [
-                            {"text": "🎙 Nam Dõng Dạc (xKiro VN)", "callback_data": f"voice:{job_id}:confident-male-vietnamese"},
-                            {"text": "🎙 Nữ Ngọt Ngào (xKiro VN)", "callback_data": f"voice:{job_id}:sweet-female-vietnamese"},
+                            {"text": "🎙 Nam Minh (edge VN)", "callback_data": f"voice:{job_id}:vi-VN-NamMinhNeural"},
+                            {"text": "🎙 Christopher trầm (edge EN)", "callback_data": f"voice:{job_id}:en-US-ChristopherNeural"},
                         ],
                         [
-                            {"text": "🎙 Nam Documentary (xKiro EN)", "callback_data": f"voice:{job_id}:male-voice"},
-                            {"text": "🎙 Nam Minh (edge VN)", "callback_data": f"voice:{job_id}:vi-VN-NamMinhNeural"},
+                            {"text": "🎙 Nam Dõng Dạc (xKiro VN)", "callback_data": f"voice:{job_id}:confident-male-vietnamese"},
+                            {"text": "🎙 Nữ Ngọt Ngào (xKiro VN)", "callback_data": f"voice:{job_id}:sweet-female-vietnamese"},
                         ],
                         [
                             {"text": "📝 Duyệt Kịch Bản (G1)", "callback_data": f"approve_script:{job_id}"},
