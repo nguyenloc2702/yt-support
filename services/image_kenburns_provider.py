@@ -49,6 +49,17 @@ REFRAAME_CUT_MIN_SECONDS = 5.5
 # flat explainer art read as animated instead of as a frozen still.
 BOIL_PIXELS = 3
 BOIL_HOLD_FRAMES = 3
+# One drawing cannot move, so each shot is drawn in a few poses and blended:
+# the same character visibly changes action across the clip.
+POSES_PER_SHOT = 3
+POSE_BLEND_SECONDS = 0.30
+POSE_CUES = (
+    "the character takes one step forward with an arm swinging",
+    "the character raises an arm and leans slightly toward the viewer",
+    "the character turns the head and gestures with an open hand",
+    "the character brings both hands down onto the surface in front",
+    "the character looks up with both arms lifted",
+) 
 
 
 def _shot_seed(out_path: Path) -> int:
@@ -92,11 +103,13 @@ def _zoompan_filter(motion: str, frames: int, seed: int = 0) -> str:
     )
 
 
-def build_kenburns_filter(seed: int, duration: float) -> str:
+def build_kenburns_filter(seed: int, duration: float, image_count: int = 1) -> str:
     """Return an ffmpeg filter_complex graph: one cover crop plus 1-2 moves.
 
     The source image is cover-cropped to the overscan canvas (never stretched),
-    so pans have real room to travel and faces keep their proportions.
+    so pans have real room to travel and faces keep their proportions. With
+    more than one image the stills are blended pose-to-pose, which is the only
+    on-screen movement available when no video model is reachable.
     """
     total_frames = max(1, int(round(duration * KENBURNS_FPS)))
     cover = (
@@ -105,6 +118,9 @@ def build_kenburns_filter(seed: int, duration: float) -> str:
         # keep the face instead of losing the top of the head.
         f"crop={KENBURNS_WIDTH}:{KENBURNS_HEIGHT}:0:(ih-oh)*0.10"
     )
+    if image_count > 1:
+        return _pose_graph(seed, duration, image_count, cover)
+
     first = KENBURNS_MOTIONS[seed % len(KENBURNS_MOTIONS)]
 
     if duration < REFRAAME_CUT_MIN_SECONDS:
@@ -123,6 +139,41 @@ def build_kenburns_filter(seed: int, duration: float) -> str:
         f"[b]{_zoompan_filter(second, frames_b, seed + 1)},trim=end_frame={frames_b},"
         f"setpts=PTS-STARTPTS[vb];"
         f"[va][vb]concat=n=2:v=1:a=0,format=yuv420p[v]"
+    )
+
+
+def _pose_graph(seed: int, duration: float, image_count: int, cover: str) -> str:
+    """Blend N pose drawings over the shot's real duration."""
+    blend = POSE_BLEND_SECONDS
+    segment = (duration + blend * (image_count - 1)) / image_count
+    frames = max(2, int(round(segment * KENBURNS_FPS)))
+    parts = []
+    for i in range(image_count):
+        motion = KENBURNS_MOTIONS[(seed + i * 2) % len(KENBURNS_MOTIONS)]
+        parts.append(
+            f"[{i}:v]{cover},{_zoompan_filter(motion, frames, seed + i)},"
+            f"trim=end_frame={frames},setpts=PTS-STARTPTS,setsar=1[p{i}]"
+        )
+    previous = "p0"
+    offset = segment - blend
+    for i in range(1, image_count):
+        label = f"x{i}"
+        parts.append(
+            f"[{previous}][p{i}]xfade=transition=fade:duration={blend:.2f}:"
+            f"offset={offset:.3f}[{label}]"
+        )
+        previous = label
+        offset += segment - blend
+    parts.append(f"[{previous}]format=yuv420p[v]")
+    return ";".join(parts)
+
+
+def _pose_edit_prompt(cue: str) -> str:
+    return (
+        "Keep this exact same drawing: same characters, same framing, same colors, "
+        "same background, same flat crayon stick-figure style, same props. "
+        f"Change only the action so that {cue}. "
+        "Do not restyle, do not reframe, do not add text."
     )
 
 
@@ -150,6 +201,7 @@ class ImageKenBurnsProvider(VideoProvider):
 
         # Step 1: Generate or obtain high-res image
         has_image = False
+        image_from_xkiro = False
 
         # Priority 0: Use canonical character reference image if provided
         if ref_image and Path(ref_image).is_file():
@@ -173,6 +225,7 @@ class ImageKenBurnsProvider(VideoProvider):
                 )
                 if img_path.exists() and img_path.stat().st_size > 1000:
                     has_image = True
+                    image_from_xkiro = True
                     logger.info("Ken Burns image via xKiro (%s): %s", used_model, img_path)
             except Exception as e:
                 logger.warning(
@@ -242,13 +295,33 @@ class ImageKenBurnsProvider(VideoProvider):
                 duration_sec=time.time() - start_time,
             )
 
-        # Step 2: Animate with a cover-cropped, per-shot varied camera move
+        # Step 2: Redraw a few poses of the same drawing so the character moves
+        seed = _shot_seed(out_path)
+        images = [img_path]
+        if image_from_xkiro and POSES_PER_SHOT > 1:
+            from services.xkiro_image_provider import edit_xkiro_image
+
+            for idx in range(1, POSES_PER_SHOT):
+                pose_path = img_path.with_name(f"{img_path.stem}_pose{idx}.jpg")
+                cue = POSE_CUES[(seed + idx) % len(POSE_CUES)]
+                try:
+                    edit_xkiro_image(_pose_edit_prompt(cue), img_path, pose_path)
+                except Exception as e:
+                    logger.warning(
+                        "Pose keyframe %d failed (%s) — rendering with %d drawing(s)",
+                        idx, e, len(images),
+                    )
+                    break
+                if pose_path.exists() and pose_path.stat().st_size > 1000:
+                    images.append(pose_path)
+
+        # Step 3: Animate with a cover-cropped, per-shot varied camera move
         try:
-            graph = build_kenburns_filter(_shot_seed(out_path), kb_duration)
-            cmd_kb = [
-                "ffmpeg", "-y",
-                "-loop", "1",
-                "-i", str(img_path),
+            graph = build_kenburns_filter(seed, kb_duration, image_count=len(images))
+            cmd_kb = ["ffmpeg", "-y"]
+            for pose_image in images:
+                cmd_kb += ["-loop", "1", "-i", str(pose_image)]
+            cmd_kb += [
                 "-filter_complex", graph,
                 "-map", "[v]",
                 "-t", f"{kb_duration:.2f}",
@@ -259,7 +332,7 @@ class ImageKenBurnsProvider(VideoProvider):
                 "-pix_fmt", "yuv420p",
                 str(out_path),
             ]
-            subprocess.run(cmd_kb, check=True, capture_output=True, timeout=180)
+            subprocess.run(cmd_kb, check=True, capture_output=True, timeout=300)
 
             if out_path.exists() and out_path.stat().st_size > 5000:
                 return ProviderResult(
@@ -279,7 +352,7 @@ class ImageKenBurnsProvider(VideoProvider):
             return ProviderResult(
                 ok=False,
                 error_kind=ErrorKind.FATAL,
-                error_message=f"Ken Burns animation timed out after 180s: {e}",
+                error_message=f"Ken Burns animation timed out after 300s: {e}",
                 duration_sec=time.time() - start_time,
             )
         except Exception as e:

@@ -24,6 +24,52 @@ def _resp(status=200, body=None, content=b"", text=""):
     )
 
 
+def _poll_then_download(polls, download):
+    state = {"calls": 0}
+
+    def fake_get(url, headers=None, timeout=None):
+        if url.startswith("https://cdn.test/"):
+            return download
+        state["calls"] += 1
+        return polls[min(state["calls"], len(polls)) - 1]
+
+    return fake_get
+
+
+def test_edit_image_posts_multipart_and_saves_result(tmp_path, monkeypatch, provider):
+    src = tmp_path / "shot_007.jpg"
+    src.write_bytes(b"\xff\xd8\xff" + b"x" * 2000)
+    posts = []
+
+    def fake_post(url, headers=None, data=None, files=None, timeout=None):
+        posts.append({"url": url, "data": data, "files": files})
+        return _resp(202, {"id": "job-edit", "status": "processing"})
+
+    download = _resp(200, content=b"\xff\xd8\xff" + b"y" * 2000)
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(
+        "requests.get",
+        _poll_then_download(
+            [
+                _resp(200, {"status": "processing"}),
+                _resp(200, {"status": "succeeded", "data": [{"url": "https://cdn.test/e.jpg"}]}),
+            ],
+            download,
+        ),
+    )
+
+    out = tmp_path / "shot_007_pose1.jpg"
+    used = provider.edit_xkiro_image("change only the arm pose", src, out)
+
+    assert used == provider.DEFAULT_IMAGE_MODEL
+    assert out.read_bytes().startswith(b"\xff\xd8\xff")
+    assert posts[0]["url"].endswith("/images/edits")
+    assert posts[0]["data"]["prompt"] == "change only the arm pose"
+    # The gateway rejects a multipart "n" field with a 400
+    assert "n" not in posts[0]["data"]
+    assert "image" in posts[0]["files"]
+
+
 def test_generate_image_polls_job_and_saves_download(tmp_path, monkeypatch, provider):
     posts = []
 
