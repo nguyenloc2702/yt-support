@@ -166,21 +166,43 @@ def _submit_with_heal(
         return _submit_job(prompt, model, headers, base, size), retry_key
 
 
+def _submit_edit(
+    prompt: str, source_image: Path, model: str, headers: dict, base: str
+) -> dict:
+    import requests
+
+    src = Path(source_image)
+    mime = "image/png" if src.suffix.lower() == ".png" else "image/jpeg"
+    with src.open("rb") as fh:
+        resp = requests.post(
+            f"{base}/images/edits",
+            headers=headers,
+            data={"model": model, "prompt": prompt, "size": "1792x1024"},
+            files={"image": (src.name, fh, mime)},
+            timeout=120,
+        )
+    if resp.status_code not in (200, 202):
+        raise ImageGenerationError(
+            f"xKiro image edit submit failed ({model}) status {resp.status_code}: {resp.text[:200]}"
+        )
+    return resp.json()
+
+
 def edit_xkiro_image(
     prompt: str,
     source_image: Path,
     out_path: Path,
     model: Optional[str] = None,
+    fallback_model: Optional[str] = None,
     poll_timeout: float = DEFAULT_JOB_TIMEOUT_SECONDS,
     api_key: Optional[str] = None,
 ) -> str:
     """Redraw an existing image with a new pose, keeping its composition.
 
     The gateway's ``/images/edits`` queue is what makes limited animation
-    possible without a video model: same drawing, different action.
+    possible without a video model: same drawing, different action. A paid
+    model out of credit falls back to the free model instead of losing the pose.
     """
-    import requests
-
     out_path = Path(out_path)
     src = Path(source_image)
     key = api_key or _api_key()
@@ -188,34 +210,49 @@ def edit_xkiro_image(
         raise ImageGenerationError("xKiro API key is not configured (DB or XKIRO_API_KEY).")
     headers = {"Authorization": f"Bearer {key}"}
     base = _api_base()
-    candidate = model or os.environ.get("XKIRO_IMAGE_MODEL") or DEFAULT_IMAGE_MODEL
-    mime = "image/png" if src.suffix.lower() == ".png" else "image/jpeg"
 
-    with src.open("rb") as fh:
-        resp = requests.post(
-            f"{base}/images/edits",
-            headers=headers,
-            data={"model": candidate, "prompt": prompt, "size": "1792x1024"},
-            files={"image": (src.name, fh, mime)},
-            timeout=120,
-        )
-    if resp.status_code not in (200, 202):
-        raise ImageGenerationError(
-            f"xKiro image edit submit failed ({candidate}) status {resp.status_code}: {resp.text[:200]}"
-        )
+    models = [model or os.environ.get("XKIRO_IMAGE_MODEL") or DEFAULT_IMAGE_MODEL]
+    fallback = fallback_model or os.environ.get("XKIRO_IMAGE_FALLBACK_MODEL") or FREE_IMAGE_MODEL
+    if fallback and fallback not in models:
+        models.append(fallback)
 
-    job = resp.json()
-    job_id = job.get("id")
-    if not job_id:
-        if job.get("data"):
-            _save_image(job, out_path)
-            return candidate
-        raise ImageGenerationError(f"xKiro image edit returned no job id: {str(job)[:200]}")
+    last_exc: Optional[Exception] = None
+    for idx, candidate in enumerate(models):
+        try:
+            job = _submit_edit(prompt, src, candidate, headers, base)
+        except ImageGenerationError as exc:
+            last_exc = exc
+            if idx + 1 < len(models):
+                logger.warning(
+                    "xKiro image edit model %s failed (%s) — falling back to %s",
+                    candidate, exc, models[idx + 1],
+                )
+            continue
 
-    result = _wait_for_job(job_id, headers, base, poll_timeout)
-    _save_image(result, out_path)
-    logger.info("Pose keyframe generated via xKiro %s: %s", candidate, out_path)
-    return candidate
+        job_id = job.get("id")
+        if not job_id:
+            if job.get("data"):
+                _save_image(job, out_path)
+                return candidate
+            last_exc = ImageGenerationError(
+                f"xKiro image edit returned no job id: {str(job)[:200]}"
+            )
+        else:
+            try:
+                result = _wait_for_job(job_id, headers, base, poll_timeout)
+                _save_image(result, out_path)
+                logger.info("Pose keyframe generated via xKiro %s: %s", candidate, out_path)
+                return candidate
+            except ImageGenerationError as exc:
+                last_exc = exc
+
+        if idx + 1 < len(models):
+            logger.warning(
+                "xKiro image edit model %s failed (%s) — falling back to %s",
+                candidate, last_exc, models[idx + 1],
+            )
+
+    raise ImageGenerationError(f"xKiro image edit failed: {last_exc}")
 
 
 def generate_xkiro_image(

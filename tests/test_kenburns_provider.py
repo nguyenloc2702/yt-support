@@ -224,6 +224,8 @@ def test_pose_keyframes_become_a_multi_input_blend(kb_provider, tmp_path, monkey
     graph = captured[0][captured[0].index("-filter_complex") + 1]
     assert f"xfade=transition=fade:duration={POSE_BLEND_SECONDS:.2f}" in graph
     assert "[2:v]" in graph
+    # xfade needs a declared constant frame rate on both inputs
+    assert "setpts=PTS-STARTPTS,fps=25" in graph
 
 
 def test_pose_blend_is_skipped_when_edits_fail(kb_provider, tmp_path, monkeypatch):

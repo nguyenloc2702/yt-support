@@ -70,6 +70,35 @@ def test_edit_image_posts_multipart_and_saves_result(tmp_path, monkeypatch, prov
     assert "image" in posts[0]["files"]
 
 
+def test_edit_image_falls_back_to_free_model_without_credit(tmp_path, monkeypatch, provider):
+    src = tmp_path / "shot_007.jpg"
+    src.write_bytes(b"\xff\xd8\xff" + b"x" * 2000)
+    models = []
+
+    def fake_post(url, headers=None, data=None, files=None, timeout=None):
+        models.append(data["model"])
+        if data["model"] == provider.DEFAULT_IMAGE_MODEL:
+            return _resp(402, {"error": {"message": "Insufficient wallet balance"}}, text="Insufficient wallet balance")
+        return _resp(202, {"id": "job-free"})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(
+        "requests.get",
+        lambda url, **k: (
+            _resp(200, content=b"\xff\xd8\xff" + b"z" * 2000)
+            if url.startswith("https://cdn.test/")
+            else _resp(200, {"status": "succeeded", "data": [{"url": "https://cdn.test/f.jpg"}]})
+        ),
+    )
+
+    out = tmp_path / "pose.jpg"
+    used = provider.edit_xkiro_image("pose", src, out)
+
+    assert used == provider.FREE_IMAGE_MODEL
+    assert models == [provider.DEFAULT_IMAGE_MODEL, provider.FREE_IMAGE_MODEL]
+    assert out.exists()
+
+
 def test_generate_image_polls_job_and_saves_download(tmp_path, monkeypatch, provider):
     posts = []
 

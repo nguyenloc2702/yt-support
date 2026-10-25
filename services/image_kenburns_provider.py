@@ -152,7 +152,8 @@ def _pose_graph(seed: int, duration: float, image_count: int, cover: str) -> str
         motion = KENBURNS_MOTIONS[(seed + i * 2) % len(KENBURNS_MOTIONS)]
         parts.append(
             f"[{i}:v]{cover},{_zoompan_filter(motion, frames, seed + i)},"
-            f"trim=end_frame={frames},setpts=PTS-STARTPTS,setsar=1[p{i}]"
+            # xfade rejects a stream without an explicit constant frame rate.
+            f"trim=end_frame={frames},setpts=PTS-STARTPTS,fps={KENBURNS_FPS},setsar=1[p{i}]"
         )
     previous = "p0"
     offset = segment - blend
