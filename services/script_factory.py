@@ -464,6 +464,11 @@ class ScriptFactory:
         scenes), never a veto: rejecting on it discarded two of three variants
         in a live run, spending a third of the script phase on rewrites whose
         only flaw was pacing the scorecard accepts.
+
+        The mean-duration band is a planning target too, not a verdict. A live
+        run rejected a variant whose only flaw was 6.68s mean against a 6.5s
+        ceiling — content the scorecard's own S11 accepts and the owner could
+        judge at Gate 1. It is reported as a warning; S10 still grades it.
         """
         total = len(scenes_vi)
         if not total:
@@ -475,16 +480,20 @@ class ScriptFactory:
         metrics = self._mechanical_metrics(scenes_vi)
         wpm = float(metrics.get("estimated_wpm") or 0.0)
         mean_dur = float(metrics.get("mean_scene_duration") or 0.0)
-        problems: List[str] = []
+        # No single duration value vetoes a variant: durations are derived from
+        # the legal word window, so a mean outside the band is content S10 grades
+        # and S11 tolerates. Keep it visible in the artifact instead of discarding.
+        warnings: List[str] = []
         if not MEAN_DUR_RANGE[0] <= mean_dur <= MEAN_DUR_RANGE[1]:
-            problems.append(
+            warnings.append(
                 f"mean scene duration {mean_dur:.2f}s outside "
                 f"{MEAN_DUR_RANGE[0]}-{MEAN_DUR_RANGE[1]}s"
             )
         return {
-            "ok": not problems,
+            "ok": True,
             "target_met": ratio >= MIN_BUDGET_RATIO,
-            "reason": "; ".join(problems),
+            "reason": "",
+            "warnings": warnings,
             "ratio": round(ratio, 3),
             "offenders": offenders,
             "vi_low": kinds.count("vi_low"),
@@ -1049,13 +1058,19 @@ class ScriptFactory:
                     if text_en:
                         en["text"] = text_en
         report = self._acceptance_report(scenes_vi, scenes_en)
-        if not report["ok"] or not report["target_met"]:
+        if report["warnings"]:
+            logger.warning(
+                "Word-budget repair: %s (mean=%.2fs WPM=%.0f)",
+                "; ".join(report["warnings"]),
+                report["mean_scene_duration"], report["wpm"],
+            )
+        if not report["target_met"]:
             logger.warning(
                 "Word-budget repair left %d/%d scenes out of budget "
-                "(vi_low=%d vi_high=%d en_high=%d WPM=%.0f mean=%.2fs) — first: %s | %s",
+                "(vi_low=%d vi_high=%d en_high=%d WPM=%.0f mean=%.2fs) — first: %s",
                 report["offenders"], len(scenes_vi), report["vi_low"], report["vi_high"],
                 report["en_high"], report["wpm"], report["mean_scene_duration"],
-                self._budget_offenders(scenes_vi, scenes_en)[:5], report["reason"],
+                self._budget_offenders(scenes_vi, scenes_en)[:5],
             )
 
     def _rewrite_chunk_robust(
@@ -1079,7 +1094,19 @@ class ScriptFactory:
             )
         except Exception as exc:
             if len(chunk_vi) <= SPLIT_MIN_CHUNK:
-                raise
+                # At the split floor there is no smaller chunk to fall back to,
+                # and a 5-scene request occasionally comes back as a rewrite of
+                # the whole story (23 scenes for 5 inputs). One stern retry is
+                # cheaper than losing the variant to a single stray response.
+                logger.warning(
+                    "Rewrite chunk %d-%d failed (%s); retrying once with an exact count",
+                    chunk_start + 1, chunk_start + len(chunk_vi), exc,
+                )
+                return self._rewrite_chunk(
+                    angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
+                    chunk_start, total_scenes, feedback_brief, outline, used_phrases,
+                    strict=True,
+                )
             mid = len(chunk_vi) // 2
             logger.warning(
                 "Rewrite chunk %d-%d failed (%s); splitting into %d+%d scenes",
@@ -1110,6 +1137,7 @@ class ScriptFactory:
         feedback_brief: str = "",
         outline: str = "",
         used_phrases: Optional[List[str]] = None,
+        strict: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         from pipeline.llm_client import chat_json
 
@@ -1166,7 +1194,9 @@ class ScriptFactory:
             f"BỘ CẢNH CẦN VIẾT LẠI (cảnh {chunk_start + 1}-{chunk_start + len(chunk_vi)} "
             f"trên tổng {total_scenes}):\n"
             f"{json.dumps(compact_base, ensure_ascii=False, indent=1)}\n\n"
-            f"Yêu cầu: viết lại TỪNG cảnh đúng thứ tự, GIỮ NGUYÊN SỐ LƯỢNG CẢNH. Với mỗi cảnh:\n"
+            f"Yêu cầu: viết lại TỪNG cảnh đúng thứ tự, GIỮ NGUYÊN SỐ LƯỢNG CẢNH — mảng "
+            f"\"scenes\" phải có ĐÚNG {len(chunk_vi)} phần tử, không gộp cảnh, "
+            f"không thêm cảnh ngoài danh sách. Với mỗi cảnh:\n"
             f"- voiceover_vi: viết như người kể chuyện đang kể cho một người bạn thông minh, "
             f"không đọc kiểu báo cáo: nối ý bằng từ nối tự nhiên ('Nhưng', 'Mà', 'Và rồi', 'Thực ra', "
             f"'Vậy là', 'Điều đáng nói là'), mỗi cảnh có ít nhất một câu dài có mệnh đề phụ; "
@@ -1188,6 +1218,13 @@ class ScriptFactory:
             '{"scenes": [{"index": <int>, "situation": "...", "voiceover_vi": "...", '
             '"voiceover_en": "...", "estimated_duration": <float>, "visual_prompt": "..."}]}'
         )
+        if strict:
+            user_prompt += (
+                f"\n\nLƯU Ý BẮT BUỘC: lần trả lời trước sai số cảnh. Mảng \"scenes\" phải "
+                f"có CHÍNH XÁC {len(chunk_vi)} phần tử — đúng {len(chunk_vi)} cảnh trong "
+                f"danh sách trên, không gộp cảnh, không thêm cảnh mới, không viết lại "
+                f"phần khác của bài."
+            )
 
         parsed = chat_json(
             system_prompt, user_prompt, temperature=0.8, max_tokens=8000, model=self.model

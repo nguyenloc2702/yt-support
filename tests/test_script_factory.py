@@ -65,7 +65,7 @@ class Router:
                  short_rewrites=False, fail_chunks_above=None, repair_words=None,
                  word_plan=None, repair_echo=False, empty_scene_in_chunks_above=None,
                  en_word_plan=None, plain_visual_for=(), outline=None,
-                 edit_issues=None):
+                 edit_issues=None, overflow_at_size=None):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.outline = outline or {
@@ -95,6 +95,9 @@ class Router:
         # i.e. a model that cannot fix the scene. Lets tests see the raw verdict.
         self.repair_echo = repair_echo
         self.empty_scene_in_chunks_above = empty_scene_in_chunks_above
+        # Inflate every non-strict reply for chunks of this size (the live run
+        # answered a 5-scene request with 23 scenes).
+        self.overflow_at_size = overflow_at_size
         self.rewrite_prompts = []
         self.repair_prompts = []
         self.repair_calls = 0
@@ -255,7 +258,10 @@ class Router:
         n = len(items)
         if self.fail_chunks_above and n > self.fail_chunks_above:
             raise RuntimeError(f"truncated JSON for {n} scenes")
-        count = n - 1 if angle in self.wrong_count_angles else n
+        if self.overflow_at_size == n and "LƯU Ý BẮT BUỘC" not in user_prompt:
+            count = n + 18
+        else:
+            count = n - 1 if angle in self.wrong_count_angles else n
         return {
             "scenes": [
                 {
@@ -689,18 +695,39 @@ def test_variant_survives_outliers_beyond_the_ratio_and_reports_target(factory, 
     assert router.repair_calls == sf.MAX_REPAIR_ROUNDS  # echoed output never fixes it
 
 
-def test_mean_scene_duration_is_enforced_absolute(factory, monkeypatch):
-    # Every scene inside the 14-28 window, but 28 words each => 8.0s scenes,
-    # which QA S10 (mean 4.5-6.5s) grades as a fail. Aggregate rules stay strict.
+def test_mean_scene_duration_outside_band_is_a_warning_not_a_veto(factory, monkeypatch):
+    # Every scene inside the 14-28 window, but 28 words each => 8.0s scenes:
+    # S10 grades that mean as a fail, yet the content is legal and S11 tolerates
+    # it. A live run lost a whole variant to 6.68s against a 6.5s ceiling, so the
+    # band is reported, never enforced here.
     variant, router = _variant(
         factory, monkeypatch, 20,
         word_plan={i: 28 for i in range(1, 21)}, repair_echo=True,
     )
 
-    assert variant.valid is False
-    assert "mean scene duration" in variant.invalid_reason
+    assert variant.valid is True, variant.invalid_reason
+    assert variant.budget_report["ok"] is True
     assert variant.budget_report["offenders"] == 0
+    assert any(
+        "mean scene duration" in w for w in variant.budget_report["warnings"]
+    )
     assert router.repair_calls == 0  # nothing per-scene to repair
+
+
+def test_min_chunk_overflow_gets_one_strict_retry(factory, monkeypatch, caplog):
+    # A 5-scene request came back as a rewrite of the whole story ("23 scenes
+    # for 5 inputs") and, being at SPLIT_MIN_CHUNK, had nowhere smaller to go —
+    # that alone invalidated two of three live variants.
+    with caplog.at_level(logging.WARNING):
+        variant, router = _variant(
+            factory, monkeypatch, 10, fail_chunks_above=9, overflow_at_size=5,
+        )
+
+    assert variant.valid is True, variant.invalid_reason
+    assert len(variant.scenes_vi) == 10
+    assert router.rewrite_calls == 5  # 10-scene try + 2x(5-scene try + strict retry)
+    assert any("LƯU Ý BẮT BUỘC" in p for p in router.rewrite_prompts)
+    assert "retrying once with an exact count" in caplog.text
 
 
 def test_repair_never_runs_on_an_already_compliant_variant(factory, monkeypatch):

@@ -48,8 +48,11 @@ GENERATED_WORD_WINDOW = (
 # toward RECOMMENDED_WORDS_PER_SHOT_ALGORITHM but only gated on GENERATED_WORD_WINDOW.
 MIN_WORDS_PER_SHOT_ALGORITHM = 12
 # The band every prompt (and the owner-facing Gate 1 copy) asks the writer for:
-# 18-24 words = 5.1-6.9s, which keeps the mean scene duration inside QA S10.
-RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (18, 24)
+# 17-21 words = 4.9-6.0s. The top edge has to sit *inside* QA S10's 6.5s mean
+# ceiling — the old 18-24 band ended at 6.9s and a live run that followed it
+# landed at 6.68s mean, i.e. the steering was pushing the script out of the
+# band that grades it. The enforced window stays GENERATED_WORD_WINDOW.
+RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (17, 21)
 MAX_WORDS_PER_SHOT_ALGORITHM = GENERATED_WORD_WINDOW[1]
 # EN lines follow the EN voice pace, not the VI one: documentary EN reads
 # ~160 wpm (edge) so a 4-8s scene carries 12-22 words. Capping EN at the old
@@ -878,7 +881,7 @@ def build_semantic_dual_scripts_from_transcript(
             return None
 
         total_dur = max((s["end"] for s in cleaned_segs), default=180.0)
-        # ~6s of finished narration per scene (18-24 words at 3.5 w/s). Blocks are
+        # ~6s of finished narration per scene (17-21 words at 3.5 w/s). Blocks are
         # sized so each call emits a manageable scene count while the whole script
         # still reaches the requested target_shots.
         target_scenes = max(6, int(target_shots))
