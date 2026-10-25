@@ -164,16 +164,31 @@ def sanitize_veo_prompt(
     scene_idx: int = 1,
     total_scenes: int = 24,
     era_hint: str = "17th-18th century historical documentary",
+    for_video: bool = True,
 ) -> str:
     """
-    Transforms raw narration / transcript into a safety-compliant, visual, cinematic prompt for Veo AI.
+    Transforms raw narration / transcript into a safety-compliant, visual prompt
+    in the flat storybook cartoon style.
 
     Guarantees:
     - Never triggers Google's Child Safety, Violence, Hate Speech, or Political Speech filters.
     - Replaces abstract dialogue or colloquialisms with scenic visual documentary elements.
     - Consistent flat storybook cartoon framing (matches the reference doodle style).
+    - for_video=False drops the motion/audio clauses for still-image prompts.
     """
+    still_body = (
+        "Flat 2D storybook cartoon illustration, hand-drawn explainer style. "
+        "Characters: simple figures with big round white heads, tiny dot eyes, "
+        "bold dark-brown ink outlines, no facial detail beyond the eyes. "
+        "Colors: flat muted earth tones - olive green, sand, rust, slate blue, "
+        "cream - with a subtle paper-grain texture. No gradients, no shadows, "
+        "no 3D, no photorealism. "
+        "Bright, flat, even lighting. Wide eye-level composition, the "
+        "characters clearly performing the action. "
+    )
     if not raw_text or not raw_text.strip():
+        if not for_video:
+            return f"{still_body}No text."
         return (
             "Flat 2D storybook cartoon animation, hand-drawn explainer style. "
             "Simple round-headed characters with tiny dot eyes and bold dark-brown "
@@ -209,7 +224,10 @@ def sanitize_veo_prompt(
     if len(text) < 18 or re.match(r"^Meanwhile\b", text, re.IGNORECASE):
         text = f"{text}. Expansive flat cartoon landscape with simple doodle buildings, {era_hint}"
 
-    # Build final standardized Veo prompt
+    # Build final standardized prompt (video adds motion/audio clauses)
+    if not for_video:
+        return f"{still_body}Scene: {text}. No text."
+
     prompt = (
         "Flat 2D storybook cartoon animation, hand-drawn explainer style. "
         "Characters: simple figures with big round white heads, tiny dot eyes, "

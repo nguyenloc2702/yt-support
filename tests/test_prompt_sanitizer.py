@@ -56,6 +56,15 @@ def test_sanitize_veo_prompt_empty_uses_storybook_frame():
     assert "Cinematic 4K" not in prompt
 
 
+def test_sanitize_veo_prompt_still_mode_drops_motion_and_audio():
+    prompt = sanitize_veo_prompt("Werner reads a ledger at the oak counter", for_video=False)
+    assert "Flat 2D storybook cartoon illustration" in prompt
+    assert "Scene: Werner reads a ledger at the oak counter" in prompt
+    assert "Motion:" not in prompt
+    assert "no audio" not in prompt.lower()
+    assert "animation" not in prompt.lower()
+
+
 def test_sanitize_veo_prompt_political_speech():
     raw = "The Dutch government watched this and said, we must act immediately"
     prompt = sanitize_veo_prompt(raw)

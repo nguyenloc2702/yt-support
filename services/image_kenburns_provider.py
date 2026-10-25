@@ -195,7 +195,7 @@ class ImageKenBurnsProvider(VideoProvider):
         **kwargs,
     ) -> ProviderResult:
         start_time = time.time()
-        safe_prompt = sanitize_veo_prompt(prompt)
+        safe_prompt = sanitize_veo_prompt(prompt, for_video=False)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         img_path = out_path.with_suffix(".jpg")
         kb_duration = max(2.0, min(float(duration or 10.0), 15.0))
