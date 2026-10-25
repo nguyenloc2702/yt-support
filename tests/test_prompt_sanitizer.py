@@ -16,8 +16,44 @@ def test_sanitize_veo_prompt_conflict_and_hate():
     prompt = sanitize_veo_prompt(raw)
     assert "hated" not in prompt.lower()
     assert "war" not in prompt.lower()
-    assert "Cinematic 4K" in prompt
-    assert "35mm master lens" in prompt
+    assert "storybook cartoon" in prompt
+    assert "no photorealism" in prompt
+    assert "photorealistic" not in prompt.lower()
+
+
+def test_sanitize_veo_prompt_replaces_documentary_wrapper_with_storybook():
+    raw = (
+        "Visual representation of: Werner enters the bank. "
+        "35mm master lens, photorealistic atmospheric depth, dramatic cinematic lighting, silent, no audio."
+    )
+    prompt = sanitize_veo_prompt(raw)
+    assert "Cinematic 4K" not in prompt
+    assert "35mm master lens" not in prompt
+    assert "Flat 2D storybook cartoon animation" in prompt
+    assert "Scene: Werner enters the bank" in prompt
+    assert "Bright, flat, even lighting" in prompt
+
+
+def test_sanitize_veo_prompt_flattens_mood_cues():
+    raw = (
+        "A middle-aged man enters a tiny bank branch. The scene is dimly lit, with old oak counters. "
+        "CRT monitors glow with greenish-blue light, cold blue glow, sharp contrast, dramatic lighting."
+    )
+    prompt = sanitize_veo_prompt(raw)
+    lowered = prompt.lower()
+    assert "dimly lit" not in lowered
+    assert "greenish-blue light" not in lowered
+    assert "cold blue glow" not in lowered
+    assert "sharp contrast" not in lowered
+    assert "dramatic lighting" not in lowered
+    assert "old oak counters" in prompt
+
+
+def test_sanitize_veo_prompt_empty_uses_storybook_frame():
+    prompt = sanitize_veo_prompt("")
+    assert "Flat 2D storybook cartoon animation" in prompt
+    assert "no photorealism" in prompt
+    assert "Cinematic 4K" not in prompt
 
 
 def test_sanitize_veo_prompt_political_speech():

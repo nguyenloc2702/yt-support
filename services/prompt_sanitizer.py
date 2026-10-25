@@ -8,7 +8,7 @@ Protects video generation from being blocked by Google's Safety and Content Filt
    - Political / Government Attribution (government watched and said, president said, etc.).
    - Minors / Demographics (children, kids, minors, young boys - common false-positive triggers in historical contexts).
    - Conversational / Non-visual slang (here's the play, leaner and meaner, double down).
-4. Visual scene reconstruction & cinematic 4K documentary framing.
+4. Visual scene reconstruction & flat storybook cartoon framing.
 """
 
 from __future__ import annotations
@@ -84,6 +84,21 @@ SENSITIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"\bthiếu\s+nhi\b", "cư dân địa phương"),
 ]
 
+# Mood/lighting cues that fight the flat storybook style; rewritten at Veo
+# render time only, so the locked manifest text stays untouched.
+MOOD_PATTERNS: List[Tuple[str, str]] = [
+    (r"\bthe scene is dimly lit,?\s*with\b", "the scene shows"),
+    (r"\bdimly lit\b", "evenly lit"),
+    (r"\bdim(?:ly)?(?:[- ]lit)? studio\b", "flat studio"),
+    (r"\bcold blue glow\b", "flat blue colors"),
+    (r"\bglow(?:s|ing)? with greenish-blue light\b", "flat colored screens"),
+    (r"\bsharp contrast\b", "clean flat shapes"),
+    (r"\bdramatic (?:lighting|shadows?|chiaroscuro)\b", "flat even lighting"),
+    (r"\bchiaroscuro\b", "flat lighting"),
+    (r"\bmoody (?:atmosphere|lighting)\b", "clean bright look"),
+    (r"\bcinematic lighting\b", "flat even lighting"),
+]
+
 
 # Crayon Style Bible prefix for every still and shot prompt (QA S13).
 CRAYON_STYLE_PREFIX = (
@@ -156,13 +171,17 @@ def sanitize_veo_prompt(
     Guarantees:
     - Never triggers Google's Child Safety, Violence, Hate Speech, or Political Speech filters.
     - Replaces abstract dialogue or colloquialisms with scenic visual documentary elements.
-    - Consistent Cinematic 4K 35mm master lens framing.
+    - Consistent flat storybook cartoon framing (matches the reference doodle style).
     """
     if not raw_text or not raw_text.strip():
         return (
-            f"Generate a video: Cinematic 4K, professional documentary cinematography. "
-            f"Atmospheric historical scene {scene_idx} depicting {era_hint}, "
-            f"35mm master lens, photorealistic atmospheric depth, dramatic chiaroscuro lighting, silent, no audio."
+            "Flat 2D storybook cartoon animation, hand-drawn explainer style. "
+            "Simple round-headed characters with tiny dot eyes and bold dark-brown "
+            "ink outlines perform a calm everyday action in a flat muted earth-tone "
+            f"scene {scene_idx} depicting {era_hint}, subtle paper-grain texture, "
+            "no gradients, no shadows, no photorealism. Gentle cutout animation "
+            "with a slow sideways camera pan. Bright, flat, even lighting. "
+            "Silent, no audio, no text."
         )
 
     text = raw_text.strip()
@@ -179,18 +198,30 @@ def sanitize_veo_prompt(
     for pattern, repl in SENSITIVE_PATTERNS:
         text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
 
+    # Flatten mood/lighting cues that fight the flat storybook style
+    for pattern, repl in MOOD_PATTERNS:
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+
     # Clean punctuation and whitespaces
     text = re.sub(r"\s+", " ", text).strip(" ,.-;:")
 
     # Expand short or non-visual fragments
     if len(text) < 18 or re.match(r"^Meanwhile\b", text, re.IGNORECASE):
-        text = f"{text}. Expansive oceanic trade routes and historic sailing vessels, {era_hint}"
+        text = f"{text}. Expansive flat cartoon landscape with simple doodle buildings, {era_hint}"
 
     # Build final standardized Veo prompt
     prompt = (
-        f"Generate a video: Cinematic 4K, professional documentary cinematography. "
-        f"{text}. "
-        f"35mm master lens, photorealistic atmospheric depth, dramatic cinematic lighting, silent, no audio."
+        "Flat 2D storybook cartoon animation, hand-drawn explainer style. "
+        "Characters: simple figures with big round white heads, tiny dot eyes, "
+        "bold dark-brown ink outlines, no facial detail beyond the eyes. "
+        "Colors: flat muted earth tones - olive green, sand, rust, slate blue, "
+        "cream - with a subtle paper-grain texture. No gradients, no shadows, "
+        "no 3D, no photorealism. "
+        f"Scene: {text}. "
+        "Motion: gentle cutout animation - characters bob and step in place, "
+        "props slide or pop in, smoke and steam puff softly, slow sideways "
+        "camera pan, everything drawn in the same naive doodle style. "
+        "Bright, flat, even lighting. Silent, no audio, no text."
     )
     return prompt
 

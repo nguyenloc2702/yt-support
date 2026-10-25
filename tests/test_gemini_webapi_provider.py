@@ -165,6 +165,6 @@ def test_generate_quota_exhausted(mock_client_cls, tmp_path: Path):
     assert result.ok is False
     assert result.error_kind == ErrorKind.QUOTA
     assert "quota exhausted" in result.error_message.lower()
-    # Ensure "Generate a video:" prefix was passed to generate_content
+    # Ensure the storybook cartoon frame was passed to generate_content
     call_args = mock_client.generate_content.call_args[1]
-    assert call_args["prompt"].startswith("Generate a video:")
+    assert call_args["prompt"].startswith("Flat 2D storybook cartoon animation")
