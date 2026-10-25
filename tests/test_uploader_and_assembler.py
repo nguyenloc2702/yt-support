@@ -40,7 +40,11 @@ def test_remote_size_none_when_missing_or_unparsable(monkeypatch):
     uploader = StorageUploader(remote_name="dummy_gdrive", remote_folder="test_folder")
     uploader.rclone_bin = "/mock/bin/rclone"
 
+    calls = []
+
     def missing(cmd, *args, **kwargs):
+        calls.append(cmd)
+
         class Res:
             returncode = 3
             stdout = ""
@@ -49,6 +53,22 @@ def test_remote_size_none_when_missing_or_unparsable(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", missing)
     assert uploader._remote_size("dummy_gdrive:test_folder/missing.mp4") is None
+    assert uploader._last_probe_error == "missing"
+
+    def quota_exhausted(cmd, *args, **kwargs):
+        class Res:
+            returncode = 1
+            stdout = ""
+            stderr = (
+                "googleapi: Error 403: Quota exceeded for quota metric 'Queries', "
+                "reason: RATE_LIMIT_EXCEEDED"
+            )
+        return Res()
+
+    monkeypatch.setattr(subprocess, "run", quota_exhausted)
+    assert uploader._remote_size("dummy_gdrive:test_folder/a.mp4") is None
+    # A throttled Drive API must not be reported as a missing file
+    assert uploader._last_probe_error == "rate_limited"
 
     def empty_dir(cmd, *args, **kwargs):
         class Res:
@@ -136,8 +156,8 @@ def test_storage_uploader_success_verified(tmp_path: Path, monkeypatch):
 
 
 def test_upload_verification_retries_after_copyto(tmp_path: Path, monkeypatch):
-    """Drive is eventually consistent: a freshly copied object can be invisible
-    on the first post-upload probe. Verification must poll instead of failing."""
+    """Drive throttling answers `rclone size` like a missing object; upload
+    verification must back off and retry instead of failing the shot."""
     import services.storage_uploader as storage_uploader_mod
 
     uploader = StorageUploader(remote_name="dummy_gdrive", remote_folder="test_folder")
@@ -169,7 +189,7 @@ def test_upload_verification_retries_after_copyto(tmp_path: Path, monkeypatch):
         return res
 
     monkeypatch.setattr(uploader, "_remote_size", fake_remote_size)
-    monkeypatch.setattr(storage_uploader_mod, "VERIFY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(storage_uploader_mod, "VERIFY_DELAYS", (0, 0, 0))
     monkeypatch.setattr(subprocess, "run", mock_run)
 
     ok, path = uploader.upload_and_clean(dummy_file, clean_local=False)

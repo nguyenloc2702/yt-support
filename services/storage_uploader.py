@@ -20,8 +20,7 @@ DEFAULT_REMOTE_FOLDER = os.environ.get(
     "RCLONE_REMOTE_FOLDER", "Video_Projects/history_of_microsoft/raw_shots"
 )
 
-VERIFY_ATTEMPTS = 3
-VERIFY_DELAY_SECONDS = 1.5
+VERIFY_DELAYS = (2.0, 5.0, 15.0, 30.0)
 
 
 class StorageUploader:
@@ -29,6 +28,7 @@ class StorageUploader:
         self.remote_name = remote_name
         self.remote_folder = remote_folder
         self.rclone_bin = shutil.which("rclone")
+        self._last_probe_error = "missing"
 
     @property
     def is_rclone_available(self) -> bool:
@@ -56,6 +56,12 @@ class StorageUploader:
             logger.warning("rclone size timed out after %ds for %s", timeout, remote_path)
             return None
         if res.returncode != 0:
+            stderr = (getattr(res, "stderr", "") or "").lower()
+            self._last_probe_error = (
+                "rate_limited"
+                if "quota" in stderr or "ratelimitexceeded" in stderr
+                else "missing"
+            )
             return None
         try:
             payload = json.loads((res.stdout or "").strip() or "{}")
@@ -66,18 +72,19 @@ class StorageUploader:
         return size if count == 1 else None
 
     def _await_remote_size(self, remote_path: str) -> Optional[int]:
-        """Poll briefly after copyto: Drive can lag behind a successful upload."""
-        for attempt in range(1, VERIFY_ATTEMPTS + 1):
+        """Confirm the object landed, tolerating Drive's 403 quota bursts.
+
+        rclone resolves the remote root on every call, so a throttled Drive API
+        answers like a missing object. Back off instead of declaring failure.
+        """
+        for delay in (0.0,) + VERIFY_DELAYS:
+            if delay:
+                time.sleep(delay)
             size = self._remote_size(remote_path)
             if size is not None:
-                if attempt > 1:
-                    logger.info(
-                        "Remote object became visible after %d verification attempts: %s",
-                        attempt, remote_path,
-                    )
+                if delay:
+                    logger.info("Remote object confirmed after %.0fs of retries: %s", delay, remote_path)
                 return size
-            if attempt < VERIFY_ATTEMPTS:
-                time.sleep(VERIFY_DELAY_SECONDS)
         return None
 
     def upload_and_clean(
@@ -167,7 +174,13 @@ class StorageUploader:
             # 3. Verify remote file exists and size matches local file EXACTLY (P1.7)
             remote_size = self._await_remote_size(remote_path)
             if remote_size is None:
-                logger.error("rclone remote verification failed for %s/%s (missing or unreadable)", dest_folder, dest_name)
+                if self._last_probe_error == "rate_limited":
+                    logger.error(
+                        "rclone remote verification inconclusive for %s/%s: Drive API quota/rate limit exhausted; upload will be retried",
+                        dest_folder, dest_name,
+                    )
+                else:
+                    logger.error("rclone remote verification failed for %s/%s (missing or unreadable)", dest_folder, dest_name)
                 return False, None
 
             if remote_size == 0:
