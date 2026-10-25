@@ -361,8 +361,8 @@ class ScriptAuditor:
         prefix = m.group(0).strip()
         if re.fullmatch(r"\d+", prefix):
             return None  # "84% tin …": a number in the narration, not a scene.
-        if re.fullmatch(r"\d{4,}[.)]", prefix):
-            return None  # "2014. …" is prose; scenes are numbered 1-3 digits.
+        if re.fullmatch(r"\d{4,}[.):]", prefix):
+            return None  # "2014. …" / "2003: …" is prose; scenes are numbered 1-3 digits.
         if line[m.end():m.end() + 1].isdigit():
             return None  # "10.000 đô la": the prefix is a decimal, not "scene 10."
         return m
@@ -464,9 +464,19 @@ class ScriptAuditor:
 
         return [clean_narration_for_tts(s) for s in scenes if s.strip()]
 
-    def audit_script(self, raw_text: str) -> ScriptAuditResult:
-        """Thoroughly audits the script against length, safety, pacing, and language consistency."""
-        raw_scenes = self.parse_raw_script(raw_text)
+    def audit_script(
+        self, raw_text: str, preparsed_scenes: Optional[List[str]] = None
+    ) -> ScriptAuditResult:
+        """Thoroughly audits the script against length, safety, pacing, and language consistency.
+
+        preparsed_scenes: when the caller already segmented the script (the
+        factory audits its own scene list), parse_raw_script heuristics must
+        not re-split prose lines that happen to start with numbers.
+        """
+        if preparsed_scenes:
+            raw_scenes = [clean_narration_for_tts(s) for s in preparsed_scenes if s and s.strip()]
+        else:
+            raw_scenes = self.parse_raw_script(raw_text)
 
         if not raw_scenes:
             return ScriptAuditResult(

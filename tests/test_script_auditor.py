@@ -366,6 +366,31 @@ def test_parser_still_reads_decorated_scene_prefixes():
     assert parsed[2].endswith(".")
 
 
+def test_parser_ignores_year_colon_prose_lines():
+    import services.script_auditor as sa
+
+    lines = [_sentence(16) for _ in range(8)]
+    lines[3] = "2003: mẫu thử đầu tiên chạy trong hầm sạch tại Eindhoven."
+
+    parsed = sa.ScriptAuditor(target_scenes=10, algorithm_mode=True).parse_raw_script(_narration(lines))
+
+    assert len(parsed) == 8
+    assert any(p.startswith("2003:") for p in parsed)
+
+
+def test_audit_uses_preparsed_scenes_verbatim():
+    import services.script_auditor as sa
+
+    scenes = [_sentence(18) for _ in range(7)]
+
+    result = sa.ScriptAuditor(target_scenes=7, algorithm_mode=True).audit_script(
+        "\n".join(scenes), preparsed_scenes=scenes
+    )
+
+    assert result.total_scenes == 7
+    assert result.is_valid is True, result.issues
+
+
 def test_algorithm_audit_tolerates_the_same_tail_the_factory_accepts():
     import services.script_auditor as sa
 

@@ -746,10 +746,15 @@ class AutomatedFactory:
                 from services.script_auditor import ScriptAuditor
                 # target_scenes must be the count this run actually planned, or
                 # the audit's length cap (target + 20) rejects the factory's own
-                # output on long videos.
+                # output on long videos. Scenes are passed preparsed: they are
+                # already segmented, and re-parsing prose lines that start with
+                # numbers ("2003: …") corrupts the scene list.
                 audit_res = ScriptAuditor(
                     target_scenes=target_shots, algorithm_mode=True
-                ).audit_script("\n".join(s.get("text", "") for s in shots))
+                ).audit_script(
+                    "\n".join(s.get("text", "") for s in shots),
+                    preparsed_scenes=[s.get("text", "") for s in shots],
+                )
 
             # Character detection across scripts — LLM-based (replaces regex that
             # flooded fake characters). Raises on gateway failure (no silent fakes).
