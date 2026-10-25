@@ -1,6 +1,6 @@
 """Image Ken Burns Provider (B-roll & Graceful Fallback).
 
-Generates a still image (via xKiro image, Imagen 3 or DALL-E 3, crayon Style
+Generates a still image (via xKiro image, Imagen 3 or DALL-E 3, vector Style
 Bible) and applies a Ken Burns pan/zoom effect sized to the shot's planned
 duration using FFmpeg.
 Used for:
@@ -22,7 +22,7 @@ from typing import Optional
 from services.gemini_webapi_provider import GeminiWebApiProvider
 from services.video_provider import ErrorKind, ProviderResult, SessionValidationResult, VideoProvider
 from services.prompt_sanitizer import (
-    CRAYON_STYLE_PREFIX,
+    STYLE_PREFIX,
     sanitize_veo_prompt,
 )
 
@@ -172,7 +172,7 @@ def _pose_graph(seed: int, duration: float, image_count: int, cover: str) -> str
 def _pose_edit_prompt(cue: str) -> str:
     return (
         "Keep this exact same drawing: same characters, same framing, same colors, "
-        "same background, same flat crayon stick-figure style, same props. "
+        "same background, same clean flat vector cartoon style, same props. "
         f"Change only the action so that {cue}. "
         "Do not restyle, do not reframe, do not add text."
     )
@@ -220,7 +220,7 @@ class ImageKenBurnsProvider(VideoProvider):
                 from services.xkiro_image_provider import generate_xkiro_image
 
                 used_model = generate_xkiro_image(
-                    f"{CRAYON_STYLE_PREFIX}{safe_prompt}",
+                    f"{STYLE_PREFIX}{safe_prompt}",
                     img_path,
                     size="1792x1024",
                 )
@@ -249,7 +249,7 @@ class ImageKenBurnsProvider(VideoProvider):
                         c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
                         try:
                             await c.init(timeout=60, auto_refresh=False, verbose=False)
-                            out = await c.generate_content(f"{CRAYON_STYLE_PREFIX}{safe_prompt}")
+                            out = await c.generate_content(f"{STYLE_PREFIX}{safe_prompt}")
                             if out.images:
                                 await out.images[0].save(path=str(img_path.parent), filename=img_path.name)
                         finally:
@@ -273,7 +273,7 @@ class ImageKenBurnsProvider(VideoProvider):
                     client = OpenAI(api_key=openai_key, timeout=60.0)
                     resp = client.images.generate(
                         model="dall-e-3",
-                        prompt=f"{CRAYON_STYLE_PREFIX}{prompt[:300]}",
+                        prompt=f"{STYLE_PREFIX}{prompt[:300]}",
                         n=1,
                         size="1024x1024",
                         response_format="b64_json",

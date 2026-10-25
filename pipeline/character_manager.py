@@ -399,13 +399,13 @@ class CharacterManager:
         for key, value in character.visual_features.items():
             prompt_parts.append(f"{key.replace('_', ' ').title()}: {value}")
         
-        # Add style requirements (crayon Style Bible — matches Veo/image prompts)
+        # Add style requirements (vector Style Bible — matches Veo/image prompts)
         prompt_parts.extend([
             "Style: Consistent appearance across all shots",
-            "Quality: whimsical hand-drawn editorial cartoon, rough wax crayon and colored pencil sketch strokes, grainy paper texture, flat 2D minimalist",
+            "Quality: clean flat vector cartoon illustration, modern explainer style, bold even outlines, soft subtle gradients, no crayon texture, no photorealism, no 3D render",
             "Pose: Front-facing portrait for reference",
             "Lighting: Even, neutral lighting",
-            "Background: Plain off-white textured sketchbook paper",
+            "Background: Plain light neutral background",
             "Expression: Neutral, suitable for various contexts",
         ])
 
@@ -571,7 +571,7 @@ def detect_characters_in_text_llm(text: str) -> List[Dict[str, str]]:
         f"KỊCH BẢN:\n\"\"\"{cleaned[:8000]}\"\"\"\n\n"
         "Trả về duy nhất JSON object:\n"
         '{"characters": [{"name": "Tên nhân vật", "context": "vai trò trong truyện", '
-        '"descriptor": "mô tả ngoại hình tiếng Anh để vẽ minh họa cartoon crayon: '
+        '"descriptor": "mô tả ngoại hình tiếng Anh để vẽ minh họa vector cartoon: '
         'đặc điểm khuôn mặt, tóc, trang phục, biểu cảm chủ đạo"}]}\n'
         "Nếu không có nhân vật: {\"characters\": []}"
     )

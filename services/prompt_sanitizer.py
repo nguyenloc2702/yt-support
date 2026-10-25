@@ -111,24 +111,23 @@ MOOD_PATTERNS: List[Tuple[str, str]] = [
 ]
 
 
-# Crayon Style Bible prefix for every still and shot prompt (QA S13).
-CRAYON_STYLE_PREFIX = (
-    "Flat hand-drawn crayon stick-figure explainer illustration, naive doodle "
-    "style: every person is a simple round-headed stick figure with tiny black "
-    "dot eyes and no facial detail, thick slightly wobbly black ink outlines, "
-    "flat unshaded color fills in a muted palette (beige paper, sage green, "
-    "clay brown, steel blue, warm yellow), plain off-white paper background, "
-    "wide eye-level composition with the stick figures clearly performing the "
-    "action, simple props, machines and buildings drawn in the same crude "
-    "doodle style, no gradients, no 3D shading, no fine texture detail, "
-    "no cinematic lighting, no realistic faces, no photorealism. "
+# Vector Cartoon Style Bible prefix for every still and shot prompt (QA S13).
+STYLE_PREFIX = (
+    "Clean flat vector cartoon illustration, modern explainer style: bold "
+    "even outlines, rounded characters with simple expressive faces, flat "
+    "shapes with soft subtle gradients and minimal shading, bright modern "
+    "palette (sky blue, white, navy, slate grey, warm wood and brass "
+    "accents), tidy detailed backgrounds with gentle depth, machines and "
+    "props drawn as clean vector shapes, soft even lighting, polished and "
+    "cheerful look, no crayon texture, no paper grain, no sketchy lines, "
+    "no photorealism, no 3D render. "
 )
 _PHOTO_REPLACEMENTS = {
-    "photorealistic": "crayon-textured",
-    "hyperrealistic": "hand-drawn",
-    "photo of": "crayon drawing of",
-    "4k photo": "crayon sketch",
-    "dslr": "crayon sketch",
+    "photorealistic": "flat vector cartoon",
+    "hyperrealistic": "flat vector illustration",
+    "photo of": "cartoon drawing of",
+    "4k photo": "vector illustration",
+    "dslr": "vector illustration",
 }
 _NEGATED_PHOTO = re.compile(
     r"\bno\s+(?:photorealistic|hyperrealistic|realistic|photo|photography|dslr)\b",
@@ -188,26 +187,26 @@ def sanitize_veo_prompt(
     - for_video=False drops the motion/audio clauses for still-image prompts.
     """
     still_body = (
-        "Flat 2D storybook cartoon illustration, hand-drawn explainer style. "
-        "Characters: simple figures with big round white heads, tiny dot eyes, "
-        "bold dark-brown ink outlines, no facial detail beyond the eyes. "
-        "Colors: flat muted earth tones - olive green, sand, rust, slate blue, "
-        "cream - with a subtle paper-grain texture. No gradients, no shadows, "
-        "no 3D, no photorealism. "
-        "Bright, flat, even lighting. Wide eye-level composition, the "
-        "characters clearly performing the action. "
+        "Clean flat vector cartoon illustration, modern explainer style. "
+        "Characters: rounded cartoon characters with simple expressive faces, "
+        "bold even outlines, flat shapes with soft gradients and minimal "
+        "shading. Colors: bright modern palette - sky blue, white, navy, "
+        "slate grey, warm wood accents. Tidy detailed backgrounds with gentle "
+        "depth. No crayon texture, no sketchy lines, no photorealism, "
+        "no 3D render. Bright, even lighting. Wide readable composition, "
+        "the characters clearly performing the action. "
     )
     if not raw_text or not raw_text.strip():
         if not for_video:
             return f"{still_body}No text."
         return (
-            "Flat 2D storybook cartoon animation, hand-drawn explainer style. "
-            "Simple round-headed characters with tiny dot eyes and bold dark-brown "
-            "ink outlines perform a calm everyday action in a flat muted earth-tone "
-            f"scene {scene_idx} depicting {era_hint}, subtle paper-grain texture, "
-            "no gradients, no shadows, no photorealism. Gentle cutout animation "
-            "with a slow sideways camera pan. Bright, flat, even lighting. "
-            "Silent, no audio, no text."
+            "Clean flat vector cartoon animation, modern explainer style. "
+            "Rounded cartoon characters with simple expressive faces and bold "
+            "even outlines perform a calm everyday action in a bright modern "
+            f"scene {scene_idx} depicting {era_hint}, flat shapes with soft "
+            "gradients, tidy detailed background, no photorealism, no 3D "
+            "render. Smooth cutout-style motion with a slow camera push. "
+            "Bright, even lighting. Silent, no audio, no text."
         )
 
     text = raw_text.strip()
@@ -240,29 +239,29 @@ def sanitize_veo_prompt(
         return f"{still_body}Scene: {text}. No text."
 
     prompt = (
-        "Flat 2D storybook cartoon animation, hand-drawn explainer style. "
-        "Characters: simple figures with big round white heads, tiny dot eyes, "
-        "bold dark-brown ink outlines, no facial detail beyond the eyes. "
-        "Colors: flat muted earth tones - olive green, sand, rust, slate blue, "
-        "cream - with a subtle paper-grain texture. No gradients, no shadows, "
-        "no 3D, no photorealism. "
+        "Clean flat vector cartoon animation, modern explainer style. "
+        "Characters: rounded cartoon characters with simple expressive faces, "
+        "bold even outlines, flat shapes with soft gradients and minimal "
+        "shading. Colors: bright modern palette - sky blue, white, navy, "
+        "slate grey, warm wood accents. No crayon texture, no sketchy lines, "
+        "no photorealism, no 3D render. "
         f"Scene: {text}. "
-        "Motion: gentle cutout animation - characters bob and step in place, "
-        "props slide or pop in, smoke and steam puff softly, slow sideways "
-        "camera pan, everything drawn in the same naive doodle style. "
-        "Bright, flat, even lighting. Silent, no audio, no text."
+        "Motion: smooth cutout-style animation - characters gesture and turn "
+        "naturally, props slide or pop in, machines run with small looping "
+        "movements, slow camera push or pan. Bright, even lighting. "
+        "Silent, no audio, no text."
     )
     return prompt
 
 
-def ensure_crayon_style(prompt: str) -> str:
-    """Guarantee a shot prompt reads as crayon artwork (QA S13).
+def ensure_style_prefix(prompt: str) -> str:
+    """Guarantee a shot prompt reads as vector-cartoon artwork (QA S13).
 
     The rewrite model sometimes drops the style prefix and sometimes repeats a
     photoreal phrase while forbidding it ("no photorealistic details"); the
     scorecard rejects both, so the prompt is normalized before it is stored.
     """
-    from services.algorithm_qa import CRAYON_KEYWORDS, PHOTO_KEYWORDS
+    from services.algorithm_qa import PHOTO_KEYWORDS, STYLE_KEYWORDS
 
     text = _NEGATED_PHOTO.sub("", prompt or "").strip(" ,.;:")
     for keyword in sorted(PHOTO_KEYWORDS, key=len, reverse=True):
@@ -270,8 +269,8 @@ def ensure_crayon_style(prompt: str) -> str:
             re.escape(keyword), _PHOTO_REPLACEMENTS[keyword], text, flags=re.IGNORECASE
         )
     text = re.sub(r"\s+", " ", text).strip()
-    if text and not any(k in text.lower() for k in CRAYON_KEYWORDS):
-        text = f"{CRAYON_STYLE_PREFIX}{text}"
+    if text and not any(k in text.lower() for k in STYLE_KEYWORDS):
+        text = f"{STYLE_PREFIX}{text}"
     return text
 
 

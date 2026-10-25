@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from services.image_kenburns_provider import (
-    CRAYON_STYLE_PREFIX,
+    STYLE_PREFIX,
     POSES_PER_SHOT,
     POSE_BLEND_SECONDS,
     ImageKenBurnsProvider,
@@ -83,7 +83,7 @@ def test_xkiro_image_is_the_primary_provider(kb_provider, tmp_path, monkeypatch)
 
     assert res.ok is True
     assert len(prompts) == 1
-    assert prompts[0].lower().startswith(CRAYON_STYLE_PREFIX.lower()[:20])
+    assert prompts[0].lower().startswith(STYLE_PREFIX.lower()[:20])
     # Wide images keep the composition; square ones get vertically cropped.
     assert sizes == ["1792x1024"]
 
@@ -256,8 +256,8 @@ def test_pose_blend_is_skipped_when_edits_fail(kb_provider, tmp_path, monkeypatc
     assert captured[0].count("-loop") == 1
 
 
-def test_crayon_style_prefix_blocks_photorealism():
-    low = CRAYON_STYLE_PREFIX.lower()
-    assert "crayon" in low
-    assert "stick figure" in low
+def test_vector_style_prefix_blocks_photorealism():
+    low = STYLE_PREFIX.lower()
+    assert "vector cartoon" in low
     assert "no photorealism" in low
+    assert "no 3d render" in low

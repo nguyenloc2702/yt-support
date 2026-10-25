@@ -2,8 +2,8 @@
 
 Until now AI generated 100% of the assets and verified 0% of them. This module
 closes that gap for images: every generated image is judged by the xKiro VLM
-(qwen3.8-omni vision) against the crayon Style Bible, and failed images are
-regenerated with the judge's issues folded back into the prompt.
+(qwen3.8-omni vision) against the vector-cartoon Style Bible, and failed images
+are regenerated with the judge's issues folded back into the prompt.
 
 No silent fakes: when the VLM itself is unavailable the check raises — callers
 surface the failure instead of pretending the style is fine.
@@ -33,16 +33,16 @@ def _is_safety_rejection(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "safety policy" in msg or "rejected by the provider" in msg
 
-STYLE_JUDGE_SYSTEM = """Bạn là Art Director kiểm duyệt phong cách hình ảnh cho series documentary vẽ tay.
-Chấm ảnh theo CRAYON STYLE BIBLE, trả về duy nhất JSON object:
+STYLE_JUDGE_SYSTEM = """Bạn là Art Director kiểm duyệt phong cách hình ảnh cho series video thuyết minh.
+Chấm ảnh theo VECTOR CARTOON STYLE BIBLE, trả về duy nhất JSON object:
 {"ok": <true nếu ĐẠT>, "score": <0-10 một chữ số thập phân>, "issues": ["các lỗi cụ thể cần sửa khi vẽ lại"], "summary": "<mô tả ngắn ảnh>"}
 Tiêu chí ĐẠT (score >= 7.0 và không có lỗi nặng):
-1. Hand-drawn: nét sáp crayon / bút chì màu thô, có texture giấy vẽ sần.
-2. Flat 2D minimalist: KHÔNG gradient shading, KHÔNG 3D render, KHÔNG đổ bóng đa lớp.
-3. TUYỆT ĐỐI KHÔNG photorealistic: không ảnh chụp thật, không CGI chân thực.
-4. Bố cục: khoảng negative space rộng (60-70%), 1-3 tiêu điểm rõ ràng, không rối rắm.
-5. Nền giấy off-white (hoặc bảng đen/sepia khi chủ đề khủng hoảng/hồi ức).
-6. Màu nhấn crayon tiết chế: vàng cho tiền bạc/ý tưởng, đỏ cảnh báo, xanh dương trung tính.
+1. Clean flat vector cartoon: nét đều đậm vừa, khối phẳng có gradient nhẹ tiết chế, không texture giấy, không nét vẽ sần crayon/bút chì.
+2. Nhân vật cartoon có khuôn mặt biểu cảm đơn giản, tỷ lệ dễ thương, nét viền sạch.
+3. TUYỆT ĐỐI KHÔNG photorealistic: không ảnh chụp thật, không CGI chân thực, không 3D render.
+4. Bố cục: composition đọc được ngay, 1-3 tiêu điểm rõ ràng, không rối rắm.
+5. Nền sáng gọn gàng có chiều sâu nhẹ (văn phòng, phòng sạch, phố, nhà máy) — không nền đen u ám.
+6. Palette hiện đại sáng: xanh da trời, trắng, navy, xám slate, điểm nhấn gỗ/đồng ấm.
 Nếu ảnh sai chủ đề so với mô tả được cung cấp, đó là lỗi nặng (ok=false)."""
 
 
@@ -162,11 +162,12 @@ def generate_with_style_check(
         if last_verdict["ok"]:
             break
         if attempt < max_attempts:
-            fixes = "; ".join(last_verdict["issues"][:3]) or "stronger flat 2D crayon look"
+            fixes = "; ".join(last_verdict["issues"][:3]) or "stronger clean vector cartoon look"
             current_prompt = (
                 f"{prompt}\n\nSTRICT STYLE REMINDERS (judge rejected previous attempt): {fixes}. "
-                "Emphasize rough wax crayon strokes, grainy paper texture, flat 2D, "
-                "generous negative space, absolutely no photorealism."
+                "Emphasize bold even outlines, flat shapes with soft subtle gradients, "
+                "clean modern palette, tidy bright background, generous negative "
+                "space, absolutely no photorealism and no 3D render."
             )
 
     return last_verdict or {"ok": False, "score": 0.0, "issues": ["no verdict"], "summary": ""}

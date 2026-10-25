@@ -825,7 +825,7 @@ def test_hook_window_pads_a_short_hook_so_the_s16_window_closes_inside_it():
 
 def test_shot_prompts_leave_the_factory_carrying_the_crayon_look(factory, monkeypatch):
     """QA S13 rejects a prompt with no crayon keyword or a photoreal phrase."""
-    from services.algorithm_qa import CRAYON_KEYWORDS, PHOTO_KEYWORDS
+    from services.algorithm_qa import PHOTO_KEYWORDS, STYLE_KEYWORDS
 
     router = Router(
         {"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]}, plain_visual_for={2}
@@ -838,7 +838,7 @@ def test_shot_prompts_leave_the_factory_carrying_the_crayon_look(factory, monkey
 
     for scene in (*vi, *en):
         prompt = scene["prompt"].lower()
-        assert any(k in prompt for k in CRAYON_KEYWORDS), scene["prompt"]
+        assert any(k in prompt for k in STYLE_KEYWORDS), scene["prompt"]
         assert not any(k in prompt for k in PHOTO_KEYWORDS), scene["prompt"]
 
 

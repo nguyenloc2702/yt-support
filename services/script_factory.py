@@ -33,7 +33,7 @@ from core.logging_config import get_logger
 from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE, WPM_RANGE
 from services.hook_formulas import hook_formula_catalog, narration_laws_block
 from services.hook_scoring import score_hook
-from services.prompt_sanitizer import ensure_crayon_style
+from services.prompt_sanitizer import ensure_style_prefix
 from services.script_auditor import (
     BUDGET_RATIO_FLOOR,
     EN_MAX_WORDS_ALGORITHM,
@@ -489,13 +489,13 @@ class ScriptFactory:
         expansion = self._expand_toward_target(
             best.angle, vi, en, transcript_text, target_duration, on_progress
         )
-        # QA S13 keys off crayon keywords, and the rewrite model drops the style
+        # QA S13 keys off style keywords, and the rewrite model drops the style
         # prefix on some scenes and repeats "photorealistic" even when forbidding
         # it. Normalize once here so every stored shot prompt carries the look.
         restyled = 0
         for scene in (*vi, *en):
             before = str(scene.get("prompt", ""))
-            after = ensure_crayon_style(before)
+            after = ensure_style_prefix(before)
             if after != before:
                 scene["prompt"] = after
                 restyled += 1
@@ -1094,8 +1094,10 @@ class ScriptFactory:
             "TUYỆT ĐỐI GROUNDED: chỉ dùng sự kiện/tên riêng/con số có trong transcript nguồn, "
             "không bịa chi tiết mới.\n\n"
             f"GÓC KỂU CHUYÊN CỦA BẠN — {angle['label']}: {angle['brief']}\n"
-            "STYLE BIBLE VISUAL (bắt buộc cho visual_prompt): Whimsical hand-drawn crayon "
-            "editorial cartoon, flat 2D, giấy vẽ sần, TUYỆT ĐỐI KHÔNG photorealistic/3D.\n\n"
+            "STYLE BIBLE VISUAL (bắt buộc cho visual_prompt): Clean flat vector "
+            "cartoon illustration, modern explainer style, nét đều đậm vừa, "
+            "gradient nhẹ trong khối phẳng, nền sáng gọn gàng có chiều sâu, "
+            "TUYỆT ĐỐI KHÔNG photorealistic/3D/crayon texture.\n\n"
             + narration_laws_block()
         )
         if feedback_brief:
@@ -1121,7 +1123,7 @@ class ScriptFactory:
             f"audio EN lửng thở giữa các câu.\n"
             f"- estimated_duration: {MIN_SCENE_DURATION:.1f}-{MAX_SCENE_DURATION:.1f} giây, tự nhiên theo độ dài lời thoại.\n"
             "- situation: tình huống cụ thể để dựng hình.\n"
-            "- visual_prompt: prompt tiếng Anh theo STYLE BIBLE crayon.\n\n"
+            "- visual_prompt: prompt tiếng Anh theo STYLE BIBLE vector cartoon.\n\n"
             "Trả về duy nhất JSON object:\n"
             '{"scenes": [{"index": <int>, "situation": "...", "voiceover_vi": "...", '
             '"voiceover_en": "...", "estimated_duration": <float>, "visual_prompt": "..."}]}'

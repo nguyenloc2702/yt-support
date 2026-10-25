@@ -1,5 +1,7 @@
 # STYLE BIBLE — Crayon Capital ("The Rise of Elon Musk Explained Like You're 5")
 
+> **CẬP NHẬT 2026-10-25:** Phong cách HÌNH đã chuyển sang **Clean Flat Vector Cartoon** (kiểu kênh Tradeoff / ảnh ASML do chủ duyệt) — xem `STYLE_PREFIX` trong `services/prompt_sanitizer.py` và judge mới trong `services/style_checker.py`. Các số đo NHỊP/THỜI LƯỢNG/WPM trong tài liệu này vẫn là chuẩn áp dụng.
+
 > **Mục đích:** Bộ quy tắc đo đạc định lượng thực tế từ video `npoPedEq3hs` để tái tạo các video hoạt họa giải thích kinh doanh/tiểu sử sau này.
 > **Trạng thái:** ✅ Đã hoàn thành đo đạc thực nghiệm (Evidence-Backed).
 > **Phạm vi:** Tài liệu kỹ thuật chuẩn hóa, **không thay đổi code**.

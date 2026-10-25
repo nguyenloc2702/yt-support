@@ -38,7 +38,10 @@ AUDIO_SYNC_WER_MAX = 0.15
 AUDIO_SYNC_MIN_COVERAGE = 0.90
 
 PHOTO_KEYWORDS = ("photorealistic", "photo of", "4k photo", "hyperrealistic", "dslr")
-CRAYON_KEYWORDS = ("crayon", "hand-drawn", "hand drawn", "sketch", "illustration", "cartoon")
+STYLE_KEYWORDS = (
+    "vector cartoon", "flat vector", "vector illustration", "cartoon",
+    "illustration", "crayon", "hand-drawn", "hand drawn", "sketch",
+)
 BRIDGE_PHRASES = (
     "nhưng", "bất ngờ", "nghịch lý", "câu hỏi", "điều này dẫn", "bí ẩn",
     "vậy tại sao", "chuưa hết", "chưa hết", "còn nữa",
@@ -323,8 +326,8 @@ def c_situations(pd: Path, ctx):
     return missing == 0, missing, "= 0"
 
 
-@_check("S13", "Kịch bản", "Prompt theo Style Bible crayon", "script")
-def c_prompts_crayon(pd: Path, ctx):
+@_check("S13", "Kịch bản", "Prompt theo Style Bible vector cartoon", "script")
+def c_prompts_style(pd: Path, ctx):
     plan = ctx.get("plan") or []
     bad = []
     for sc in plan:
@@ -333,8 +336,8 @@ def c_prompts_crayon(pd: Path, ctx):
             bad.append("empty")
         elif any(k in p for k in PHOTO_KEYWORDS):
             bad.append("photoreal")
-        elif not any(k in p for k in CRAYON_KEYWORDS):
-            bad.append("not crayon")
+        elif not any(k in p for k in STYLE_KEYWORDS):
+            bad.append("wrong style")
     return len(bad) == 0, len(bad), "= 0 prompt sai style"
 
 
@@ -847,7 +850,7 @@ def c_chosen_angle(pd: Path, ctx):
 ALL_CHECKS = [
     c_shots_plan, c_scene_count, c_no_empty, c_no_dupes, c_hook, c_open_loops,
     c_short_pct, c_wpm, c_scene_dur, c_mean_dur, c_total_dur, c_situations,
-    c_prompts_crayon, c_algo_recorded, c_no_stumps, c_hook_budget, c_callback,
+    c_prompts_style, c_algo_recorded, c_no_stumps, c_hook_budget, c_callback,
     c_judge_score, c_style_reports, c_style_scores, c_refs_exist, c_refs_size,
     c_voice_saved, c_vi_plan, c_en_plan, c_vi_en_match, c_prompt_lang,
     c_prompt_len, c_char_ids, c_key_ratio, c_prompt_composition, c_situation_vi,

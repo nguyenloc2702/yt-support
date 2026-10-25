@@ -1223,7 +1223,7 @@ class AutomatedFactory:
         return reports
 
     def _generate_character_image(self, prompt: str, ref_path: Path) -> None:
-        """Generate a real crayon-style character reference image.
+        """Generate a real vector-cartoon-style character reference image.
 
         Chain: xKiro image API (openai/gpt-image-2.5 -> free Sensenova) ->
         Imagen (gemini-webapi via account pool session) -> DALL-E 3
@@ -1320,11 +1320,11 @@ class AutomatedFactory:
         asm = ApprovalStateMachine(project_dir, job_id)
         asm.load()
         char_prompt_style = (
-            "Whimsical hand-drawn editorial cartoon character reference, "
-            "rough wax crayon and colored pencil sketch strokes, grainy paper texture, "
-            "flat 2D minimalist composition, generous negative space, "
-            "plain off-white textured sketchbook paper background, "
-            "no gradients, no 3D shading, no photorealism. Character: "
+            "Clean flat vector cartoon character reference, modern explainer style, "
+            "bold even outlines, flat shapes with soft subtle gradients, "
+            "tidy composition with generous negative space, "
+            "plain light neutral background, "
+            "no crayon texture, no 3D shading, no photorealism. Character: "
         )
         for cid, char in asm.characters.items():
             char_dir = project_dir / "characters" / cid
