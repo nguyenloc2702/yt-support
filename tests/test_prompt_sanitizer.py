@@ -49,6 +49,25 @@ def test_sanitize_veo_prompt_flattens_mood_cues():
     assert "old oak counters" in prompt
 
 
+def test_sanitize_veo_prompt_flattens_black_background_and_close_up():
+    raw = (
+        "A close-up of Werner's face, lit harshly from a single studio light casting sharp shadows "
+        "across his features. The background is a deep, uniform black, making his face the sole "
+        "point of attention. The style is hyper-expressive, with exaggerated facial features and "
+        "dramatic lighting."
+    )
+    prompt = sanitize_veo_prompt(raw, for_video=False)
+    lowered = prompt.lower()
+    assert "close-up" not in lowered
+    assert "medium shot of werner" in lowered
+    assert "uniform black" not in lowered
+    assert "plain warm beige paper" in lowered
+    assert "sharp shadows" not in lowered
+    assert "lit flat and evenly" in lowered
+    assert "hyper-expressive" not in lowered
+    assert "exaggerated facial features" not in lowered
+
+
 def test_sanitize_veo_prompt_empty_uses_storybook_frame():
     prompt = sanitize_veo_prompt("")
     assert "Flat 2D storybook cartoon animation" in prompt

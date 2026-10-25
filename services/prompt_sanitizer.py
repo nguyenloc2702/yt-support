@@ -87,6 +87,17 @@ SENSITIVE_PATTERNS: List[Tuple[str, str]] = [
 # Mood/lighting cues that fight the flat storybook style; rewritten at Veo
 # render time only, so the locked manifest text stays untouched.
 MOOD_PATTERNS: List[Tuple[str, str]] = [
+    (r"\bthe background is a deep,?\s*uniform black\b", "the background is plain warm beige paper"),
+    (r"\bdeep,?\s*uniform black\b", "plain warm beige"),
+    (r"\bdeep black background\b", "plain warm beige background"),
+    (r"\blit harshly from a single (?:studio )?light,? casting sharp shadows(?: across (?:his|her|their) features)?\b", "lit flat and evenly"),
+    (r"\bcasting sharp shadows\b", "with clean flat fills"),
+    (r"\bsharp shadows\b", "flat even lighting"),
+    (r"\bsingle studio light\b", "flat even light"),
+    (r"\bextreme close-up of\b", "medium shot of"),
+    (r"\bclose-up of\b", "medium shot of"),
+    (r"\bhyper-expressive\b", "expressive"),
+    (r"\bexaggerated facial features\b", "clear simple features"),
     (r"\bthe scene is dimly lit,?\s*with\b", "the scene shows"),
     (r"\bdimly lit\b", "evenly lit"),
     (r"\bdim(?:ly)?(?:[- ]lit)? studio\b", "flat studio"),
