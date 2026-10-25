@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 from typing import Optional, Tuple
 
 logger = logging.getLogger("storage_uploader")
@@ -18,6 +19,9 @@ DEFAULT_RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive")
 DEFAULT_REMOTE_FOLDER = os.environ.get(
     "RCLONE_REMOTE_FOLDER", "Video_Projects/history_of_microsoft/raw_shots"
 )
+
+VERIFY_ATTEMPTS = 3
+VERIFY_DELAY_SECONDS = 1.5
 
 
 class StorageUploader:
@@ -60,6 +64,21 @@ class StorageUploader:
         except (TypeError, ValueError):
             return None
         return size if count == 1 else None
+
+    def _await_remote_size(self, remote_path: str) -> Optional[int]:
+        """Poll briefly after copyto: Drive can lag behind a successful upload."""
+        for attempt in range(1, VERIFY_ATTEMPTS + 1):
+            size = self._remote_size(remote_path)
+            if size is not None:
+                if attempt > 1:
+                    logger.info(
+                        "Remote object became visible after %d verification attempts: %s",
+                        attempt, remote_path,
+                    )
+                return size
+            if attempt < VERIFY_ATTEMPTS:
+                time.sleep(VERIFY_DELAY_SECONDS)
+        return None
 
     def upload_and_clean(
         self,
@@ -146,7 +165,7 @@ class StorageUploader:
                 return False, None
 
             # 3. Verify remote file exists and size matches local file EXACTLY (P1.7)
-            remote_size = self._remote_size(remote_path)
+            remote_size = self._await_remote_size(remote_path)
             if remote_size is None:
                 logger.error("rclone remote verification failed for %s/%s (missing or unreadable)", dest_folder, dest_name)
                 return False, None

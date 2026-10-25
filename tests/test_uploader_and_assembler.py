@@ -135,6 +135,51 @@ def test_storage_uploader_success_verified(tmp_path: Path, monkeypatch):
     assert dummy_file2.exists()  # local file preserved on failure
 
 
+def test_upload_verification_retries_after_copyto(tmp_path: Path, monkeypatch):
+    """Drive is eventually consistent: a freshly copied object can be invisible
+    on the first post-upload probe. Verification must poll instead of failing."""
+    import services.storage_uploader as storage_uploader_mod
+
+    uploader = StorageUploader(remote_name="dummy_gdrive", remote_folder="test_folder")
+    uploader.rclone_bin = "/mock/bin/rclone"
+
+    dummy_file = tmp_path / "test_shot.mp4"
+    dummy_file.write_bytes(b"dummy video data")
+    size = dummy_file.stat().st_size
+    md5 = hashlib.md5(b"dummy video data").hexdigest()
+
+    probes = {"count": 0, "copied": False}
+
+    def fake_remote_size(remote_path, timeout=30):
+        probes["count"] += 1
+        if not probes["copied"]:
+            return None  # pre-check: not uploaded yet
+        return size if probes["count"] >= 4 else None
+
+    def mock_run(cmd, *args, **kwargs):
+        class Res:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        res = Res()
+        if cmd[1] == "copyto":
+            probes["copied"] = True
+        elif cmd[1] == "md5sum":
+            res.stdout = f"{md5}  test_shot.mp4\n"
+        return res
+
+    monkeypatch.setattr(uploader, "_remote_size", fake_remote_size)
+    monkeypatch.setattr(storage_uploader_mod, "VERIFY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    ok, path = uploader.upload_and_clean(dummy_file, clean_local=False)
+
+    assert ok is True
+    assert path == "gdrive://test_folder/test_shot.mp4"
+    # 1 pre-check + at least 3 post-upload probes
+    assert probes["count"] >= 4
+
+
 def test_storage_uploader_skips_reupload_when_remote_already_matches(tmp_path: Path, monkeypatch):
     uploader = StorageUploader(remote_name="dummy_gdrive", remote_folder="test_folder")
     uploader.rclone_bin = "/mock/bin/rclone"
