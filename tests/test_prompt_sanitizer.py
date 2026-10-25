@@ -85,6 +85,17 @@ def test_sanitize_veo_prompt_still_mode_drops_motion_and_audio():
     assert "animation" not in prompt.lower()
 
 
+def test_sanitize_veo_prompt_strips_leading_crayon_style_clause():
+    raw = (
+        "Hand-drawn crayon editorial cartoon, flat 2D on rough sketch paper. "
+        "Werner pushes open the bank door and walks inside."
+    )
+    prompt = sanitize_veo_prompt(raw, for_video=False)
+    assert "Scene: Werner pushes open the bank door and walks inside." in prompt
+    assert "Hand-drawn crayon editorial cartoon" not in prompt
+    assert "sketch paper" not in prompt.lower()
+
+
 def test_sanitize_veo_prompt_political_speech():
     raw = "The Dutch government watched this and said, we must act immediately"
     prompt = sanitize_veo_prompt(raw)

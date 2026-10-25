@@ -211,6 +211,18 @@ def sanitize_veo_prompt(
 
     text = raw_text.strip()
 
+    # Drop a leading style-meta sentence from older manifests (e.g. "Hand-drawn
+    # crayon editorial cartoon, flat 2D on rough sketch paper.") — the frame
+    # below already carries the current style bible.
+    text = re.sub(
+        r"^[^.]*\b(?:crayon|sketch(?:y)?\s*paper|sketchbook\s*paper|"
+        r"editorial\s*cartoon|doodle\s+style|stick[ -]figure)\b[^.]*\.\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
     # Extract existing visual description if wrapped in prompt template
     prefix_match = re.search(r"Visual representation of:\s*(.*?)(?:\.\s*35mm|$)", text, re.IGNORECASE | re.DOTALL)
     if prefix_match:
