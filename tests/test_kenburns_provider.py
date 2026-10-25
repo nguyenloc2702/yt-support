@@ -159,7 +159,20 @@ def test_duration_clamped_between_2_and_15(kb_provider, tmp_path, monkeypatch):
     assert "d=187" in graph and "d=188" in graph
 
 
+def test_ink_boil_wobbles_on_a_stepped_hold():
+    """Flat explainer art only reads as animated when the ink line moves, so
+    every camera move carries a stepped wobble clamped inside the canvas."""
+    from services.image_kenburns_provider import BOIL_HOLD_FRAMES, build_kenburns_filter
+
+    graph = build_kenburns_filter(3, 4.0)
+    assert f"floor(on/{BOIL_HOLD_FRAMES})" in graph
+    assert "min(max(" in graph
+    # The wobble differs per shot, otherwise every clip boils in lockstep.
+    assert build_kenburns_filter(3, 4.0) != build_kenburns_filter(4, 4.0)
+
+
 def test_crayon_style_prefix_blocks_photorealism():
     low = CRAYON_STYLE_PREFIX.lower()
     assert "crayon" in low
+    assert "stick figure" in low
     assert "no photorealism" in low

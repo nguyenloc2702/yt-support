@@ -45,6 +45,10 @@ KENBURNS_MOTIONS = (
 # Shots longer than this get a mid-clip reframe cut so the image changes
 # framing while the narration continues.
 REFRAAME_CUT_MIN_SECONDS = 5.5
+# Hand-drawn "boil": the ink line wobbles every few frames, which is what makes
+# flat explainer art read as animated instead of as a frozen still.
+BOIL_PIXELS = 3
+BOIL_HOLD_FRAMES = 3
 
 
 def _shot_seed(out_path: Path) -> int:
@@ -54,7 +58,13 @@ def _shot_seed(out_path: Path) -> int:
     return sum(out_path.stem.encode("utf-8")) % 97
 
 
-def _zoompan_filter(motion: str, frames: int) -> str:
+def _boil_expr(seed: int, phase: float) -> str:
+    """Stepped pseudo-random offset in input pixels, recomputed every hold."""
+    rate = 12.9898 + (seed % 7) * 0.73 + phase
+    return f"{BOIL_PIXELS}*sin(floor(on/{BOIL_HOLD_FRAMES})*{rate:.4f})"
+
+
+def _zoompan_filter(motion: str, frames: int, seed: int = 0) -> str:
     """zoompan expression for one camera move over `frames` output frames."""
     progress = f"(on/{max(1, frames - 1)})"
     center_x = "(iw-iw/zoom)/2"
@@ -73,6 +83,9 @@ def _zoompan_filter(motion: str, frames: int) -> str:
         z, x, y = "1.22", center_x, f"(ih-ih/zoom)*(1-{progress})"
     else:  # zoom_diag
         z, x, y = f"(1.08+0.22*{progress})", f"(iw-iw/zoom)*{progress}", f"(ih-ih/zoom)*(1-{progress})"
+    # Clamp after wobbling so the crop never runs past the canvas edge.
+    x = f"min(max(({x})+({_boil_expr(seed, 0.0)}),0),iw-iw/zoom)"
+    y = f"min(max(({y})+({_boil_expr(seed, 5.1)}),0),ih-ih/zoom)"
     return (
         f"zoompan=z='{z}':x='{x}':y='{y}'"
         f":d={frames}:s={KENBURNS_OUTPUT}:fps={KENBURNS_FPS}"
@@ -96,7 +109,7 @@ def build_kenburns_filter(seed: int, duration: float) -> str:
 
     if duration < REFRAAME_CUT_MIN_SECONDS:
         return (
-            f"[0:v]{cover},{_zoompan_filter(first, total_frames)},"
+            f"[0:v]{cover},{_zoompan_filter(first, total_frames, seed)},"
             f"format=yuv420p[v]"
         )
 
@@ -105,9 +118,9 @@ def build_kenburns_filter(seed: int, duration: float) -> str:
     second = KENBURNS_MOTIONS[(seed + 3) % len(KENBURNS_MOTIONS)]
     return (
         f"[0:v]{cover},split=2[a][b];"
-        f"[a]{_zoompan_filter(first, frames_a)},trim=end_frame={frames_a},"
+        f"[a]{_zoompan_filter(first, frames_a, seed)},trim=end_frame={frames_a},"
         f"setpts=PTS-STARTPTS[va];"
-        f"[b]{_zoompan_filter(second, frames_b)},trim=end_frame={frames_b},"
+        f"[b]{_zoompan_filter(second, frames_b, seed + 1)},trim=end_frame={frames_b},"
         f"setpts=PTS-STARTPTS[vb];"
         f"[va][vb]concat=n=2:v=1:a=0,format=yuv420p[v]"
     )

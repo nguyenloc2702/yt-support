@@ -87,11 +87,15 @@ SENSITIVE_PATTERNS: List[Tuple[str, str]] = [
 
 # Crayon Style Bible prefix for every still and shot prompt (QA S13).
 CRAYON_STYLE_PREFIX = (
-    "Whimsical hand-drawn editorial cartoon illustration, rough wax crayon and "
-    "colored pencil sketch strokes, grainy paper texture, flat 2D minimalist "
-    "composition, generous negative space around subject, limited muted color "
-    "palette with vibrant yellow and red crayon accents, off-white textured "
-    "sketchbook paper background, no gradients, no 3D shading, no photorealism. "
+    "Flat hand-drawn crayon stick-figure explainer illustration, naive doodle "
+    "style: every person is a simple round-headed stick figure with tiny black "
+    "dot eyes and no facial detail, thick slightly wobbly black ink outlines, "
+    "flat unshaded color fills in a muted palette (beige paper, sage green, "
+    "clay brown, steel blue, warm yellow), plain off-white paper background, "
+    "wide eye-level composition with the stick figures clearly performing the "
+    "action, simple props, machines and buildings drawn in the same crude "
+    "doodle style, no gradients, no 3D shading, no fine texture detail, "
+    "no cinematic lighting, no realistic faces, no photorealism. "
 )
 _PHOTO_REPLACEMENTS = {
     "photorealistic": "crayon-textured",
