@@ -99,6 +99,7 @@ NARRATION_LAWS = (
     "Thuật ngữ: giải thích bằng chữ thường trước rồi mới gắn tên; tên gắn ra mà không dùng lại thì không cần gắn.",
     "Stakes phải xuất hiện trong phút đầu; kết quay về cảnh mở đầu với hiểu biết mới (callback), không liệt kê tổng kết.",
     "Mỗi cảnh có ít nhất một câu dài có mệnh đề phụ ('khi mà', 'vì', 'nên', 'nhưng rồi'); nối ý bằng từ nối tự nhiên, cấm 3 câu liên tiếp mở đầu bằng chủ ngữ + động từ.",
+    "Mỗi câu phải đọc lên trôi như lời nói: đủ chủ ngữ vị ngữ, không băm một ý thành nhiều câu cụt; câu ngắn chỉ dùng để chốt sau câu dài.",
 )
 
 

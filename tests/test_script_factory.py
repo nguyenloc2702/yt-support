@@ -64,9 +64,23 @@ class Router:
     def __init__(self, score_plan, rewrite_error=None, wrong_count_angles=(),
                  short_rewrites=False, fail_chunks_above=None, repair_words=None,
                  word_plan=None, repair_echo=False, empty_scene_in_chunks_above=None,
-                 en_word_plan=None, plain_visual_for=()):
+                 en_word_plan=None, plain_visual_for=(), outline=None,
+                 edit_issues=None):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
+        self.outline = outline or {
+            "paradox": "Một công ty từ nhà kho dột đứng đầu thế giới.",
+            "timeline": [{"year": "1602", "event": "thành lập"}],
+            "acts": [{"range": "1-3", "beat": "mở nghịch lý"}],
+            "open_loops": ["vì sao"],
+            "callback": "quay lại nghịch lý",
+            "banned": ["nhà kho dột"],
+        }
+        self.edit_issues = edit_issues or []
+        self.outline_calls = 0
+        self.edit_calls = 0
+        self.revision_calls = []
+        self.revision_prompts = []
         self.rewrite_error = rewrite_error
         self.wrong_count_angles = set(wrong_count_angles)
         self.short_rewrites = short_rewrites
@@ -95,6 +109,12 @@ class Router:
     def __call__(self, system_prompt, user_prompt, **kw):
         import re
 
+        if "kiến trúc sư kịch bản" in system_prompt:
+            self.outline_calls += 1
+            return self.outline
+        if "biên tập viên tổng" in system_prompt:
+            self.edit_calls += 1
+            return {"issues": self.edit_issues}
         if "(HOOK 30 GIÂY):" in user_prompt:
             self.hook_calls += 1
             self.hook_prompts.append(user_prompt)
@@ -154,6 +174,44 @@ class Router:
                             else _long_vi(item["index"])
                         ),
                         "voiceover_en": f"Short English line {item['index']} about money.",
+                    }
+                    for item in items
+                ]
+            }
+        if "Nâng MỖI cảnh trên" in user_prompt:
+            m = re.search(
+                r"DANH SÁCH CẢNH CẦN SỬA:\n(\[.*?\])\n\n", user_prompt, re.DOTALL
+            )
+            items = json.loads(m.group(1)) if m else []
+            return {
+                "scenes": [
+                    {
+                        "index": item["index"],
+                        "voiceover_vi": _vi_line(item["index"], self.repair_words or 24),
+                        "voiceover_en": f"Expanded English line {item['index']} about money.",
+                    }
+                    for item in items
+                ]
+            }
+        if "LỖI CẦN SỬA:" in user_prompt:
+            m = re.search(
+                r"DANH SÁCH CẢNH CẦN SỬA:\n(\[.*?\])\n\n", user_prompt, re.DOTALL
+            )
+            items = json.loads(m.group(1)) if m else []
+            self.revision_calls.append([item["index"] for item in items])
+            self.revision_prompts.append(user_prompt)
+            return {
+                "scenes": [
+                    {
+                        "index": item["index"],
+                        "voiceover_vi": (
+                            f"Nhưng rồi câu chuyện cảnh {item['index']} rẽ sang hướng khác "
+                            "và dòng tiền vẫn cứ chảy về phía trước."
+                        ),
+                        "voiceover_en": (
+                            f"But then scene {item['index']} turned, and the money "
+                            "kept flowing forward anyway."
+                        ),
                     }
                     for item in items
                 ]
@@ -721,9 +779,11 @@ def test_budget_report_reaches_algorithm_result(factory, monkeypatch, tmp_path):
         [{"start": 0, "end": 200, "text": TRANSCRIPT}], target_shots=20, project_dir=tmp_path
     )
 
-    assert result["budget_report"]["ratio"] == 0.95
+    report = result["budget_report"]
+    assert report["ratio"] >= 0.95
     saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
-    assert saved["budget_report"]["offenders"] == 1
+    assert saved["budget_report"]["ratio"] == report["ratio"]
+    assert saved["budget_report"]["offenders"] == report["offenders"]
 
 
 def test_on_progress_heartbeats_while_the_script_is_being_written(factory, monkeypatch, tmp_path):
@@ -888,7 +948,7 @@ def test_judge_sees_the_machine_rhythm_report(factory, monkeypatch):
         m = re.search(r"NHỊP ĐỌC MÁY: CV độ dài câu ([\d.]+)", p)
         assert m, p[-600:]
         assert 0 <= float(m.group(1)) <= 2.0
-        assert "pacing_54_46" in p
+        assert "narration_rhythm" in p
 
 
 def test_naturalness_report_flags_staccato_prose():
@@ -910,3 +970,84 @@ def test_naturalness_report_flags_staccato_prose():
     assert stiff_rep["cv"] < ScriptFactory.NATURAL_MIN_CV
     assert nat_rep["cv"] >= ScriptFactory.NATURAL_MIN_CV
     assert nat_rep["connectors_per_100"] >= ScriptFactory.NATURAL_MIN_CONNECTORS
+
+
+# --- outline spine, repetition registry, global revision -------------------
+
+
+def test_outline_pass_feeds_every_chunk_and_reaches_the_result(factory, monkeypatch):
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    _, _, result = factory.run(
+        [{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3
+    )
+
+    assert router.outline_calls == 1
+    assert result["outline"]["paradox"]
+    assert router.rewrite_prompts
+    for prompt in router.rewrite_prompts:
+        assert "OUTLINE TOÀN CỤC" in prompt
+        assert '"timeline"' in prompt
+
+
+def test_second_chunk_sees_the_phrases_already_used(factory, monkeypatch):
+    slices_vi = [
+        {"index": i + 1, "situation": f"s{i}", "text": f"Cảnh {i+1}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(12)
+    ]
+    slices_en = [
+        {"index": sc["index"], "situation": sc["situation"], "text": f"Scene {sc['index']}.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in slices_vi
+    ]
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=12: (slices_vi, slices_en),
+    )
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 100, "text": "x"}], target_shots=12)
+
+    first_chunks = router.rewrite_prompts[0::2]
+    second_chunks = router.rewrite_prompts[1::2]
+    assert len(first_chunks) == len(second_chunks) == 3
+    assert all("CỤM TỪ/ẨN DỤ ĐÃ DÙNG" not in p for p in first_chunks)
+    assert all("CỤM TỪ/ẨN DỤ ĐÃ DÙNG" in p for p in second_chunks)
+
+
+def test_global_revision_repairs_only_flagged_scenes(factory, monkeypatch):
+    router = Router(
+        {"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]},
+        edit_issues=[{"type": "choppy", "scenes": [2], "fix": "gộp câu cụt"}],
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=3
+    )
+
+    assert router.edit_calls == 1
+    assert router.revision_calls == [[2]]
+    assert result["revision"]["accepted"] is True
+    assert result["revision"]["revised_scenes"] == 1
+    assert [sc["index"] for sc in vi] == [1, 2, 3]
+    assert "câu chuyện cảnh 2" in vi[1]["text"]
+    assert "scene 2 turned" in en[1]["text"]
+
+
+def test_overused_phrase_registry_ignores_function_words_and_years():
+    texts = [
+        "Công ty trở về nhà kho dột và dòng tiền vẫn chảy.",
+        "Họ vẫn ở nhà kho dột khi dòng tiền cạn.",
+        "Nhà kho dột ấy là nơi dòng tiền bắt đầu.",
+        "Năm 1984 nhà kho dột đón dòng tiền mới.",
+    ]
+
+    phrases = ScriptFactory._overused_phrases(texts, min_count=3)
+
+    assert "nhà kho dột" in phrases
+    assert "dòng tiền" in phrases
+    assert all(not phrase.split()[0].isdigit() for phrase in phrases)

@@ -29,7 +29,7 @@ STAGE_ORDER = {s: i for i, s in enumerate(STAGES)}
 QA_GATE_MIN_SCORE = 8.0
 
 # Skill-pack targets (mirrors scripts/apply_video_algorithm.py)
-TARGET_SHORT_PCT = 0.54
+TARGET_SHORT_PCT = 0.40
 PASS_SHORT_PCT = 0.35
 WPM_RANGE = (150.0, 210.0)
 SCENE_DUR_RANGE = (4.0, 8.0)
@@ -272,7 +272,7 @@ def c_open_loops(pd: Path, ctx):
     return loops >= 4, loops, ">= 4"
 
 
-@_check("S07", "Kịch bản", "Tỷ lệ câu ngắn 54/46", "script")
+@_check("S07", "Kịch bản", "Nhịp câu tự nhiên (>=35% câu ngắn)", "script")
 def c_short_pct(pd: Path, ctx):
     plan = ctx.get("plan") or []
     pct = _short_sentence_pct(plan)

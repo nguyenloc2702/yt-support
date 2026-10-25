@@ -7,9 +7,9 @@ UNIVERSAL_VIDEO_ALGORITHM skill pack:
 1. N variants (default 3) are rewritten from the same slices with different
    creative angles, grounded strictly in the source transcript facts.
 2. Every variant is scored by an LLM judge on the skill-pack rubric
-   (hook paradox, open loops, 54/46 pacing, WPM, grounding, terminology).
-   Mechanical metrics (durations, word counts, short-sentence ratio) are
-   computed in code and recorded alongside.
+   (hook paradox, open loops, natural spoken rhythm, WPM, grounding,
+   terminology). Mechanical metrics (durations, word counts, sentence-length
+   variance) are computed in code and recorded alongside.
 3. If no variant reaches min_score, the judge feedback is fed back and up to
    `max_regen_rounds` extra rounds are generated.
 4. The full decision trail is persisted to algorithm_result.json so every
@@ -25,6 +25,7 @@ import math
 import re
 import statistics
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -54,8 +55,14 @@ SPLIT_MIN_CHUNK = 5  # smallest sub-chunk when a rewrite response is unusable
 # targets 205 WPM with pauses; 3.5 words/s is the plan ceiling (QA S08 <=210).
 WORDS_PER_SECOND = SCENE_WORDS_PER_SECOND
 
-# Skill-pack mechanical targets (mirrors scripts/apply_video_algorithm.py)
-TARGET_SHORT_SENTENCE_PCT = 0.54
+# Skill-pack mechanical targets (mirrors scripts/apply_video_algorithm.py).
+# The 54/46 short-sentence law was retired: >50% of sentences at <=6 words is
+# what made the old scripts read as staccato. QA S07 still needs >=35% short
+# sentences, so the steering target sits in the 35-45% band.
+TARGET_SHORT_SENTENCE_PCT = 0.38
+# Cap on revision chunks per script: the global edit finds issues everywhere,
+# but a repair pass must stay bounded on 130-scene scripts.
+REVISION_MAX_CHUNKS = 14
 MIN_WPM = 195.0
 MAX_WPM = 214.0
 TARGET_WPM = 205.0
@@ -129,20 +136,21 @@ VARIANT_ANGLES = [
 JUDGE_RUBRIC = """Bạn là tổng biên tập khắt khe nhất đài documentary. Chấm kịch bản theo bộ quy tắc UNIVERSAL_VIDEO_ALGORITHM trên thang 10 (một chữ số thập phân):
 1. HOOK (2.0đ): 30 giây đầu có [số liệu khủng / nghịch lý] + [so sánh bất ngờ] + [câu hỏi treo]. Không chào hỏi, không giới thiệu lan man.
 2. OPEN LOOPS (2.0đ): ít nhất 4 vòng tò mò; vòng mới mở TRƯỚC khi vòng cũ đóng hoàn toàn; có câu bắc cầu ("Nhưng đó chưa phải điều bất ngờ nhất...").
-3. NHỊP 54/46 (1.5đ): đan xen câu ngắn dứt khoát (<= 6 từ) làm dramatic pause — mục tiêu ~54% số câu ngắn.
+3. NHỊP KỂ TỰ NHIÊN (1.5đ): câu đủ chủ ngữ vị ngữ, đọc lên trôi chảy như người kể chuyện thật; độ dài câu đa dạng (câu dài có mệnh đề phụ xen câu ngắn), khoảng 35-40% câu ngắn (<= 6 từ) làm điểm nhấn nhưng KHÔNG quá 45%; có từ nối tự nhiên; cấm chuỗi câu cụt cùng cấu trúc và cấm lặp một cụm ẩn dụ/từ khoá quá 3 lần trong toàn bài.
 4. TỐC ĐỘ ĐỌC (1.0đ): WPM tổng thể trong khoảng 195-214 (dựa vào độ dài lời thoại và thời lượng từng cảnh).
 5. GROUNDED (1.5đ): mọi sự kiện, tên riêng, con số phải có trong transcript nguồn. Bịa bất kỳ chi tiết nào là lỗi nặng.
 6. THUẬT NGỮ (1.0đ): thuật ngữ tài chính chính xác, nhất quán (tiền gốc, lãi suất, cung tiền, ngân hàng trung ương...).
 7. CALLBACK (1.0đ): cảnh cuối quay lại giải tỏa câu hỏi/nghịch lý đã gieo ở hook.
-Trả về duy nhất JSON object: {"score": <0-10>, "breakdown": {"hook": <0-2>, "open_loops": <0-2>, "pacing_54_46": <0-1.5>, "wpm": <0-1>, "grounded": <0-1.5>, "terminology": <0-1>, "callback": <0-1>}, "feedback": "nhận xét ngắn tiếng Việt, chỉ ra 2-3 điểm cần sửa cụ thể"}"""
+Trả về duy nhất JSON object: {"score": <0-10>, "breakdown": {"hook": <0-2>, "open_loops": <0-2>, "narration_rhythm": <0-1.5>, "wpm": <0-1>, "grounded": <0-1.5>, "terminology": <0-1>, "callback": <0-1>}, "feedback": "nhận xét ngắn tiếng Việt, chỉ ra 2-3 điểm cần sửa cụ thể"}"""
 
 
 REPAIR_SYSTEM_PROMPT = (
     "Bạn là biên tập viên documentary tài chính theo bộ quy tắc UNIVERSAL_VIDEO_ALGORITHM. "
-    "Nhiệm vụ: sửa các cảnh vượt/dưới ngân sách từ của kịch bản song ngữ. "
+    "Nhiệm vụ: sửa các cảnh vượt/dưới ngân sách từ hoặc cảnh đọc lên gượng của kịch bản song ngữ. "
     "TUYỆT ĐỐI GROUNDED: chỉ dùng sự kiện/tên riêng/con số có trong transcript nguồn, "
     "không bịa chi tiết mới, không đổi index hay thứ tự cảnh. "
-    "Giữ câu ngắn dứt khoát xen kẽ, không lặp từ, không cụt lủn."
+    "Câu nào cũng phải đủ chủ ngữ vị ngữ và đọc lên xuôi tai; câu ngắn chỉ dùng để chốt, "
+    "không băm một ý thành mảnh cụt; không lặp từ, không lặp ẩn dụ."
 )
 
 
@@ -263,6 +271,17 @@ class ScriptFactory:
             raise ScriptFactoryError("Semantic slicing produced no scenes")
         expected_count = len(slices_vi)
         transcript_text = " ".join(str(s.get("text", "")) for s in transcript_segments)
+        outline = self._build_outline(transcript_text, on_progress)
+        outline_text = self._outline_block(outline)
+        if outline:
+            logger.info(
+                "Script outline: %d timeline events, %d acts, banned=%s",
+                len(outline.get("timeline") or []),
+                len(outline.get("acts") or []),
+                (outline.get("banned") or [])[:6],
+            )
+        else:
+            logger.warning("Global outline unavailable; variants write without a timeline spine")
         from services.feedback_store import build_feedback_brief
         feedback_brief = build_feedback_brief()
         if feedback_brief:
@@ -279,7 +298,7 @@ class ScriptFactory:
             for angle in VARIANT_ANGLES[: self.n_variants]:
                 variant = self._make_variant(
                     angle, slices_vi, slices_en, transcript_text, judge_feedback,
-                    feedback_brief, on_progress,
+                    feedback_brief, on_progress, outline_text,
                 )
                 total_calls += max(1, (len(slices_vi) + VARIANT_CHUNK - 1) // VARIANT_CHUNK)
                 if variant.valid:
@@ -322,6 +341,13 @@ class ScriptFactory:
         if best is None or not best.valid:
             raise ScriptFactoryError("All script variants were invalid across all rounds")
 
+        # The global edit + targeted repair runs on the winner only: chunked
+        # writing cannot see its own repetition or its own chronology, so this
+        # is the only pass that judges the script as one text.
+        revision = self._revise_script(
+            best, transcript_text, outline_text, feedback_brief, on_progress
+        )
+
         # Post-selection repairs fix the structural checks the judge scores but
         # cannot enforce (hook window, callback echo) and top up a script that is
         # still far short of the requested duration.
@@ -336,6 +362,8 @@ class ScriptFactory:
             "min_score": self.min_score,
             "rounds": rounds,
             "total_rounds": len(rounds),
+            "outline": outline,
+            "revision": revision,
             "scene_count": len(best.scenes_vi),
             "expected_scene_count": expected_count,
             "budget_report": best.budget_report,
@@ -377,6 +405,7 @@ class ScriptFactory:
         judge_feedback: str,
         feedback_brief: str = "",
         on_progress: Optional[Callable[[], None]] = None,
+        outline: str = "",
     ) -> Variant:
         """Rewrite ALL base scenes into one variant, chunked to respect max_tokens."""
         variant = Variant(angle=angle)
@@ -387,10 +416,15 @@ class ScriptFactory:
             _beat(on_progress)
             chunk_vi = base_vi[chunk_start: chunk_start + VARIANT_CHUNK]
             chunk_en = base_en[chunk_start: chunk_start + VARIANT_CHUNK]
+            # Phrases this variant already leaned on. Without it every chunk
+            # independently picks the same metaphor ("nhà kho dột" x8).
+            used_phrases = self._overused_phrases(
+                [str(sc.get("text", "")) for sc in scenes_vi], min_count=2, limit=12
+            )
             try:
                 part_vi, part_en = self._rewrite_chunk_robust(
                     angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
-                    chunk_start, len(base_vi), feedback_brief,
+                    chunk_start, len(base_vi), feedback_brief, outline, used_phrases,
                 )
             except Exception as exc:
                 variant.invalid_reason = f"rewrite failed: {exc}"[:200]
@@ -874,6 +908,7 @@ class ScriptFactory:
         indices: List[int],
         transcript_text: str,
         instruction: str,
+        context: str = "",
     ) -> int:
         from pipeline.llm_client import chat_json
 
@@ -889,9 +924,10 @@ class ScriptFactory:
         if not items:
             return 0
         user_prompt = (
-            f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
+            (f"BỐI CẢNH TOÀN CỤC:\n{context}\n\n" if context else "")
+            + f"GÓC KỂ: {angle['label']} — {angle['brief']}\n\n"
             f"TRANSCRIPT NGUỒN (chỉ dùng sự kiện từ đây):\n\"\"\"{transcript_text[:4000]}\"\"\"\n\n"
-            "DANH SÁCH CẢNH CẦN SỬA NGÂN SÁCH TỪ:\n"
+            "DANH SÁCH CẢNH CẦN SỬA:\n"
             f"{json.dumps(items, ensure_ascii=False, indent=1)}\n\n"
             f"{instruction} Trả về duy nhất JSON object: "
             '{"scenes": [{"index": <int>, "voiceover_vi": "...", "voiceover_en": "..."}]}'
@@ -1032,12 +1068,14 @@ class ScriptFactory:
         chunk_start: int,
         total_scenes: int,
         feedback_brief: str = "",
+        outline: str = "",
+        used_phrases: Optional[List[str]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Rewrite a chunk, halving it when the gateway returns unusable JSON."""
         try:
             return self._rewrite_chunk(
                 angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
-                chunk_start, total_scenes, feedback_brief,
+                chunk_start, total_scenes, feedback_brief, outline, used_phrases,
             )
         except Exception as exc:
             if len(chunk_vi) <= SPLIT_MIN_CHUNK:
@@ -1051,10 +1089,12 @@ class ScriptFactory:
             left_vi, left_en = self._rewrite_chunk_robust(
                 angle, chunk_vi[:mid], chunk_en[:mid], transcript_text,
                 judge_feedback, chunk_start, total_scenes, feedback_brief,
+                outline, used_phrases,
             )
             right_vi, right_en = self._rewrite_chunk_robust(
                 angle, chunk_vi[mid:], chunk_en[mid:], transcript_text,
                 judge_feedback, chunk_start + mid, total_scenes, feedback_brief,
+                outline, used_phrases,
             )
             return left_vi + right_vi, left_en + right_en
 
@@ -1068,6 +1108,8 @@ class ScriptFactory:
         chunk_start: int,
         total_scenes: int,
         feedback_brief: str = "",
+        outline: str = "",
+        used_phrases: Optional[List[str]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         from pipeline.llm_client import chat_json
 
@@ -1087,10 +1129,24 @@ class ScriptFactory:
             if judge_feedback
             else ""
         )
+        outline_block = (
+            "\nOUTLINE TOÀN CỤC (trục thời gian + beat đã duyệt; bám đúng, "
+            "KHÔNG kéo sự kiện của đoạn khác về đây):\n"
+            f"{outline}\n"
+            if outline
+            else ""
+        )
+        used_block = (
+            "\nCỤM TỪ/ẨN DỤ ĐÃ DÙNG Ở CÁC CẢNH TRƯỚC (cấm lặp lại; "
+            "nếu buộc phải nhắc sự kiện thì đổi cách gọi):\n"
+            f"{', '.join(used_phrases)}\n"
+            if used_phrases
+            else ""
+        )
         system_prompt = (
             "Bạn là biên kịch documentary tài chính đẳng cấp, viết theo bộ quy tắc "
             "UNIVERSAL_VIDEO_ALGORITHM (hook nghịch lý, chuỗi open loop lồng nhau, "
-            "nhịp 54/46 câu ngắn, ẩn dụ 3 tầng, callback kết). "
+            "nhịp kể tự nhiên với câu đủ ý, ẩn dụ 3 tầng, callback kết). "
             "TUYỆT ĐỐI GROUNDED: chỉ dùng sự kiện/tên riêng/con số có trong transcript nguồn, "
             "không bịa chi tiết mới.\n\n"
             f"GÓC KỂU CHUYÊN CỦA BẠN — {angle['label']}: {angle['brief']}\n"
@@ -1105,6 +1161,8 @@ class ScriptFactory:
         user_prompt = (
             f"{feedback_block}"
             f"TRANSCRIPT NGUỒN (chỉ được dùng sự kiện từ đây):\n\"\"\"{transcript_text[:6000]}\"\"\"\n\n"
+            f"{outline_block}"
+            f"{used_block}"
             f"BỘ CẢNH CẦN VIẾT LẠI (cảnh {chunk_start + 1}-{chunk_start + len(chunk_vi)} "
             f"trên tổng {total_scenes}):\n"
             f"{json.dumps(compact_base, ensure_ascii=False, indent=1)}\n\n"
@@ -1117,6 +1175,8 @@ class ScriptFactory:
             f"{VI_MIN_WORDS}-{VI_MAX_WORDS} từ ({MIN_SCENE_DURATION:.1f}-{MAX_SCENE_DURATION:.1f} giây tại nhịp "
             f"210 WPM), ưu tiên {VI_TARGET_WORDS[0]}-{VI_TARGET_WORDS[1]} từ để tổng kịch bản đủ dài; "
             f"TUYỆT ĐỐI KHÔNG dồn quá {VI_MAX_WORDS} từ vào một cảnh.\n"
+            f"- Giữ đúng mốc thời gian và sự kiện của từng cảnh base: không đảo thứ tự, "
+            f"không lấy sự kiện của cảnh khác đưa vào.\n"
             f"- voiceover_en: bản EN trọn ý, giữ mạch kể tự nhiên như người dẫn chương trình "
             f"(không dịch word-by-word, không cụt câu): {EN_MIN_WORDS}-"
             f"{EN_MAX_WORDS} từ mỗi cảnh vì giọng EN đọc ~160 wpm — dòng quá ngắn làm "
@@ -1169,6 +1229,287 @@ class ScriptFactory:
             })
         return vi_out, en_out
 
+    # --------------------------------------------------- global coherence pass
+
+    def _build_outline(
+        self, transcript_text: str, on_progress: Optional[Callable[[], None]] = None
+    ) -> Dict[str, Any]:
+        """One global pass before any chunk is written.
+
+        Chunked rewriting only ever sees ten scenes, so each chunk invents its
+        own order and re-uses the same metaphor. A single outline (timeline +
+        acts + open loops + banned phrases) gives every chunk one spine.
+        """
+        from pipeline.llm_client import chat_json
+
+        _beat(on_progress)
+        system_prompt = (
+            "Bạn là kiến trúc sư kịch bản documentary. Chỉ trả về JSON thuần túy, "
+            "không giải thích, không markdown."
+        )
+        user_prompt = (
+            f"TRANSCRIPT NGUỒN:\n\"\"\"{transcript_text[:14000]}\"\"\"\n\n"
+            "Dựng outline cho kịch bản documentary kể lại câu chuyện này:\n"
+            "- paradox: nghịch lý/câu hỏi lớn mở video.\n"
+            "- timeline: các mốc sự kiện CÓ THẬT trong transcript, ĐÚNG thứ tự thời gian "
+            "(không bịa mốc mới).\n"
+            "- acts: 3-6 chặng, mỗi chặng một beat kể + phạm vi cảnh ước lượng.\n"
+            "- open_loops: các vòng tò mò mở/đóng theo đúng thứ tự.\n"
+            "- callback: câu kết quay lại nghịch lý mở đầu.\n"
+            "- banned: 5-8 cụm từ/ẩn dụ quá dễ lặp để cấm dùng lại.\n\n"
+            "Trả về duy nhất JSON object: "
+            '{"paradox": "...", "timeline": [{"year": "...", "event": "..."}], '
+            '"acts": [{"range": "...", "beat": "..."}], "open_loops": ["..."], '
+            '"callback": "...", "banned": ["..."]}'
+        )
+        try:
+            parsed = chat_json(
+                system_prompt, user_prompt, temperature=0.4, max_tokens=2500,
+                model=self.model,
+            )
+        except Exception as exc:
+            logger.warning("Outline pass failed: %s", exc)
+            return {}
+        if not isinstance(parsed, dict):
+            raise ScriptFactoryError("outline pass returned a non-object")
+        if not (parsed.get("timeline") or parsed.get("acts")):
+            logger.warning("Outline pass returned no timeline/acts; ignoring it")
+            return {}
+        return parsed
+
+    @staticmethod
+    def _outline_block(outline: Dict[str, Any]) -> str:
+        if not outline:
+            return ""
+        return json.dumps(outline, ensure_ascii=False)[:3000]
+
+    _VI_STOPWORDS = frozenset(
+        "của và là những một các cho với trong khi để từ này đó thì mà nhưng nên "
+        "như đã sẽ đang cũng rất chỉ còn phải không chưa vào ra lên xuống về tới "
+        "theo vì nếu họ nó ông bà anh chị em chúng ta mình bạn tôi có được bị "
+        "rồi vẫn đâu nào ai gì sao thế ấy đấy ở tại bằng hơn kém quá lắm năm".split()
+    )
+
+    @classmethod
+    def _overused_phrases(
+        cls, texts: List[str], min_count: int = 2, limit: int = 12
+    ) -> List[str]:
+        """Content 2-3 grams repeated across scenes, longest and most frequent first."""
+        counts: Counter = Counter()
+        for text in texts:
+            words = re.findall(r"\w+", str(text).lower())
+            for size in (3, 2):
+                for i in range(len(words) - size + 1):
+                    gram = words[i: i + size]
+                    if gram[0] in cls._VI_STOPWORDS or gram[-1] in cls._VI_STOPWORDS:
+                        continue
+                    if all(len(w) <= 2 for w in gram) or any(w.isdigit() for w in gram):
+                        continue
+                    counts[" ".join(gram)] += 1
+        ranked = sorted(
+            counts.items(), key=lambda kv: (kv[1] * len(kv[0]), kv[1]), reverse=True
+        )
+        kept: List[str] = []
+        for phrase, count in ranked:
+            if count < min_count:
+                break
+            if any(phrase in other for other in kept):
+                continue
+            kept.append(phrase)
+            if len(kept) >= limit:
+                break
+        return kept
+
+    def _global_edit_issues(
+        self,
+        scenes_vi: List[Dict[str, Any]],
+        transcript_text: str,
+        outline_text: str,
+    ) -> List[Dict[str, Any]]:
+        """Read the whole script once and return concrete, scene-targeted fixes."""
+        from pipeline.llm_client import chat_json
+
+        script_lines = "\n".join(
+            f"Cảnh {sc['index']}: {sc['text']}" for sc in scenes_vi
+        )
+        system_prompt = (
+            "Bạn là biên tập viên tổng của một kênh documentary. Nhiệm vụ: rà TOÀN BỘ "
+            "kịch bản và chỉ ra lỗi cần sửa. Chỉ trả về JSON thuần túy."
+        )
+        user_prompt = (
+            (f"OUTLINE ĐÃ DUYỆT:\n{outline_text}\n\n" if outline_text else "")
+            + f"TRANSCRIPT NGUỒN (để kiểm tra bịa đặt):\n\"\"\"{transcript_text[:5000]}\"\"\"\n\n"
+            f"TOÀN BỘ KỊCH BẢN:\n{script_lines}\n\n"
+            "Rà các lỗi sau và chỉ rõ số cảnh:\n"
+            "- repeat: một cụm từ/ẩn dụ bị dùng lặp quá 3 lần trong bài.\n"
+            "- chronology: cảnh nhắc mốc thời gian lệch khỏi trục outline hoặc đảo thứ tự.\n"
+            "- choppy: chuỗi câu cụt, cùng cấu trúc, đọc lên gượng.\n"
+            "- filler: câu không thêm thông tin (sáo rỗng, cảm xúc bịa).\n"
+            "- confusing: mạch kể nhảy cóc, đại từ không rõ.\n"
+            "Tối đa 20 lỗi, mỗi lỗi nêu cảnh cụ thể và cách sửa cụ thể.\n"
+            'Trả về duy nhất JSON object: {"issues": [{"type": "...", '
+            '"scenes": [<int>], "fix": "..."}]}'
+        )
+        try:
+            parsed = chat_json(
+                system_prompt, user_prompt, temperature=0.2, max_tokens=2500,
+                model=self.model,
+            )
+        except Exception as exc:
+            logger.warning("Global edit pass failed: %s", exc)
+            return []
+        issues = parsed.get("issues") if isinstance(parsed, dict) else None
+        if not isinstance(issues, list):
+            return []
+        index_set = {int(sc.get("index", i + 1)) for i, sc in enumerate(scenes_vi)}
+        valid: List[Dict[str, Any]] = []
+        for issue in issues[:20]:
+            if not isinstance(issue, dict):
+                continue
+            try:
+                nums = [int(n) for n in issue.get("scenes") or [] if int(n) in index_set]
+            except (TypeError, ValueError):
+                continue
+            if not nums:
+                continue
+            valid.append({
+                "type": str(issue.get("type", ""))[:40],
+                "scenes": nums,
+                "fix": str(issue.get("fix", ""))[:400],
+            })
+        return valid
+
+    def _revise_script(
+        self,
+        variant: "Variant",
+        transcript_text: str,
+        outline_text: str,
+        feedback_brief: str = "",
+        on_progress: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Global audit -> targeted chunk repairs on the winning variant.
+
+        Kept only when the judge does not prefer the unrepaired script, so a bad
+        edit pass can never ship a worse script than the one that won.
+        """
+        vi, en = variant.scenes_vi, variant.scenes_en
+        if not vi:
+            return {"applicable": False}
+        _beat(on_progress)
+        issues = self._global_edit_issues(vi, transcript_text, outline_text)
+
+        repeated = self._overused_phrases(
+            [str(sc.get("text", "")) for sc in vi], min_count=4, limit=10
+        )
+        for phrase in repeated:
+            hits = [
+                int(sc.get("index", i + 1))
+                for i, sc in enumerate(vi)
+                if phrase in str(sc.get("text", "")).lower()
+            ]
+            if len(hits) >= 3:
+                issues.append({
+                    "type": "repeat",
+                    "scenes": hits,
+                    "fix": f"cụm '{phrase}' lặp {len(hits)} lần — đổi cách gọi ở các cảnh này",
+                })
+
+        # Staccato detector: a scene whose sentences are nearly all <=6 words is
+        # the "cụt ngủn" read-aloud failure the judge is asked to punish.
+        for i, sc in enumerate(vi):
+            sentences = [
+                s.strip() for s in re.split(r"[.!?…]+", str(sc.get("text", ""))) if s.strip()
+            ]
+            if len(sentences) < 3:
+                continue
+            short = sum(1 for s in sentences if len(s.split()) <= 6)
+            if short / len(sentences) >= 0.7:
+                issues.append({
+                    "type": "choppy",
+                    "scenes": [int(sc.get("index", i + 1))],
+                    "fix": "câu bị băm cụt — gộp thành câu đủ ý, chỉ giữ tối đa một câu ngắn để chốt",
+                })
+
+        if not issues:
+            return {"applicable": True, "issues": 0, "chunks": 0, "revised_scenes": 0, "accepted": False}
+
+        pos_by_index = {int(sc.get("index", i + 1)): i for i, sc in enumerate(vi)}
+        chunk_issues: Dict[int, List[Dict[str, Any]]] = {}
+        positions = set()
+        for issue in issues:
+            for idx in issue["scenes"]:
+                pos = pos_by_index.get(idx)
+                if pos is None:
+                    continue
+                positions.add(pos)
+                chunk_issues.setdefault(pos // VARIANT_CHUNK, []).append(issue)
+
+        snapshot_vi = [dict(sc) for sc in vi]
+        snapshot_en = [dict(sc) for sc in en]
+        score_before = variant.score
+        revised = 0
+        chunks = 0
+        for chunk_id in sorted(chunk_issues)[:REVISION_MAX_CHUNKS]:
+            start = chunk_id * VARIANT_CHUNK
+            end = min(start + VARIANT_CHUNK, len(vi))
+            # _rewrite_scene_indices takes zero-based positions, not scene numbers.
+            indices = [p for p in range(start, end) if p in positions]
+            if not indices:
+                continue
+            _beat(on_progress)
+            instruction = (
+                "Chỉ sửa các lỗi được liệt kê; cảnh nào không có lỗi thì giữ nguyên từng chữ.\n"
+                f"LỖI CẦN SỬA: {json.dumps(chunk_issues[chunk_id], ensure_ascii=False)}\n"
+                + (
+                    f"CỤM TỪ BỊ LẶP TOÀN BÀI (cấm dùng lại): {', '.join(repeated)}\n"
+                    if repeated
+                    else ""
+                )
+                + f"Mỗi cảnh VI vẫn phải {VI_MIN_WORDS}-{VI_MAX_WORDS} từ, EN "
+                f"{EN_MIN_WORDS}-{EN_MAX_WORDS} từ, đọc lên tự nhiên, đủ ý, không cụt; "
+                "giữ nguyên số liệu, tên riêng và ý nghĩa."
+            )
+            updated = self._rewrite_scene_indices(
+                variant.angle, vi, en, indices, transcript_text, instruction,
+                context=outline_text,
+            )
+            chunks += 1
+            revised += updated
+
+        if not revised:
+            return {
+                "applicable": True, "issues": len(issues), "chunks": chunks,
+                "revised_scenes": 0, "accepted": False,
+            }
+
+        self._repair_word_budget(variant.angle, vi, en, transcript_text, on_progress)
+        score_after, breakdown, fb = self._judge(variant, transcript_text, feedback_brief)
+        accepted = score_after >= score_before
+        if accepted:
+            variant.score, variant.breakdown, variant.judge_feedback = (
+                score_after, breakdown, fb
+            )
+            variant.budget_report = self._acceptance_report(vi, en)
+        else:
+            vi[:] = snapshot_vi
+            en[:] = snapshot_en
+            score_after = score_before
+        logger.info(
+            "Global revision: issues=%d chunks=%d scenes=%d score %.1f -> %.1f (%s)",
+            len(issues), chunks, revised, score_before, score_after,
+            "kept" if accepted else "reverted",
+        )
+        return {
+            "applicable": True,
+            "issues": len(issues),
+            "chunks": chunks,
+            "revised_scenes": revised,
+            "score_before": round(score_before, 1),
+            "score_after": round(score_after, 1),
+            "accepted": accepted,
+            "repeated_phrases": repeated,
+        }
+
     def _judge(
         self, variant: Variant, transcript_text: str, feedback_brief: str = ""
     ) -> Tuple[float, Dict[str, float], str]:
@@ -1193,12 +1534,22 @@ class ScriptFactory:
         nat = self._naturalness_report(
             "\n".join(str(sc.get("text", "")) for sc in variant.scenes_vi)
         )
+        repeated = self._overused_phrases(
+            [str(sc.get("text", "")) for sc in variant.scenes_vi], min_count=4, limit=8
+        )
         rhythm = (
             f"\n\nNHỊP ĐỌC MÁY: CV độ dài câu {nat['cv']:.2f} (tự nhiên >= {self.NATURAL_MIN_CV}); "
-            f"{nat['punch_pct']:.0f}% câu đòn <= 6 từ (tự nhiên <= {self.NATURAL_MAX_PUNCH_PCT:.0f}%); "
+            f"{nat['punch_pct']:.0f}% câu ngắn <= 6 từ (dải tự nhiên "
+            f"{self.NATURAL_MIN_PUNCH_PCT:.0f}-{self.NATURAL_MAX_PUNCH_PCT:.0f}%, "
+            f"mục tiêu ~{TARGET_SHORT_SENTENCE_PCT * 100:.0f}%); "
             f"{nat['connectors_per_100']:.1f} từ nối/100 từ (tự nhiên >= {self.NATURAL_MIN_CONNECTORS}). "
-            "Chỉ số nào dưới ngưỡng thì kịch bản đang đọc CỨNG như máy — trừ điểm mục "
-            "'pacing_54_46' và feedback chỉ đúng lỗi nhịp cần sửa."
+            "CV dưới ngưỡng = câu đều đều như máy; punch_pct trên 45% = kịch bản bị băm cụt. "
+            "Chỉ số nào lệch thì trừ điểm mục 'narration_rhythm' và feedback chỉ đúng lỗi nhịp cần sửa."
+            + (
+                f"\nCỤM TỪ LẶP TOÀN BÀI (mỗi cụm quá 3 lần phải bị trừ điểm): {', '.join(repeated)}."
+                if repeated
+                else ""
+            )
         )
         user_prompt = (
             (f"{feedback_brief}\n\n" if feedback_brief else "")
@@ -1232,7 +1583,8 @@ class ScriptFactory:
         re.IGNORECASE,
     )
     NATURAL_MIN_CV = 0.45
-    NATURAL_MAX_PUNCH_PCT = 40.0
+    NATURAL_MIN_PUNCH_PCT = 35.0
+    NATURAL_MAX_PUNCH_PCT = 45.0
     NATURAL_MIN_CONNECTORS = 1.5
 
     @classmethod
@@ -1272,6 +1624,7 @@ class ScriptFactory:
         wpm = (total_words / total_dur * 60.0) if total_dur > 0 else 0.0
         question_count = sum(1 for s in sentences if s.endswith("?"))
         durations = [float(sc.get("duration", 0.0)) for sc in scenes_vi]
+        natural = self._naturalness_report("\n".join(texts))
         return {
             "scene_count": len(scenes_vi),
             "total_duration_sec": round(total_dur, 1),
@@ -1281,6 +1634,8 @@ class ScriptFactory:
             "sentence_count": len(sentences),
             "short_sentence_pct": round(short_pct, 3),
             "target_short_sentence_pct": TARGET_SHORT_SENTENCE_PCT,
+            "sentence_length_cv": natural["cv"],
+            "connectors_per_100": natural["connectors_per_100"],
             "estimated_wpm": round(wpm, 1),
             "wpm_in_range": MIN_WPM <= wpm <= MAX_WPM if wpm else False,
             "question_count": question_count,

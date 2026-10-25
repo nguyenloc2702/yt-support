@@ -735,9 +735,10 @@ Nội dung:
 3. CHUỖI VÒNG TÒ MÒ LỒNG NHAU (OPEN LOOPS):
    - Mở vòng tò mò tiếp theo TRƯỚC KHI đóng hoàn toàn vòng tò mò cũ.
    - Luôn gieo các câu bắc cầu kích thích: "Nhưng đó chưa phải điều bất ngờ nhất...", "Điều này dẫn tới một nghịch lý trớ trêu...", "Câu trả lời sẽ khiến bạn phải suy ngẫm...".
-4. NHỊP KỊCH BẢN DỨT KHOÁT (QUY TẮC 54/46):
-   - Đan xen các câu ngắn gọn, dứt khoát (<= 6 từ) để tạo điểm nhấn và ngắt nhịp kịch tính (Dramatic Pauses).
-   - Ví dụ: "Không hề.", "Hoàn toàn bằng không.", "Và bạn không hề đơn độc.", "Đó là sự thật."
+4. NHỊP KỂ TỰ NHIÊN:
+   - Câu đủ chủ ngữ vị ngữ, đọc lên trôi như lời nói; câu ngắn (<= 6 từ) chỉ dùng để chốt ý,
+     không băm một ý thành nhiều mảnh cụt.
+   - Xen câu dài có mệnh đề phụ với câu ngắn, không để 3 câu liên tiếp cùng độ dài cùng cấu trúc.
 5. ẨN DỤ 3 TẦNG (3-TIER METAPHOR):
    - Biến các khái niệm tài chính trừu tượng thành đồ vật đời thường và hành động có xung đột gay gắt (như chiếc xe hơi vô hình, bàn phím gõ ra tiền).
 6. NGUYÊN TẮC CALLBACK (Nếu là khối kết thúc / Outro):
@@ -752,7 +753,7 @@ Nội dung:
 Yêu cầu định dạng đầu ra:
 - CHIA ĐÚNG {scenes_per_block} CẢNH cho khối này (sai số tối đa ±1), dựa trên sự chuyển biến của tình huống cụ thể. Không gộp nhiều ý vào một cảnh.
 - situation: Mô tả tình huống cụ thể (hành động, bối cảnh diễn ra).
-- voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. MỖI cảnh {rec_lo}-{rec_hi} từ ({rec_sec_lo:.1f}-{rec_sec_hi:.1f} giây ở nhịp {plan_wpm:.0f} WPM), đan xen câu ngắn dứt khoát (<= 6 từ). Tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
+- voiceover_vi: Lời thoại tiếng Việt mượt mà, truyền cảm, tròn câu trọn ý. MỖI cảnh {rec_lo}-{rec_hi} từ ({rec_sec_lo:.1f}-{rec_sec_hi:.1f} giây ở nhịp {plan_wpm:.0f} WPM); câu ngắn chỉ để chốt, tuyệt đối không ngắt câu cụt lủn, không lặp từ, đúng thuật ngữ tài chính (tiền gốc, lãi suất, dự trữ bắt buộc, ngân hàng thương mại).
 - voiceover_en: Bản EN trọn ý, mạch kể tự nhiên như người dẫn chương trình (không dịch word-by-word, không cụt câu): {EN_MIN_WORDS}-{EN_MAX_WORDS_ALGORITHM} từ mỗi cảnh vì giọng EN đọc ~160 wpm.
 - estimated_duration: Thời lượng tính bằng giây phù hợp tự nhiên với độ dài lời thoại (từ {rec_sec_lo:.1f} đến {rec_sec_hi:.1f} giây).
 - visual_prompt: Prompt tiếng Anh chi tiết theo STYLE BIBLE crayon hand-drawn cho Veo.
