@@ -379,6 +379,22 @@ def c_callback(pd: Path, ctx):
     return bool(echo) or has_close, (sorted(echo)[:3], has_close), "lặp ý hoặc câu chốt"
 
 
+@_check("S18", "Kịch bản", "Không lặp cụm từ xuyên bài", "script")
+def c_no_phrase_repeats(pd: Path, ctx):
+    # Imported lazily: script_auditor imports this module at load time.
+    from services.script_auditor import (
+        REPEAT_FAIL_SCENES,
+        REPEAT_WARN_SCENES,
+        content_repeats,
+    )
+
+    plan = ctx.get("plan") or []
+    texts = [str(sc.get("text", "")) for sc in plan]
+    repeats = content_repeats(texts, min_scenes=REPEAT_WARN_SCENES)
+    worst = max((len(r["scenes"]) for r in repeats), default=0)
+    return worst < REPEAT_FAIL_SCENES, worst, f"< {REPEAT_FAIL_SCENES} cảnh/cụm"
+
+
 # ============================================================ ASSET CHECKS
 
 @_check("A01", "Asset & Style", "Điểm judge >= min_score", "assets")
@@ -851,6 +867,7 @@ ALL_CHECKS = [
     c_shots_plan, c_scene_count, c_no_empty, c_no_dupes, c_hook, c_open_loops,
     c_short_pct, c_wpm, c_scene_dur, c_mean_dur, c_total_dur, c_situations,
     c_prompts_style, c_algo_recorded, c_no_stumps, c_hook_budget, c_callback,
+    c_no_phrase_repeats,
     c_judge_score, c_style_reports, c_style_scores, c_refs_exist, c_refs_size,
     c_voice_saved, c_vi_plan, c_en_plan, c_vi_en_match, c_prompt_lang,
     c_prompt_len, c_char_ids, c_key_ratio, c_prompt_composition, c_situation_vi,

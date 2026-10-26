@@ -25,7 +25,6 @@ import math
 import re
 import statistics
 import time
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -40,7 +39,14 @@ from services.script_auditor import (
     EN_MAX_WORDS_ALGORITHM,
     GENERATED_WORD_WINDOW,
     RECOMMENDED_WORDS_PER_SHOT_ALGORITHM,
+    REPEAT_WARN_SCENES,
+    REVISION_JUDGE_TOLERANCE,
+    REVISION_REPEAT_DROP_FLOOR,
     SCENE_WORDS_PER_SECOND,
+    VI_CONTENT_STOPWORDS,
+    content_repeats,
+    numeric_conflicts,
+    repetition_load,
 )
 
 logger = get_logger(__name__)
@@ -102,6 +108,11 @@ MAX_REPAIR_ROUNDS = 3
 EXPANSION_BATCHES = 4
 EXPANSION_DRIFT_THRESHOLD = 0.28
 EXPANSION_TARGET_WORDS = (23, 24)
+# Cross-chunk continuity (S0.3). The phrase registry alone was not enough: scenes
+# 2 and 25 told the same beat in different words, so a chunk now also gets the
+# last lines written before it and is told not to re-narrate an idea.
+BEAT_TAIL_SCENES = 3
+BEAT_TEXT_CHARS = 180
 
 VARIANT_ANGLES = [
     {
@@ -421,10 +432,14 @@ class ScriptFactory:
             used_phrases = self._overused_phrases(
                 [str(sc.get("text", "")) for sc in scenes_vi], min_count=2, limit=12
             )
+            # ...and the beats it already told, so the next chunk does not
+            # re-narrate the same event in fresh words.
+            beats = self._beats_already_told(scenes_vi)
             try:
                 part_vi, part_en = self._rewrite_chunk_robust(
                     angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
                     chunk_start, len(base_vi), feedback_brief, outline, used_phrases,
+                    beats,
                 )
             except Exception as exc:
                 variant.invalid_reason = f"rewrite failed: {exc}"[:200]
@@ -1073,6 +1088,17 @@ class ScriptFactory:
                 self._budget_offenders(scenes_vi, scenes_en)[:5],
             )
 
+    @staticmethod
+    def _beats_already_told(
+        scenes_vi: List[Dict[str, Any]], tail: int = BEAT_TAIL_SCENES
+    ) -> List[str]:
+        """The last lines written, verbatim — what the next chunk must not re-tell."""
+        return [
+            f"Cảnh {sc.get('index')}: {str(sc.get('text', '')).strip()[:BEAT_TEXT_CHARS]}"
+            for sc in scenes_vi[-tail:]
+            if str(sc.get("text", "")).strip()
+        ]
+
     def _rewrite_chunk_robust(
         self,
         angle: Dict[str, str],
@@ -1085,12 +1111,14 @@ class ScriptFactory:
         feedback_brief: str = "",
         outline: str = "",
         used_phrases: Optional[List[str]] = None,
+        beats: Optional[List[str]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Rewrite a chunk, halving it when the gateway returns unusable JSON."""
         try:
             return self._rewrite_chunk(
                 angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
                 chunk_start, total_scenes, feedback_brief, outline, used_phrases,
+                beats=beats,
             )
         except Exception as exc:
             if len(chunk_vi) <= SPLIT_MIN_CHUNK:
@@ -1105,7 +1133,7 @@ class ScriptFactory:
                 return self._rewrite_chunk(
                     angle, chunk_vi, chunk_en, transcript_text, judge_feedback,
                     chunk_start, total_scenes, feedback_brief, outline, used_phrases,
-                    strict=True,
+                    beats=beats, strict=True,
                 )
             mid = len(chunk_vi) // 2
             logger.warning(
@@ -1116,12 +1144,12 @@ class ScriptFactory:
             left_vi, left_en = self._rewrite_chunk_robust(
                 angle, chunk_vi[:mid], chunk_en[:mid], transcript_text,
                 judge_feedback, chunk_start, total_scenes, feedback_brief,
-                outline, used_phrases,
+                outline, used_phrases, beats,
             )
             right_vi, right_en = self._rewrite_chunk_robust(
                 angle, chunk_vi[mid:], chunk_en[mid:], transcript_text,
                 judge_feedback, chunk_start + mid, total_scenes, feedback_brief,
-                outline, used_phrases,
+                outline, used_phrases, beats,
             )
             return left_vi + right_vi, left_en + right_en
 
@@ -1137,6 +1165,7 @@ class ScriptFactory:
         feedback_brief: str = "",
         outline: str = "",
         used_phrases: Optional[List[str]] = None,
+        beats: Optional[List[str]] = None,
         strict: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         from pipeline.llm_client import chat_json
@@ -1171,6 +1200,14 @@ class ScriptFactory:
             if used_phrases
             else ""
         )
+        beats_block = (
+            "\nBEATS ĐÃ KỂ Ở CÁC CẢNH TRƯỚC (đọc trước khi viết — đoạn này KHÔNG được "
+            "kể lại nguyên một ý đã có):\n" + "\n".join(beats) + "\n"
+            "Cảnh nào trùng một beat trên thì phải mang tới dữ kiện mới, hoặc nối tiếp "
+            "ý đó đi xa hơn; cấm paraphrase lại cùng một sự kiện.\n"
+            if beats
+            else ""
+        )
         system_prompt = (
             "Bạn là biên kịch documentary tài chính đẳng cấp, viết theo bộ quy tắc "
             "UNIVERSAL_VIDEO_ALGORITHM (hook nghịch lý, chuỗi open loop lồng nhau, "
@@ -1191,6 +1228,7 @@ class ScriptFactory:
             f"TRANSCRIPT NGUỒN (chỉ được dùng sự kiện từ đây):\n\"\"\"{transcript_text[:6000]}\"\"\"\n\n"
             f"{outline_block}"
             f"{used_block}"
+            f"{beats_block}"
             f"BỘ CẢNH CẦN VIẾT LẠI (cảnh {chunk_start + 1}-{chunk_start + len(chunk_vi)} "
             f"trên tổng {total_scenes}):\n"
             f"{json.dumps(compact_base, ensure_ascii=False, indent=1)}\n\n"
@@ -1320,42 +1358,17 @@ class ScriptFactory:
             return ""
         return json.dumps(outline, ensure_ascii=False)[:3000]
 
-    _VI_STOPWORDS = frozenset(
-        "của và là những một các cho với trong khi để từ này đó thì mà nhưng nên "
-        "như đã sẽ đang cũng rất chỉ còn phải không chưa vào ra lên xuống về tới "
-        "theo vì nếu họ nó ông bà anh chị em chúng ta mình bạn tôi có được bị "
-        "rồi vẫn đâu nào ai gì sao thế ấy đấy ở tại bằng hơn kém quá lắm năm".split()
-    )
+    _VI_STOPWORDS = VI_CONTENT_STOPWORDS
 
     @classmethod
     def _overused_phrases(
         cls, texts: List[str], min_count: int = 2, limit: int = 12
     ) -> List[str]:
-        """Content 2-3 grams repeated across scenes, longest and most frequent first."""
-        counts: Counter = Counter()
-        for text in texts:
-            words = re.findall(r"\w+", str(text).lower())
-            for size in (3, 2):
-                for i in range(len(words) - size + 1):
-                    gram = words[i: i + size]
-                    if gram[0] in cls._VI_STOPWORDS or gram[-1] in cls._VI_STOPWORDS:
-                        continue
-                    if all(len(w) <= 2 for w in gram) or any(w.isdigit() for w in gram):
-                        continue
-                    counts[" ".join(gram)] += 1
-        ranked = sorted(
-            counts.items(), key=lambda kv: (kv[1] * len(kv[0]), kv[1]), reverse=True
-        )
-        kept: List[str] = []
-        for phrase, count in ranked:
-            if count < min_count:
-                break
-            if any(phrase in other for other in kept):
-                continue
-            kept.append(phrase)
-            if len(kept) >= limit:
-                break
-        return kept
+        """Content 2-3 grams recurring across scenes (counter lives in the auditor)."""
+        return [
+            entry["phrase"]
+            for entry in content_repeats(texts, min_scenes=min_count, limit=limit)
+        ]
 
     def _global_edit_issues(
         self,
@@ -1426,8 +1439,11 @@ class ScriptFactory:
     ) -> Dict[str, Any]:
         """Global audit -> targeted chunk repairs on the winning variant.
 
-        Kept only when the judge does not prefer the unrepaired script, so a bad
-        edit pass can never ship a worse script than the one that won.
+        Acceptance is lexicographic (S0.1): hard QA first, then repetition load,
+        then the judge float. A bare `score_after >= score_before` reverted a live
+        revision that had just cleared the flagged repeats out of 85 scenes and
+        shipped the repetitive script instead, so a repeat-killing edit that costs
+        the judge less than its noise band is kept on purpose now.
         """
         vi, en = variant.scenes_vi, variant.scenes_en
         if not vi:
@@ -1435,21 +1451,37 @@ class ScriptFactory:
         _beat(on_progress)
         issues = self._global_edit_issues(vi, transcript_text, outline_text)
 
-        repeated = self._overused_phrases(
-            [str(sc.get("text", "")) for sc in vi], min_count=4, limit=10
-        )
-        for phrase in repeated:
-            hits = [
-                int(sc.get("index", i + 1))
-                for i, sc in enumerate(vi)
-                if phrase in str(sc.get("text", "")).lower()
-            ]
-            if len(hits) >= 3:
-                issues.append({
-                    "type": "repeat",
-                    "scenes": hits,
-                    "fix": f"cụm '{phrase}' lặp {len(hits)} lần — đổi cách gọi ở các cảnh này",
-                })
+        texts_before = [str(sc.get("text", "")) for sc in vi]
+        scene_ids = [int(sc.get("index", i + 1)) for i, sc in enumerate(vi)]
+        load_before = repetition_load(texts_before, min_scenes=REPEAT_WARN_SCENES)
+        repeated = load_before["phrases"]
+        for entry in load_before["entries"]:
+            hit_ids = [scene_ids[p - 1] for p in entry["scenes"]]
+            issues.append({
+                "type": "repeat",
+                "scenes": hit_ids,
+                "fix": (
+                    f"cụm '{entry['phrase']}' xuất hiện ở {entry['count']} cảnh "
+                    f"({', '.join('S%d' % s for s in hit_ids)}) — đổi cách gọi "
+                    "ở các cảnh này; cảnh nào cố ý nhắc lại thì phải thêm dữ kiện mới "
+                    "hoặc gói thành callback, không kể lại nguyên ý"
+                ),
+            })
+
+        conflicts = numeric_conflicts(texts_before)
+        for conflict in conflicts:
+            scenes = sorted({scene_ids[s - 1] for g in conflict["values"].values() for s in g})
+            issues.append({
+                "type": "numbers",
+                "scenes": scenes,
+                "fix": (
+                    f"'{conflict['measure']}' đang gắn {conflict['unit']} với "
+                    f"{len(conflict['values'])} giá trị khác nhau "
+                    f"({json.dumps(conflict['values'], ensure_ascii=False)}) — đối chiếu "
+                    "transcript: nguồn có hai mốc thì nêu rõ mốc/năm ngay trong câu, "
+                    "không tự chọn một số, không bịa số mới"
+                ),
+            })
 
         # Staccato detector: a scene whose sentences are nearly all <=6 words is
         # the "cụt ngủn" read-aloud failure the judge is asked to punish.
@@ -1521,20 +1553,54 @@ class ScriptFactory:
 
         self._repair_word_budget(variant.angle, vi, en, transcript_text, on_progress)
         score_after, breakdown, fb = self._judge(variant, transcript_text, feedback_brief)
-        accepted = score_after >= score_before
+        report_after = self._acceptance_report(vi, en)
+        load_after = repetition_load(
+            [str(sc.get("text", "")) for sc in vi], min_scenes=REPEAT_WARN_SCENES
+        )
+        conflicts_after = numeric_conflicts([str(sc.get("text", "")) for sc in vi])
+        offenders_before = int((variant.budget_report or {}).get("offenders") or 0)
+        drop = (
+            (load_before["hits"] - load_after["hits"]) / load_before["hits"]
+            if load_before["hits"] else 0.0
+        )
+        # Hard QA outranks the float: a revision that regresses word budget,
+        # scene count, number conflicts or the worst repeat is thrown away even
+        # if the judge liked it.
+        hard_qa_ok = (
+            len(vi) == len(snapshot_vi)
+            and report_after["offenders"] <= offenders_before
+            and len(conflicts_after) <= len(conflicts)
+            and load_after["worst"] <= load_before["worst"]
+        )
+        if not hard_qa_ok:
+            reason = "hard_qa_regressed"
+        elif score_after >= score_before:
+            reason = "judge_not_worse"
+        elif (
+            drop >= REVISION_REPEAT_DROP_FLOOR
+            and score_before - score_after <= REVISION_JUDGE_TOLERANCE
+        ):
+            reason = "repeat_load_dropped_within_judge_tolerance"
+        else:
+            reason = "judge_fell_without_repeat_gain"
+        accepted = hard_qa_ok and reason != "judge_fell_without_repeat_gain"
         if accepted:
             variant.score, variant.breakdown, variant.judge_feedback = (
                 score_after, breakdown, fb
             )
-            variant.budget_report = self._acceptance_report(vi, en)
+            variant.budget_report = report_after
         else:
             vi[:] = snapshot_vi
             en[:] = snapshot_en
             score_after = score_before
+            load_after = load_before
+            conflicts_after = conflicts
         logger.info(
-            "Global revision: issues=%d chunks=%d scenes=%d score %.1f -> %.1f (%s)",
+            "Global revision: issues=%d chunks=%d scenes=%d score %.1f -> %.1f "
+            "repeats %d -> %d (%s)",
             len(issues), chunks, revised, score_before, score_after,
-            "kept" if accepted else "reverted",
+            load_before["hits"], load_after["hits"],
+            "kept:" + reason if accepted else "reverted:" + reason,
         )
         return {
             "applicable": True,
@@ -1544,7 +1610,15 @@ class ScriptFactory:
             "score_before": round(score_before, 1),
             "score_after": round(score_after, 1),
             "accepted": accepted,
-            "repeated_phrases": repeated,
+            "decision": reason,
+            "repeated_phrases": load_before["phrases"],
+            "repetition_hits_before": load_before["hits"],
+            "repetition_hits_after": load_after["hits"],
+            "repetition_worst_before": load_before["worst"],
+            "repetition_worst_after": load_after["worst"],
+            "repeat_drop_pct": round(drop * 100.0, 1) if accepted else 0.0,
+            "number_conflicts": len(conflicts),
+            "number_conflict_measures": [c["measure"] for c in conflicts][:8],
         }
 
     def _judge(
@@ -1572,7 +1646,9 @@ class ScriptFactory:
             "\n".join(str(sc.get("text", "")) for sc in variant.scenes_vi)
         )
         repeated = self._overused_phrases(
-            [str(sc.get("text", "")) for sc in variant.scenes_vi], min_count=4, limit=8
+            [str(sc.get("text", "")) for sc in variant.scenes_vi],
+            min_count=REPEAT_WARN_SCENES,
+            limit=8,
         )
         rhythm = (
             f"\n\nNHỊP ĐỌC MÁY: CV độ dài câu {nat['cv']:.2f} (tự nhiên >= {self.NATURAL_MIN_CV}); "
@@ -1662,8 +1738,18 @@ class ScriptFactory:
         question_count = sum(1 for s in sentences if s.endswith("?"))
         durations = [float(sc.get("duration", 0.0)) for sc in scenes_vi]
         natural = self._naturalness_report("\n".join(texts))
+        load = repetition_load(texts)
+        conflicts = numeric_conflicts(texts)
         return {
             "scene_count": len(scenes_vi),
+            "repeat_phrases": load["phrases"],
+            "repeat_hits": load["hits"],
+            "repeat_worst_scenes": load["worst"],
+            "number_conflicts": [
+                f"{c['measure']} {c['unit']}: "
+                + ", ".join(f"{v}×S{'/'.join(map(str, s))}" for v, s in c["values"].items())
+                for c in conflicts
+            ][:6],
             "total_duration_sec": round(total_dur, 1),
             "mean_scene_duration": round(sum(durations) / len(durations), 2) if durations else 0.0,
             "min_scene_duration": round(min(durations), 2) if durations else 0.0,

@@ -438,3 +438,101 @@ def test_voice_map_defaults_are_the_auditioned_edge_voices():
     assert VOICE_MAP["en"]["default"] == "en-US-ChristopherNeural"
     assert is_edge_voice(VOICE_MAP["vi"]["default"])
     assert is_edge_voice(VOICE_MAP["en"]["default"])
+
+
+# --- Slice 0: repetition + number-conflict measurement ----------------------
+
+_REPEAT_SCENES = [
+    "Cảnh 1: nhà kho dột bên kênh vẫn nuôi tham vọng chiếm trọn đơn hàng.",
+    "Cảnh 2: nhà kho dột rồi lại nhà kho dột, không ai nhớ nổi tên chủ tàu.",
+    "Cảnh 3: tham vọng lớn bắt đầu từ chính cái nhà kho dột ấy.",
+    "Cảnh 4: cả thành phố bàn về nhà kho dột và những con tàu chở hạt tiêu.",
+    "Cảnh 5: sổ sách đóng lại, nhà kho dột chỉ còn là một địa chỉ cũ.",
+]
+
+_DISTINCT_SCENES = [
+    "Xưởng giấy ven kênh bất ngờ chuyển sang đóng tàu hơi nước mùa đông giá rét.",
+    "Hạt tiêu chất đầy ba khoang tàu, cân trên bến cũ kỹ dưới trời mưa.",
+    "Bảng chữ ký cổ đông treo ngoài hành lang, gió lùa qua khung cửa gỗ.",
+    "Vị thuyền trưởng già đếm số thùng gỗ sồi, môi mím chặt không nói.",
+    "Con lạch nhỏ dẫn ra vịnh băng, nơi cánh buồm cuối cùng biến mất.",
+    "Đồng xu bạc nằm lại đáy két sắt, phủ đầy lớp bụi thời gian.",
+]
+
+
+def test_content_repeats_count_scenes_not_mentions():
+    """Scene 2 says the phrase twice; the yardstick is scenes, so it is one hit."""
+    from services.script_auditor import content_repeats
+
+    repeats = content_repeats(_REPEAT_SCENES, min_scenes=4)
+    entry = next(r for r in repeats if r["phrase"] == "nhà kho dột")
+
+    assert entry["count"] == 5
+    assert entry["scenes"] == [1, 2, 3, 4, 5]
+
+
+def test_content_repeats_drop_stopword_and_numeric_grams():
+    """Four scenes sharing only function words and a year are not a repetition."""
+    from services.script_auditor import content_repeats
+
+    texts = [
+        "Ba con tàu rời bến năm 1602 khá chậm.",
+        "Hai kho hương liệu cháy âm ỉ năm 1602.",
+        "Một nhóm thuỷ thủ nổi loạn năm 1602.",
+        "Bản đồ hàng hải vẽ tay năm 1602.",
+    ]
+
+    assert content_repeats(texts, min_scenes=4) == []
+
+
+def test_content_repeats_report_the_widest_gram_once():
+    """"kho dột" is nested in "nhà kho dột", so it must not double-count."""
+    from services.script_auditor import content_repeats
+
+    texts = [
+        "Nhà kho dột ven kênh trở thành biểu tượng của cả thành phố.",
+        "Ai cũng nhìn nhà kho dột mà thấy tham vọng thật sự lớn.",
+        "Câu chuyện nhà kho dột được kể lại ở khắp quán cà phê.",
+        "Bốn mùa trôi qua, nhà kho dột vẫn đứng đó chờ tàu.",
+    ]
+    phrases = [r["phrase"] for r in content_repeats(texts, min_scenes=4)]
+
+    assert "nhà kho dột" in phrases
+    assert "kho dột" not in phrases
+    assert "nhà kho" not in phrases
+
+
+def test_repetition_load_reduces_a_script_to_two_scalars():
+    from services.script_auditor import repetition_load
+
+    noisy = repetition_load(_REPEAT_SCENES)
+    clean = repetition_load([f"Cảnh {i + 1}: {line}" for i, line in enumerate(_DISTINCT_SCENES)])
+
+    assert noisy["phrases"] == ["nhà kho dột"]
+    assert noisy["hits"] == 5
+    assert noisy["worst"] == 5
+    assert clean["hits"] == 0 and clean["worst"] == 0
+
+
+def test_numeric_conflicts_flags_the_same_measure_with_two_values():
+    from services.script_auditor import numeric_conflicts
+
+    conflicts = numeric_conflicts([
+        "Công ty chiếm thị phần 8% ở châu Âu.",
+        "Họ mở thêm ba kho hàng mới để chứa hạt tiêu.",
+        "Đối thủ chiếm thị phần 16% sau một thương vụ lớn.",
+    ])
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["measure"] == "chiếm thị phần"
+    assert conflicts[0]["values"] == {"8": [1], "16": [3]}
+
+
+def test_numeric_conflicts_treat_year_tagged_values_as_a_timeline():
+    """8% in 1602 and 16% in 1610 is the source's own chronology, not a clash."""
+    from services.script_auditor import numeric_conflicts
+
+    assert numeric_conflicts([
+        "Năm 1602 công ty chiếm thị phần 8% ở châu Âu.",
+        "Năm 1610 đối thủ chiếm thị phần 16% sau một thương vụ.",
+    ]) == []

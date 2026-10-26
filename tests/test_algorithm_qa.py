@@ -8,12 +8,30 @@ import pytest
 from services.algorithm_qa import ALL_CHECKS, compute_scorecard, count_criteria
 
 
-def _base_plan(n=8, dur=5.0, text="Cảnh diễn biến quan trọng số {i} mở ra bất ngờ năm 1602?"):
+# A "healthy script" fixture must actually read as different sentences. All
+# eight scenes used to share one template line, which QA S18 (the phrase
+# repetition law) correctly flags — the fixture, not the product, was repetitive.
+_HEALTHY_LINES = [
+    "Năm 1602, công ty Đông Ấn vay vốn tư nhân? Nghịch lý chưa từng có tiền lệ.",
+    "Nhà kho cũ ở Delft là nơi một thợ kính mơ về chiếc ống nhìn xa.",
+    "Doanh số bát đĩa tăng gấp đôi. Cổ phiếu thì nằm im.",
+    "Hải quân tiêu ngân khố cho ba con tàu. Chiếc thứ tư không rời bến.",
+    "Vậy tại sao người Amsterdam mua bán giấy nợ trên cầu? Ngay trên cầu.",
+    "Nợ công chạm tám phần trăm sau trận thủy chiến. Quốc hội đánh thuế.",
+    "Nhưng đó chưa hết. Xưởng dệt thuê trẻ nhỏ làm mười hai giờ mỗi ngày.",
+    "Câu trả lời nằm trong sổ sách lãi kép, quay lại đúng nghịch lý ban đầu.",
+]
+
+
+def _base_plan(n=8, dur=5.0, text=None):
     return [
         {
             "index": i + 1,
             "situation": f"tình huống {i + 1} với biểu cảm ngạc nhiên",
-            "text": text.format(i=i + 1),
+            "text": (
+                text.format(i=i + 1) if text
+                else _HEALTHY_LINES[i % len(_HEALTHY_LINES)]
+            ),
             "prompt": "Whimsical hand-drawn crayon editorial cartoon, flat 2D, negative space, off-white paper background",
             "duration": dur,
             "is_key_scene": True,
@@ -50,8 +68,8 @@ def _seed_project(tmp_path: Path, plan=None, algo=None, characters=None):
     return plan
 
 
-def test_exactly_62_criteria():
-    assert count_criteria() == 62
+def test_exactly_63_criteria():
+    assert count_criteria() == 63
     ids = [fn._qa_id for fn in ALL_CHECKS]
     assert len(ids) == len(set(ids)), "duplicate check ids"
 
@@ -68,7 +86,7 @@ def test_script_stage_scorecard_full_pass(tmp_path):
     assert card.stage == "script"
     # Only script-stage checks are counted
     assert all(r.stage == "script" for r in card.results)
-    assert len(card.results) == 17
+    assert len(card.results) == 18
     assert card.score >= 9.0, card.format_telegram_report()
 
 
@@ -269,7 +287,7 @@ def test_scorecard_save_and_telegram_report(tmp_path):
     out = card.save(tmp_path)
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["stage"] == "script"
-    assert len(data["results"]) == 17
+    assert len(data["results"]) == 18
     report = card.format_telegram_report()
     assert "ALGORITHM SCORECARD" in report
     assert "/10" in report
@@ -294,3 +312,27 @@ def test_audio_first_real_durations_do_not_break_script_checks(tmp_path):
     failed = {r.id for r in card.failed()}
     assert "S09" not in failed
     assert "S10" not in failed
+
+
+def _plan_repeating_phrase(replaced: int) -> list:
+    """First `replaced` scenes all lean on the same metaphor."""
+    plan = _base_plan(8)
+    for i in range(replaced):
+        plan[i]["text"] = (
+            f"Cảnh {i + 1}: nhà kho dột bên kênh vẫn nuôi tham vọng chiếm trọn đơn hàng."
+        )
+    return plan
+
+
+def test_s18_red_line_is_six_scenes_per_phrase(tmp_path):
+    """One phrase carried by five scenes is a style choice; six is the law."""
+    def verdict(replaced):
+        _seed_project(tmp_path, plan=_plan_repeating_phrase(replaced))
+        result = next(
+            r for r in compute_scorecard(tmp_path, stage="script").results if r.id == "S18"
+        )
+        return result.passed, result.value
+
+    assert verdict(5) == (True, 5)
+    assert verdict(6) == (False, 6)
+    assert verdict(0) == (True, 0)

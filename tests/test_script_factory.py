@@ -207,14 +207,8 @@ class Router:
                 "scenes": [
                     {
                         "index": item["index"],
-                        "voiceover_vi": (
-                            f"Nhưng rồi câu chuyện cảnh {item['index']} rẽ sang hướng khác "
-                            "và dòng tiền vẫn cứ chảy về phía trước."
-                        ),
-                        "voiceover_en": (
-                            f"But then scene {item['index']} turned, and the money "
-                            "kept flowing forward anyway."
-                        ),
+                        "voiceover_vi": self._revision_vi(item["index"]),
+                        "voiceover_en": self._revision_en(item["index"]),
                     }
                     for item in items
                 ]
@@ -301,6 +295,17 @@ class Router:
         if index in self.en_word_plan:
             return " ".join(["line"] * self.en_word_plan[index])
         return f"Improved scene {index} opens a surprise."
+
+    def _revision_vi(self, index):
+        return (
+            f"Nhưng rồi câu chuyện cảnh {index} rẽ sang hướng khác "
+            "và dòng tiền vẫn cứ chảy về phía trước."
+        )
+
+    def _revision_en(self, index):
+        return (
+            f"But then scene {index} turned, and the money kept flowing forward anyway."
+        )
 
 
 def test_best_variant_chosen_and_result_saved(factory, tmp_path, monkeypatch):
@@ -1078,3 +1083,203 @@ def test_overused_phrase_registry_ignores_function_words_and_years():
     assert "nhà kho dột" in phrases
     assert "dòng tiền" in phrases
     assert all(not phrase.split()[0].isdigit() for phrase in phrases)
+
+
+# --- Slice 0: beats registry + lexicographic revision acceptance ------------
+
+_REPEAT_TAILS = [
+    "nhà kho dột bên kênh vẫn nuôi tham vọng chiếm trọn đơn hàng.",
+    "nhà kho dột rồi lại nhà kho dột, không ai nhớ nổi tên chủ tàu.",
+    "tham vọng lớn bắt đầu từ chính cái nhà kho dột ấy.",
+    "cả thành phố bàn về nhà kho dột và những con tàu chở hạt tiêu.",
+    "sổ sách đóng lại, nhà kho dột chỉ còn là một địa chỉ cũ.",
+]
+
+_CLEAN_LINES = [
+    "Xưởng giấy ven kênh bất ngờ chuyển sang đóng tàu hơi nước mùa đông giá rét.",
+    "Hạt tiêu chất đầy ba khoang tàu, cân trên bến cũ kỹ dưới trời mưa.",
+    "Bảng chữ ký cổ đông treo ngoài hành lang, gió lùa qua khung cửa gỗ.",
+    "Vị thuyền trưởng già đếm số thùng gỗ sồi, môi mím chặt không nói.",
+    "Con lạch nhỏ dẫn ra vịnh băng, nơi cánh buồm cuối cùng biến mất.",
+    "Đồng xu bạc nằm lại đáy két sắt, phủ đầy lớp bụi thời gian.",
+]
+
+
+def _twelve_scene_factory(monkeypatch):
+    """A factory whose slicer hands back 12 scenes (two rewrite chunks)."""
+    slices_vi = [
+        {"index": i + 1, "situation": f"s{i + 1}", "text": f"Cảnh gốc {i + 1} diễn biến quan trọng.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for i in range(12)
+    ]
+    slices_en = [
+        {"index": sc["index"], "situation": sc["situation"],
+         "text": f"Base scene {sc['index']} opens a turn.",
+         "prompt": "p", "duration": 5.0, "is_key_scene": True}
+        for sc in slices_vi
+    ]
+    monkeypatch.setattr(
+        "services.script_auditor.build_semantic_dual_scripts_from_transcript",
+        lambda segs, target_shots=12: (slices_vi, slices_en),
+    )
+    return ScriptFactory()
+
+
+class _RepeatingDraft(Router):
+    """Every drafted scene leans on "nhà kho dột"; the repair pass drops it."""
+
+    def _vi_for(self, items, i):
+        index = self._abs_index(items, i)
+        return f"Cảnh {index}: " + _REPEAT_TAILS[(index - 1) % len(_REPEAT_TAILS)]
+
+    def _revision_vi(self, index):
+        return f"Cảnh {index}: " + _CLEAN_LINES[(index - 1) % len(_CLEAN_LINES)]
+
+    def _revision_en(self, index):
+        return f"Scene {index} of the ledger moves the story down a new channel."
+
+
+class _ShallowRepairDraft(_RepeatingDraft):
+    """The repair pass rewrites only three scenes, so repetition hardly moves."""
+
+    def _revision_vi(self, index):
+        if index <= 9:
+            return f"Cảnh {index}: " + _REPEAT_TAILS[(index - 1) % len(_REPEAT_TAILS)]
+        return super()._revision_vi(index)
+
+
+class _ContradictoryNumbersDraft(_RepeatingDraft):
+    """Clean prose that contradicts itself on one measure."""
+
+    def _revision_vi(self, index):
+        return (
+            f"Cảnh {index}: " + _CLEAN_LINES[(index - 1) % len(_CLEAN_LINES)]
+            + " chiếm thị phần 16% rồi chiếm thị phần 8%."
+        )
+
+
+def test_next_chunk_is_shown_the_beats_already_written(monkeypatch):
+    factory = _twelve_scene_factory(monkeypatch)
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 100, "text": TRANSCRIPT}], target_shots=12)
+
+    first, second = router.rewrite_prompts[0], router.rewrite_prompts[1]
+    assert "BEATS ĐÃ KỂ" not in first
+    assert "BEATS ĐÃ KỂ" in second
+    assert "Cảnh 10: Cảnh cải tiến 10" in second
+    assert "Cảnh 7:" not in second
+
+
+def test_revision_is_kept_when_repeats_drop_and_judge_dips_within_tolerance(monkeypatch):
+    factory = _twelve_scene_factory(monkeypatch)
+    router = _RepeatingDraft({"analyst": [9.0, 8.8], "dramatist": [7.0, 7.0], "teacher": [6.0, 6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, _en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}], target_shots=12
+    )
+
+    rev = result["revision"]
+    assert rev["accepted"] is True
+    assert rev["decision"] == "repeat_load_dropped_within_judge_tolerance"
+    assert rev["repetition_hits_before"] >= 12
+    assert rev["repetition_hits_after"] == 0
+    assert rev["repetition_worst_before"] >= 12
+    assert rev["repeat_drop_pct"] == 100.0
+    assert rev["number_conflicts"] == 0
+    assert "nhà kho dột" in " ".join(rev["repeated_phrases"])
+    assert (rev["score_before"], rev["score_after"]) == (9.0, 8.8)
+    assert "nhà kho dột" not in " ".join(sc["text"] for sc in vi[4:8])
+
+
+def test_repeated_phrase_becomes_a_repair_target_for_every_scene_that_said_it(monkeypatch):
+    factory = _twelve_scene_factory(monkeypatch)
+    router = _RepeatingDraft({"analyst": [9.0, 8.8], "dramatist": [7.0, 7.0], "teacher": [6.0, 6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    factory.run([{"start": 0, "end": 100, "text": TRANSCRIPT}], target_shots=12)
+
+    assert sorted(i for call in router.revision_calls for i in call) == list(range(1, 13))
+    assert "CỤM TỪ BỊ LẶP TOÀN BÀI (cấm dùng lại): nhà kho dột" in router.revision_prompts[0]
+    assert '"type": "repeat"' in router.revision_prompts[0]
+
+
+def test_revision_is_reverted_when_repeats_stay_and_judge_drops(monkeypatch):
+    factory = _twelve_scene_factory(monkeypatch)
+    router = _ShallowRepairDraft({"analyst": [9.0, 8.4], "dramatist": [7.0, 7.0], "teacher": [6.0, 6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, _en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}], target_shots=12
+    )
+
+    rev = result["revision"]
+    assert rev["accepted"] is False
+    assert rev["decision"] == "judge_fell_without_repeat_gain"
+    assert rev["revised_scenes"] == 12
+    assert rev["repetition_hits_after"] == rev["repetition_hits_before"]
+    assert rev["repeat_drop_pct"] == 0.0
+    assert vi[4]["text"].startswith("Cảnh 5: sổ sách đóng lại")
+
+
+def test_hard_qa_regression_reverts_even_when_the_judge_liked_it(monkeypatch):
+    """Old rule kept a revision whenever the float did not fall; new rule looks at
+    the scorecard first, so a script that gains a self-contradicting number dies."""
+    factory = _twelve_scene_factory(monkeypatch)
+    router = _ContradictoryNumbersDraft(
+        {"analyst": [9.0, 9.4], "dramatist": [7.0, 7.0], "teacher": [6.0, 6.0]}
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, _en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}], target_shots=12
+    )
+
+    rev = result["revision"]
+    assert rev["accepted"] is False
+    assert rev["decision"] == "hard_qa_regressed"
+    assert rev["number_conflicts"] == 0
+    assert "chiếm thị phần 16%" not in " ".join(sc["text"] for sc in vi)
+    assert "nhà kho dột" in " ".join(sc["text"] for sc in vi[4:8])
+
+
+def test_repeat_and_number_counters_are_recorded_in_the_artifact(monkeypatch, tmp_path):
+    factory = _twelve_scene_factory(monkeypatch)
+    router = _ContradictoryNumbersDraft(
+        {"analyst": [9.0, 9.4], "dramatist": [7.0, 7.0], "teacher": [6.0, 6.0]}
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    _vi, _en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}],
+        target_shots=12,
+        project_dir=tmp_path,
+    )
+
+    saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
+    metrics = saved["mechanical_metrics"]
+    rev = saved["revision"]
+    assert {"repeat_phrases", "repeat_hits", "repeat_worst_scenes", "number_conflicts"} <= set(metrics)
+    assert "nhà kho dột" in rev["repeated_phrases"]
+    assert rev["repetition_worst_before"] == 12
+    assert rev["number_conflicts"] == 0
+    assert rev["decision"] == "hard_qa_regressed"
+    # The shipped script is the reverted draft plus the hook/callback repairs.
+    assert "nhà kho dột" in metrics["repeat_phrases"]
+    assert metrics["repeat_worst_scenes"] <= 12
+    assert metrics["number_conflicts"] == []
+
+
+def test_mechanical_metrics_name_the_conflicting_measure():
+    scenes = [
+        {"index": 1, "text": "Đối thủ chiếm thị phần 16% rồi chiếm thị phần 8% mùa sau.",
+         "duration": 6.0},
+        {"index": 2, "text": "Bến cũ vẫn đông thợ xếp hạt tiêu lên ba khoang tàu trống.",
+         "duration": 6.0},
+    ]
+
+    conflicts = ScriptFactory()._mechanical_metrics(scenes)["number_conflicts"]
+
+    assert conflicts == ["chiếm thị phần %: 16×S1, 8×S1"]

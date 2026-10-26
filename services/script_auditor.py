@@ -68,6 +68,20 @@ TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
 # step later for the same outlier.
 BUDGET_RATIO_FLOOR = 0.95
 
+# Repetition law (Slice 0 / S0.2). The judge rubric bans reusing one metaphor
+# more than three times, but a 130-scene script read as one block hides it: the
+# live run shipped "tương lai" x16 and "thất bại" x11 and scored 7.9. Counted in
+# code, per scene, so a chunk and a whole script use the same yardstick. These
+# are the only repetition numbers anywhere in the pipeline.
+REPEAT_WARN_SCENES = 4   # worth a repair pass
+REPEAT_FAIL_SCENES = 6   # QA S18 red line
+# Revision acceptance (S0.1). A revision that kills half the repetition is worth
+# keeping even when the judge's float ticks down slightly — the old
+# `score_after >= score_before` rule reverted exactly such a revision on job
+# 986f70 and shipped the repetitive script instead.
+REVISION_REPEAT_DROP_FLOOR = 0.5
+REVISION_JUDGE_TOLERANCE = 0.3
+
 # Voice mapping defaults. The owner auditioned both languages and picked the
 # free edge voices (2026-10-24): Nam Minh for VI (sample C), Christopher for
 # EN. xKiro voices remain available through the Gate 1 audition (/voice).
@@ -132,6 +146,141 @@ def detect_language(text: str) -> str:
         return "vi"
 
     return "en"
+
+
+# Function words for the repetition counter — the single list the whole pipeline
+# uses (ScriptFactory._overused_phrases delegates here).
+VI_CONTENT_STOPWORDS = frozenset(
+    "của và là những một các cho với trong khi để từ này đó thì mà nhưng nên "
+    "như đã sẽ đang cũng rất chỉ còn phải không chưa vào ra lên xuống về tới "
+    "theo vì nếu họ nó ông bà anh chị em chúng ta mình bạn tôi có được bị "
+    "rồi vẫn đâu nào ai gì sao thế ấy đấy ở tại bằng hơn kém quá lắm năm".split()
+)
+
+
+def _content_grams(text: str, sizes: Tuple[int, ...] = (3, 2)) -> set:
+    """Content 2-3 grams of one line, function words and bare numbers excluded."""
+    words = re.findall(r"\w+", str(text).lower())
+    grams = set()
+    for size in sizes:
+        for i in range(len(words) - size + 1):
+            gram = words[i: i + size]
+            if gram[0] in VI_CONTENT_STOPWORDS or gram[-1] in VI_CONTENT_STOPWORDS:
+                continue
+            if all(len(w) <= 2 for w in gram) or any(w.isdigit() for w in gram):
+                continue
+            grams.add(" ".join(gram))
+    return grams
+
+
+def content_repeats(
+    texts: List[str], min_scenes: int = REPEAT_WARN_SCENES, limit: int = 10
+) -> List[Dict[str, Any]]:
+    """Content 2-3 grams recurring across scenes, with the scene indices they hit.
+
+    Counts SCENES, not occurrences: a scene that says it twice is one hit, so a
+    10-scene chunk and a 130-scene script are measured on the same yardstick. A
+    gram nested inside a longer kept gram is dropped, so "nhà kho dột" is
+    reported once instead of again as "kho dột".
+    """
+    hits: Dict[str, List[int]] = {}
+    for position, text in enumerate(texts, 1):
+        for gram in _content_grams(text):
+            hits.setdefault(gram, []).append(position)
+    ranked = sorted(
+        hits.items(),
+        key=lambda kv: (len(kv[1]) * len(kv[0].split()), len(kv[1])),
+        reverse=True,
+    )
+    kept: List[Dict[str, Any]] = []
+    for gram, scenes in ranked:
+        if len(scenes) < min_scenes:
+            continue
+        if any(gram in entry["phrase"] for entry in kept):
+            continue
+        kept.append({"phrase": gram, "scenes": scenes, "count": len(scenes)})
+        if len(kept) >= limit:
+            break
+    return kept
+
+
+def repetition_load(
+    texts: List[str], min_scenes: int = REPEAT_WARN_SCENES
+) -> Dict[str, Any]:
+    """Scalar repetition pressure of a script — the number S0.1 compares."""
+    entries = content_repeats(texts, min_scenes=min_scenes)
+    return {
+        "phrases": [e["phrase"] for e in entries],
+        "hits": sum(e["count"] for e in entries),
+        "worst": max((e["count"] for e in entries), default=0),
+        "entries": entries,
+    }
+
+
+_MEASURE_UNIT = re.compile(
+    r"(?P<value>\d+(?:[.,]\d+)?)\s*"
+    r"(?P<unit>%(?=[\s,.!?;:]|$)|phần trăm|EUR|USD|guilders|tỷ|triệu|nghìn|nm"
+    r"|lần|x(?=[\s,.!?;:]|$))",
+    re.IGNORECASE,
+)
+_YEAR = re.compile(r"\b(?:1\d{3}|20\d{2})\b")
+
+
+def numeric_conflicts(texts: List[str], limit: int = 12) -> List[Dict[str, Any]]:
+    """Same measure, two different values — the 8%-vs-16% market-share defect.
+
+    Heuristic on purpose: the noun phrase before the number is the measure, and
+    two scenes naming different years are treated as explained rather than
+    contradictory. The output is a CANDIDATE list for the edit pass, never a
+    verdict — the source video really does restate numbers at new milestones.
+    """
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for position, text in enumerate(texts, 1):
+        lowered = str(text).lower()
+        years = _YEAR.findall(str(text))
+        for match in _MEASURE_UNIT.finditer(lowered):
+            words = re.findall(
+                r"\w+", lowered[: match.start()]
+            )
+            measure: List[str] = []
+            for word in reversed(words[-8:]):
+                if word in VI_CONTENT_STOPWORDS or word.isdigit():
+                    continue
+                measure.append(word)
+                if len(measure) == 3:
+                    break
+            if not measure:
+                continue
+            groups.setdefault(
+                (match.group("unit"), " ".join(reversed(measure))), []
+            ).append({
+                "scene": position,
+                "value": match.group("value").replace(",", "."),
+                "years": years,
+            })
+
+    conflicts: List[Dict[str, Any]] = []
+    for (unit, measure), rows in groups.items():
+        by_value: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_value.setdefault(row["value"], []).append(row)
+        if len(by_value) < 2:
+            continue
+        rows = [r for rs in by_value.values() for r in rs]
+        if all(r["years"] for r in rows) and len(
+            {tuple(r["years"]) for r in rows}
+        ) == len(by_value):
+            continue  # every value carries its own year: a timeline, not a clash
+        conflicts.append({
+            "measure": measure,
+            "unit": unit,
+            "values": {
+                value: [r["scene"] for r in rs] for value, rs in by_value.items()
+            },
+        })
+        if len(conflicts) >= limit:
+            break
+    return sorted(conflicts, key=lambda c: -sum(len(v) for v in c["values"].values()))
 
 
 @dataclass
