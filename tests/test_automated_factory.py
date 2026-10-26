@@ -455,8 +455,9 @@ def test_repolish_script_keeps_the_old_plan_when_the_editor_breaks_the_contract(
     report = test_factory.repolish_script(job_id)
 
     assert report["accepted"] is False
-    assert report["decision"] == "rejected_contract"
+    assert report["decision"] == "rejected_scene_drops"
     assert "locked_tokens" in report["rejection"]["detail"]
+    assert report["scenes_skipped"] == len(json.loads(before))
     assert report["rejection"]["index"] == 1
     assert (proj / "shots_plan_vi.json").read_text(encoding="utf-8") == before
     asm = ApprovalStateMachine(proj, job_id)

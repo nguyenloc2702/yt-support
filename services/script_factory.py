@@ -123,6 +123,9 @@ BEAT_TEXT_CHARS = 180
 POLISH_MODEL = "openai/gpt-5.6-terra"
 POLISH_CHUNK = 8  # a 130-scene script answered in one call came back truncated
 POLISH_MAX_WORDS_DRIFT = 3  # keeps the reading duration of every scene intact
+# A rewrite that has to drop this much of the script is not an editor. Measured on
+# the first live chunk: 8 scenes, every one of them over the drift limit.
+POLISH_MAX_SKIP_RATIO = 0.25
 POLISH_SYSTEM_PROMPT = """Bạn là editor lời bình (voiceover) cho video tài liệu. Nhiệm vụ: viết lại lời bình cho MỊN,
 TỰ NHIÊN, SÂU SẮC như người bản xứ viết — nhưng tuyệt đối không làm hỏng cấu trúc video.
 Kịch bản VI + EN đính kèm phía dưới.
@@ -156,15 +159,25 @@ TRẢ VỀ duy nhất một JSON object, không thêm text ngoài JSON:
  "notes":[{"index":<int>,"issue":"mâu thuẫn số liệu | lặp beat | vượt quyền sửa","detail":"..."}]}"""
 
 _POLISH_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
-_POLISH_ACRONYM_RE = re.compile(r"[A-Z][A-Z0-9+.\-]{1,}")
+# An all-caps name must END on a letter or digit: "ASML." is the fact ASML, and
+# a polish that moves a full stop is not a polish that invents a company.
+_POLISH_ACRONYM_RE = re.compile(r"[A-Z][A-Z0-9+.\-]*[A-Z0-9]")
+# A separator that groups thousands (always followed by exactly three digits) is
+# formatting; anything else ("2,5") is the value itself and must not be merged.
+_POLISH_THOUSANDS_RE = re.compile(r"[.,](?=\d{3}(?!\d))")
 
 
 def _locked_tokens(*texts: str) -> Counter:
-    """Facts a polish pass may not touch: every number and every all-caps name."""
+    """Facts a polish pass may not touch: every number and every all-caps name.
+
+    Compared on the value, not the spelling: "50,000" and "50.000" are the same
+    quantity, while "50,000" and "60,000" — or "AI" written as "ai" — are not.
+    """
     joined = " ".join(texts)
-    return Counter(
-        _POLISH_NUMBER_RE.findall(joined) + _POLISH_ACRONYM_RE.findall(joined)
-    )
+    numbers = [
+        _POLISH_THOUSANDS_RE.sub("", n) for n in _POLISH_NUMBER_RE.findall(joined)
+    ]
+    return Counter(numbers + _POLISH_ACRONYM_RE.findall(joined))
 
 
 def _polish_violations(
@@ -1718,24 +1731,112 @@ class ScriptFactory:
     # -------------------------------------------------- Phase 8 prose polish
 
     def _polish_batch_prompt(
-        self, scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]], start: int, total: int
+        self,
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        start: int,
+        total: int,
+        corrections: Optional[Dict[int, str]] = None,
     ) -> str:
-        """One chunk of the script, addressed by its ABSOLUTE scene indices."""
+        """One chunk of the script, addressed by its ABSOLUTE scene indices.
+
+        Each scene carries its own word budget. Rule 5 of the approved prompt asks
+        for the original length, but the same prompt also quotes the 17-21 window,
+        and on the first live chunk the editor aimed at the window instead: a
+        14-word EN line came back at 23. The per-scene budget is the only number
+        that can actually be obeyed.
+        """
         size = len(scenes_vi)
         lines = []
+        budgets = []
         for offset in range(size):
             index = start + offset + 1
-            lines.append(f"[{index}] VI: {scenes_vi[offset].get('text', '')}")
+            vi_text = str(scenes_vi[offset].get("text", ""))
             en = scenes_en[start + offset].get("text", "") if start + offset < len(scenes_en) else ""
-            lines.append(f"[{index}] EN: {en}")
-        return (
+            en_text = str(en)
+            lines.append(f"[{index}] VI: {vi_text}")
+            lines.append(f"[{index}] EN: {en_text}")
+            budgets.append(
+                f"[{index}] VI {len(vi_text.split())} từ / EN {len(en_text.split())} từ"
+            )
+        prompt = (
             f"Bài hoàn chỉnh có {total} cảnh (index 1..{total}). "
             f"Đợt này chỉ gửi {size} cảnh, index {start + 1}..{start + size}.\n"
             f"Viết lại đúng {size} cảnh đó và trả về đúng {size} phần tử với chính "
             "các index trên; không xuất hiện index nào khác, không dịch qua lại giữa "
             "VI và EN.\n\n"
-            "KỊCH BẢN:\n" + "\n".join(lines)
+            "KỊCH BẢN:\n" + "\n".join(lines) + "\n\n"
+            "NGÂN SÁCH TỪ của TỪNG cảnh (tuỳ chỉnh 1-5 của QUY TẮC CỨNG được hiểu là "
+            "số dưới đây, KHÔNG phải dải 17-21 chung chung; viết lại đúng số từ đó, "
+            "chênh tối đa 3, không thêm câu chỉ để cho dài):\n" + "\n".join(budgets)
         )
+        if corrections:
+            prompt += (
+                "\n\nLẦN TRƯỚC bản này bị LOẠI vì phạm quy tắc ở chính các cảnh sau — "
+                "sửa đúng lỗi đó, mọi cảnh khác giữ cách viết lần trước:\n"
+                + "\n".join(f"[{index}] {detail}" for index, detail in sorted(corrections.items()))
+            )
+        return prompt
+
+    def _polish_attempt(
+        self,
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        start: int,
+        total: int,
+        corrections: Optional[Dict[int, str]] = None,
+    ) -> Tuple[Optional[Dict[int, Tuple[str, str]]], Optional[Dict[str, Any]], Dict[int, List[str]], List[Any]]:
+        """Ask the editor for one chunk and grade the answer scene by scene.
+
+        (rows, chunk failure, per-scene violations, notes). A chunk failure is the
+        answer not being addressable at all; a violation is one scene's text that
+        cannot be re-ingested.
+        """
+        from pipeline.llm_client import chat_json
+
+        chunk = scenes_vi[start:start + POLISH_CHUNK]
+        want = list(range(start + 1, start + len(chunk) + 1))
+        try:
+            payload = chat_json(
+                POLISH_SYSTEM_PROMPT,
+                self._polish_batch_prompt(chunk, scenes_en, start, total, corrections),
+                temperature=0.4,
+                max_tokens=3000,
+                model=POLISH_MODEL,
+            )
+        except Exception as exc:
+            return None, {"stage": "call", "index": want[0], "detail": str(exc)[:300]}, {}, []
+        rows = payload.get("scenes")
+        if not isinstance(rows, list):
+            return None, {"stage": "shape", "index": want[0], "detail": "no scenes list"}, {}, []
+        by_index: Dict[int, Tuple[str, str]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                return None, {"stage": "shape", "index": want[0], "detail": "scene not an object"}, {}, []
+            try:
+                index = int(row.get("index"))
+            except (TypeError, ValueError):
+                index = -1
+            by_index[index] = (
+                str(row.get("voiceover_vi", "")),
+                str(row.get("voiceover_en", "")),
+            )
+        if sorted(by_index) != want:
+            return None, {
+                "stage": "scene_count",
+                "index": want[0],
+                "detail": f"expected {want}, got {sorted(by_index)}",
+            }, {}, []
+        violations: Dict[int, List[str]] = {}
+        for index in want:
+            position = index - 1
+            origin_vi = str(scenes_vi[position].get("text", ""))
+            origin_en = str(scenes_en[position].get("text", "")) if position < len(scenes_en) else ""
+            kinds = _polish_violations(origin_vi, origin_en, *by_index[index])
+            if kinds:
+                violations[index] = kinds
+        notes = [n for n in (payload.get("notes") or []) if isinstance(n, dict)]
+        return by_index, None, violations, notes
 
     def polish_scenes(
         self,
@@ -1747,14 +1848,14 @@ class ScriptFactory:
 
         The external editor is untrusted by construction: it does not know the
         machine constraints, so every scene it returns is checked against the
-        re-ingest contract (same indices, <=3 words drift, identical numbers and
-        all-caps names) and any single violation throws away the whole polish.
-        The kept version must also not regress word budget, number conflicts or
-        the worst repeated phrase, and it must lower the repetition score —
-        otherwise the internal script stays.
+        re-ingest contract (same indices, the scene's own word budget +-3, identical
+        numbers and all-caps names). A scene that breaks it is asked for once more
+        with the exact reason and, if it breaks again, is dropped while its chunk
+        neighbours are kept — but a rewrite that has to drop a quarter of the script
+        is not an editor, it is noise, and the whole pass is thrown away. What does
+        survive must also not regress word budget, number conflicts or the worst
+        repeated phrase, and it must lower the repetition score.
         """
-        from pipeline.llm_client import chat_json
-
         total = len(scenes_vi)
         if not total or not scenes_en:
             return {"applicable": False, "accepted": False, "decision": "no scenes"}
@@ -1779,78 +1880,73 @@ class ScriptFactory:
         notes: List[Dict[str, Any]] = []
         rejection: Optional[Dict[str, Any]] = None
         calls = 0
+        retries = 0
+        skipped: List[Dict[str, Any]] = []
         pending: Dict[int, Tuple[str, str]] = {}
 
         for start in range(0, total, POLISH_CHUNK):
-            chunk_vi = scenes_vi[start:start + POLISH_CHUNK]
-            want = list(range(start + 1, start + len(chunk_vi) + 1))
+            chunk_size = len(scenes_vi[start:start + POLISH_CHUNK])
+            want = list(range(start + 1, start + chunk_size + 1))
             _beat(on_progress)
-            try:
-                payload = chat_json(
-                    POLISH_SYSTEM_PROMPT,
-                    self._polish_batch_prompt(chunk_vi, scenes_en, start, total),
-                    temperature=0.4,
-                    max_tokens=3000,
-                    model=POLISH_MODEL,
-                )
-            except Exception as exc:
-                rejection = {"stage": "call", "index": want[0], "detail": str(exc)[:300]}
-                break
+            by_index, failure, violations, chunk_notes = self._polish_attempt(
+                scenes_vi, scenes_en, start, total
+            )
             calls += 1
-            rows = payload.get("scenes")
-            if not isinstance(rows, list):
-                rejection = {"stage": "shape", "index": want[0], "detail": "no scenes list"}
-                break
-            by_index: Dict[int, Tuple[str, str]] = {}
-            for row in rows:
-                if not isinstance(row, dict):
-                    rejection = {"stage": "shape", "index": want[0], "detail": "scene not an object"}
-                    break
-                try:
-                    index = int(row.get("index"))
-                except (TypeError, ValueError):
-                    index = -1
-                by_index[index] = (
-                    str(row.get("voiceover_vi", "")),
-                    str(row.get("voiceover_en", "")),
+            if by_index is None:
+                # One retry per chunk: the gateway answers a chunk with mojibake or
+                # with the wrong scene count often enough that a single miss is not
+                # a reason to lose the whole script.
+                _beat(on_progress)
+                by_index, retry_failure, violations, chunk_notes = self._polish_attempt(
+                    scenes_vi, scenes_en, start, total
                 )
-            if rejection:
-                break
-            if sorted(by_index) != want:
-                rejection = {
-                    "stage": "scene_count",
-                    "index": want[0],
-                    "detail": f"expected {want}, got {sorted(by_index)}",
+                calls += 1
+                retries += 1
+                if by_index is None:
+                    rejection = retry_failure or failure
+                    break
+            if violations:
+                _beat(on_progress)
+                corrections = {
+                    index: "; ".join(violations[index])[:180] for index in violations
                 }
-                break
-            for index in want:
-                position = index - 1
-                vi_text, en_text = by_index[index]
-                kinds = _polish_violations(
-                    snapshot[position][0], snapshot[position][1], vi_text, en_text
+                retry_by, _, retry_violations, retry_notes = self._polish_attempt(
+                    scenes_vi, scenes_en, start, total, corrections=corrections
                 )
-                if kinds:
-                    rejection = {
-                        "stage": "contract",
+                calls += 1
+                retries += 1
+                if retry_by is not None and len(retry_violations) <= len(violations):
+                    by_index, violations = retry_by, retry_violations
+                    chunk_notes = retry_notes
+            for index in want:
+                if index in violations:
+                    skipped.append({
                         "index": index,
-                        "detail": "; ".join(kinds),
-                        "before": snapshot[position][0],
-                        "after": vi_text,
-                    }
-                    break
-                pending[position] = (vi_text, en_text)
-            if rejection:
-                break
-            for note in payload.get("notes") or []:
-                if isinstance(note, dict):
-                    notes.append({**note, "chunk_first_index": want[0]})
+                        "detail": "; ".join(violations[index])[:180],
+                        "before": snapshot[index - 1][0],
+                    })
+                    continue
+                pending[index - 1] = by_index[index]
+            for note in chunk_notes:
+                notes.append({**note, "chunk_first_index": want[0]})
+
+        if rejection is None and len(skipped) > total * POLISH_MAX_SKIP_RATIO:
+            rejection = {
+                "stage": "scene_drops",
+                "index": skipped[0]["index"],
+                "detail": f"{len(skipped)}/{total} cảnh không vào được: "
+                + "; ".join(str(s["detail"]) for s in skipped[:3])[:220],
+            }
 
         report = {
             "applicable": True,
             "model": POLISH_MODEL,
             "chunks": math.ceil(total / POLISH_CHUNK),
             "calls": calls,
+            "retries": retries,
             "scenes_rewritten": len(pending) if rejection is None else 0,
+            "scenes_skipped": len(skipped),
+            "skipped": skipped[:20],
             "notes": notes[:40],
             "rejection": rejection,
             "repetition_phrases": load_before["phrases"],
@@ -1917,9 +2013,9 @@ class ScriptFactory:
             # that is the evidence for why the internal script stayed.
 
         logger.info(
-            "Prose polish (%s): %d cảnh, repeats %d -> %d, worst %d -> %d, offenders %d -> %d, "
-            "conflicts %d -> %d, cv %.2f -> %.2f => %s%s",
-            POLISH_MODEL, total,
+            "Prose polish (%s): %d/%d cảnh viết lại, %d cảnh bị bỏ, repeats %d -> %d, worst %d -> %d, "
+            "offenders %d -> %d, conflicts %d -> %d, cv %.2f -> %.2f => %s%s",
+            POLISH_MODEL, len(pending), total, len(skipped),
             load_before["hits"], load_after["hits"],
             load_before["worst"], load_after["worst"],
             offenders_before, offenders_after,

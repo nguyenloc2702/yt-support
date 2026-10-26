@@ -1354,8 +1354,8 @@ def test_run_ships_the_internal_script_when_the_editor_is_rejected(tmp_path, mon
     assert polish["decision"] == "rejected_shape"
     assert polish["rejection"]["stage"] == "shape"
     assert polish["scenes_rewritten"] == 0
-    # one chunk attempted, then the whole stage gave up
-    assert router.polish_calls == 1
+    # one chunk asked, twice, then the whole stage gave up
+    assert router.polish_calls == polish["calls"] == 2
     assert len(vi) == len(en) == 12
     assert "dòng tiền" in vi[5]["text"]
     saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))

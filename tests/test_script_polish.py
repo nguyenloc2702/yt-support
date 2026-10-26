@@ -134,6 +134,9 @@ class Editor:
             elif self.mode in ("grow2", "grow3", "grow4"):
                 pad = int(self.mode[-1])
                 new_vi = " ".join(new_vi.split() + _PAD[:pad])
+            elif self.mode == "grow_one":
+                if index == 3:
+                    new_vi = " ".join(new_vi.split() + _PAD[:4])
             elif self.mode == "en_long":
                 new_en = new_en.rstrip(".") + " and later"
             rows.append({"index": index, "voiceover_vi": new_vi, "voiceover_en": new_en})
@@ -213,18 +216,63 @@ def test_notes_from_the_editor_are_carried_into_the_report(factory, polish_call)
     assert report["notes"] == [{**notes[0], "chunk_first_index": 1}]
 
 
-def test_a_scene_that_moves_a_number_rejects_the_whole_polish(factory, polish_call):
+def test_an_editor_that_moves_every_number_is_not_an_editor(factory, polish_call):
+    """Scene-level drops still cannot ship a rewrite that fails everywhere."""
     vi, en = scenes(17)
     before = [sc["text"] for sc in vi]
-    polish_call(Editor("number"))
+    editor = polish_call(Editor("number"))
 
     report = factory.polish_scenes(vi, en)
 
     assert report["accepted"] is False
-    assert report["decision"] == "rejected_contract"
-    assert report["rejection"]["index"] == 1
+    assert report["decision"] == "rejected_scene_drops"
+    assert report["scenes_skipped"] == 17
     assert "locked_tokens" in report["rejection"]["detail"]
-    # Not one scene of the good chunks was kept either.
+    # every chunk asked twice: the first answer, then the same answer again
+    assert report["calls"] == 6 and report["retries"] == 3
+    assert "[1] VI 18 từ / EN 20 từ" in editor.user_prompts[0]
+    assert "LẦN TRƯỚC bản này bị LOẠI" in editor.user_prompts[1]
+    assert "[1] locked_tokens" in editor.user_prompts[1]
+    assert [sc["text"] for sc in vi] == before
+
+
+def test_one_broken_scene_drops_while_its_neighbours_are_kept(factory, polish_call):
+    """The contract is per scene, so one stubborn line must not cost 130 good ones."""
+    vi, en = scenes(9)
+    before = [sc["text"] for sc in vi]
+    polish_call(Editor("grow_one"))
+
+    report = factory.polish_scenes(vi, en)
+
+    assert report["accepted"] is True, report
+    assert report["scenes_rewritten"] == 8
+    assert report["scenes_skipped"] == 1
+    assert report["skipped"][0]["index"] == 3
+    assert report["skipped"][0]["detail"].startswith("vi_drift:4")
+    assert vi[2]["text"] == before[2]
+    assert all(REPEAT not in sc["text"] for i, sc in enumerate(vi) if i != 2)
+
+
+def test_a_polish_that_adds_three_words_is_still_inside_the_contract(factory, polish_call):
+    vi, en = scenes(9)
+    polish_call(Editor("grow3"))
+
+    report = factory.polish_scenes(vi, en)
+
+    assert report["accepted"] is True
+    assert report["scenes_rewritten"] == 9
+
+
+def test_a_line_grown_past_three_words_is_dropped(factory, polish_call):
+    vi, en = scenes(9)
+    before = [sc["text"] for sc in vi]
+    polish_call(Editor("grow4"))
+
+    report = factory.polish_scenes(vi, en)
+
+    assert report["accepted"] is False
+    assert report["decision"] == "rejected_scene_drops"
+    assert "vi_drift:4" in report["skipped"][0]["detail"]
     assert [sc["text"] for sc in vi] == before
 
 
@@ -248,28 +296,6 @@ def test_an_extra_scene_rejects_the_whole_polish(factory, polish_call):
     report = factory.polish_scenes(vi, en)
 
     assert report["decision"] == "rejected_scene_count"
-    assert [sc["text"] for sc in vi] == before
-
-
-def test_a_polish_that_adds_three_words_is_still_inside_the_contract(factory, polish_call):
-    vi, en = scenes(9)
-    polish_call(Editor("grow3"))
-
-    report = factory.polish_scenes(vi, en)
-
-    assert report["accepted"] is True
-    assert report["scenes_rewritten"] == 9
-
-
-def test_a_line_grown_past_three_words_is_rejected(factory, polish_call):
-    vi, en = scenes(9)
-    before = [sc["text"] for sc in vi]
-    polish_call(Editor("grow4"))
-
-    report = factory.polish_scenes(vi, en)
-
-    assert report["decision"] == "rejected_contract"
-    assert report["rejection"]["detail"].startswith("vi_drift:4")
     assert [sc["text"] for sc in vi] == before
 
 
@@ -338,6 +364,15 @@ def test_polish_needs_two_scripts_to_run(factory):
 def test_locked_tokens_hold_numbers_and_all_caps_names():
     assert _locked_tokens("ASML đạt 16% năm 1602") == _locked_tokens("16% — ASML, 1602")
     assert _locked_tokens("ASML đạt 16%") != _locked_tokens("hãng đạt 16%")
+
+
+def test_locked_tokens_are_the_value_and_not_the_typography():
+    """Thousands grouping and a sentence-final full stop are formatting."""
+    assert _locked_tokens("50,000 đơn hàng") == _locked_tokens("50.000 đơn hàng")
+    assert _locked_tokens("Tương lai AI.") == _locked_tokens("tương lai AI")
+    assert _locked_tokens("lãi 2,5%") != _locked_tokens("lãi 25%")
+    assert _locked_tokens("EUV") == _locked_tokens("EUV.")
+    assert _locked_tokens("EUV") != _locked_tokens("euv")
 
 
 def test_polish_violations_accepts_an_equal_length_rewrite():
