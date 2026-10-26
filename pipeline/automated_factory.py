@@ -639,6 +639,7 @@ class AutomatedFactory:
             en_scenes = []
             default_shot_duration = 5.0
             audit_res = None
+            polish_report: Dict[str, Any] = {}
 
             if custom_script:
                 # Option 2: Custom script flow
@@ -720,6 +721,7 @@ class AutomatedFactory:
                 (project_dir / "algorithm_result.json").write_text(
                     json.dumps(algo_result, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
+                polish_report = algo_result.get("polish") or {}
                 logger.info(
                     "Script factory chose angle '%s' (score %.1f/%.1f, %d rounds, metrics: %s)",
                     algo_result["chosen_angle"],
@@ -814,6 +816,9 @@ class AutomatedFactory:
                 "is_valid": is_valid_audit,
                 "issues": audit_issues,
                 "total_scenes": len(shots),
+                # The external editor reports the scenes it refused to touch;
+                # they belong in the audit trail the owner reads, not in a log.
+                "polish_notes": polish_report.get("notes") or [],
             }
 
             # Register characters in state machine
@@ -852,68 +857,19 @@ class AutomatedFactory:
             )
 
             # Generate human-readable .txt script files for final user review ("tra phát cuối")
-            est_total_duration = sum(float(s.get("duration") or default_shot_duration) for s in shots)
-            total_words_vi = sum(len(str(s.get("text", "")).split()) for s in (vi_scenes or shots))
-
-            vi_txt_lines = [
-                "=" * 80,
-                "🎬 KỊCH BẢN PHÂN CẢNH VOICE-OVER TIẾNG VIỆT",
-                f"Job ID: {job_id}",
-                f"Tiêu đề: {source_title or 'Video Documentary'}",
-                f"Tổng số cảnh: {len(shots)} cảnh | Thời lượng dự kiến: ~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)",
-                f"Tổng số từ: {total_words_vi} từ | Tốc độ đọc: ~3.4 - 3.5 từ/giây (205-210 WPM)",
-                f"Giọng đọc đề xuất: {target_voice}",
-                "=" * 80,
-                "",
-            ]
-            cum_t = 0.0
-            for s in (vi_scenes or shots):
-                idx = s.get("index", 1)
-                sc_dur = float(s.get("duration") or default_shot_duration)
-                t_start, t_end = cum_t, cum_t + sc_dur
-                cum_t += sc_dur
-                tag = " [HOOK]" if idx <= 2 else (" [OUTRO/KẾT]" if idx == len(shots) else "")
-                vi_txt_lines.append(f"[CẢNH {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s){tag}")
-                vi_txt_lines.append(f"Lời thoại: {s.get('text', '')}")
-                vi_txt_lines.append(f"Mô tả hình ảnh (AI Prompt): {s.get('prompt', '')}")
-                if s.get("character_ids"):
-                    vi_txt_lines.append(f"Nhân vật: {', '.join(s['character_ids'])}")
-                vi_txt_lines.append("-" * 40)
-
-            vi_txt_lines.extend([
-                "",
-                "=" * 80,
-                "👉 HƯỚNG DẪN KIỂM TRA & DUYỆT (GATE 1):",
-                f"- Muốn sửa câu chữ từng cảnh: /edit_beat {job_id} <cảnh_số> <nội dung mới>",
-                f"- Hoặc tải file .txt này về máy, chỉnh sửa rồi gửi lại file lên chat bot.",
-                f"- Khi đã hoàn toàn ưng ý: bấm [Duyệt Kịch Bản (G1)] hoặc gõ /approve_script {job_id}",
-                "=" * 80,
-            ])
-            kich_ban_vi_file = project_dir / f"kich_ban_VI_{job_id}.txt"
-            kich_ban_vi_file.write_text("\n".join(vi_txt_lines), encoding="utf-8")
-
-            kich_ban_en_file = project_dir / f"kich_ban_EN_{job_id}.txt"
-            if en_scenes:
-                en_txt_lines = [
-                    "=" * 80,
-                    "🎬 ENGLISH VOICE-OVER SCRIPT & SHOT PLAN",
-                    f"Job ID: {job_id}",
-                    f"Title: {source_title or 'Video'}",
-                    f"Total scenes: {len(en_scenes)} scenes | Duration: ~{sum(float(s.get('duration') or 5.0) for s in en_scenes):.0f}s",
-                    "=" * 80,
-                    "",
-                ]
-                cum_t_en = 0.0
-                for s in en_scenes:
-                    idx = s.get("index", 1)
-                    sc_dur = float(s.get("duration") or default_shot_duration)
-                    t_start, t_end = cum_t_en, cum_t_en + sc_dur
-                    cum_t_en += sc_dur
-                    en_txt_lines.append(f"[SCENE {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s)")
-                    en_txt_lines.append(f"Narration: {s.get('text', '')}")
-                    en_txt_lines.append(f"Visual Prompt: {s.get('prompt', '')}")
-                    en_txt_lines.append("-" * 40)
-                kich_ban_en_file.write_text("\n".join(en_txt_lines), encoding="utf-8")
+            kich_ban_vi_file, kich_ban_en_file, est_total_duration, total_words_vi = (
+                self._write_script_review_files(
+                    job_id=job_id,
+                    project_dir=project_dir,
+                    shots=shots,
+                    vi_scenes=vi_scenes,
+                    en_scenes=en_scenes,
+                    source_title=source_title,
+                    target_voice=target_voice,
+                    default_shot_duration=default_shot_duration,
+                    polish=polish_report,
+                )
+            )
 
             # 1. Send clean script documents directly to Telegram for user inspection ("tra phát cuối")
             if self.notifier.is_configured:
@@ -970,6 +926,21 @@ class AutomatedFactory:
                     mid_preview = "\n".join(f"• <b>Cảnh {s['index']}:</b> <i>{s.get('text', '')}</i>" for s in mid_shots)
                 outro_preview = f"• <b>Cảnh {shots[-1]['index']} (Kết):</b> <i>{shots[-1].get('text', '')}</i>" if shots else ""
 
+                polish_info = ""
+                if polish_report:
+                    if polish_report.get("accepted"):
+                        polish_info = (
+                            f"🖋 <b>Văn phong đã chốt bởi editor xKiro"
+                            f" ({polish_report.get('model')})</b>: cụm lặp "
+                            f"{polish_report.get('repetition_hits_before')} → "
+                            f"{polish_report.get('repetition_hits_after')} cảnh\n"
+                        )
+                    else:
+                        polish_info = (
+                            f"🖋 <i>Editor văn phong bị loại "
+                            f"({polish_report.get('decision')}) — giữ bản nội bộ</i>\n"
+                        )
+
                 approval_msg = (
                     f"🎬 <b>[MODE 2: KỊCH BẢN ĐÃ XONG - CHỜ TRA PHÁT CUỐI & DUYỆT G1]</b>\n"
                     f"🆔 Job: <code>{job_id}</code>\n"
@@ -978,7 +949,8 @@ class AutomatedFactory:
                     f"📊 Tổng số cảnh: <b>{len(shots)} cảnh</b> (~{est_total_duration / len(shots):.1f}s/cảnh trung bình) | {total_words_vi} từ\n"
                     f"🌟 <b>{key_count} cảnh Veo điện ảnh</b> + 🖼 <b>{broll_count} cảnh Ken Burns</b>\n"
                     f"{char_info}"
-                    f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b>\n\n"
+                    f"🌐 Ngôn ngữ: <b>{detected_lang.upper()}</b> | Giọng đề xuất: <b>{target_voice}</b>\n"
+                    f"{polish_info}\n"
                     f"🎯 <b>TRÍCH ĐOẠN MỞ ĐẦU (HOOK):</b>\n{hook_preview}\n\n"
                 )
                 if mid_preview:
@@ -1003,6 +975,265 @@ class AutomatedFactory:
             if self.notifier.is_configured:
                 self.notifier.send_message(f"❌ <b>[LỖI AI GENESIS - {job_id}]:</b> <code>{str(e)[:300]}</code>")
             return job_id
+
+    def _write_script_review_files(
+        self,
+        job_id: str,
+        project_dir: Path,
+        shots: List[Dict[str, Any]],
+        vi_scenes: Optional[List[Dict[str, Any]]],
+        en_scenes: Optional[List[Dict[str, Any]]],
+        source_title: str,
+        target_voice: str,
+        default_shot_duration: float,
+        polish: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Path, Path, float, int]:
+        """Write the two human-readable scripts the owner reviews at Gate 1.
+
+        Returns (vi_file, en_file, planned_total_seconds, total_vi_words) — the
+        same numbers the Telegram approval caption quotes.
+        """
+        polish = polish or {}
+        est_total_duration = sum(
+            float(s.get("duration") or default_shot_duration) for s in shots
+        )
+        total_words_vi = sum(
+            len(str(s.get("text", "")).split()) for s in (vi_scenes or shots)
+        )
+
+        vi_txt_lines = [
+            "=" * 80,
+            "🎬 KỊCH BẢN PHÂN CẢNH VOICE-OVER TIẾNG VIỆT",
+            f"Job ID: {job_id}",
+            f"Tiêu đề: {source_title or 'Video Documentary'}",
+            f"Tổng số cảnh: {len(shots)} cảnh | Thời lượng dự kiến: ~{est_total_duration:.0f}s (~{est_total_duration / 60:.1f} phút)",
+            f"Tổng số từ: {total_words_vi} từ | Tốc độ đọc: ~3.4 - 3.5 từ/giây (205-210 WPM)",
+            f"Giọng đọc đề xuất: {target_voice}",
+            "=" * 80,
+            "",
+        ]
+        cum_t = 0.0
+        for s in (vi_scenes or shots):
+            idx = s.get("index", 1)
+            sc_dur = float(s.get("duration") or default_shot_duration)
+            t_start, t_end = cum_t, cum_t + sc_dur
+            cum_t += sc_dur
+            tag = " [HOOK]" if idx <= 2 else (" [OUTRO/KẾT]" if idx == len(shots) else "")
+            vi_txt_lines.append(f"[CẢNH {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s){tag}")
+            vi_txt_lines.append(f"Lời thoại: {s.get('text', '')}")
+            vi_txt_lines.append(f"Mô tả hình ảnh (AI Prompt): {s.get('prompt', '')}")
+            if s.get("character_ids"):
+                vi_txt_lines.append(f"Nhân vật: {', '.join(s['character_ids'])}")
+            vi_txt_lines.append("-" * 40)
+
+        if polish:
+            before_nat = polish.get("naturalness_before") or {}
+            after_nat = polish.get("naturalness_after") or {}
+            vi_txt_lines.extend([
+                "",
+                "=" * 80,
+                f"🖋 EDITOR VĂN PHONG BÊN NGOÀI (xKiro {polish.get('model', '?')}): "
+                + ("ĐÃ CHỐT BẢN NÀY" if polish.get("accepted") else "BỊ LOẠI — GIỮ BẢN NỘI BỘ"),
+            ])
+            if polish.get("accepted"):
+                vi_txt_lines.append(
+                    f"- Cụm từ lặp: {polish.get('repetition_hits_before')} → "
+                    f"{polish.get('repetition_hits_after')} cảnh "
+                    f"(giảm {polish.get('repeat_drop_pct')}%) | xung đột số liệu: "
+                    f"{polish.get('number_conflicts_before')} → {polish.get('number_conflicts_after')}"
+                )
+                if before_nat and after_nat:
+                    vi_txt_lines.append(
+                        f"- Nhịp đọc: độ dài câu dao động {before_nat.get('cv')} → "
+                        f"{after_nat.get('cv')}, câu ngắn {before_nat.get('punch_pct')}% → "
+                        f"{after_nat.get('punch_pct')}%, từ nối {before_nat.get('connectors_per_100')} → "
+                        f"{after_nat.get('connectors_per_100')}/100 từ"
+                    )
+            else:
+                vi_txt_lines.append(f"- Lý do: {polish.get('decision')}")
+                rejection = polish.get("rejection") or {}
+                if rejection:
+                    vi_txt_lines.append(
+                        f"- Cảnh vi phạm hợp đồng: {rejection.get('index')} — {rejection.get('detail')}"
+                    )
+            for note in polish.get("notes") or []:
+                vi_txt_lines.append(
+                    f"- Cảnh editor báo: {note.get('index')} [{note.get('issue')}] {note.get('detail', '')}"
+                )
+
+        vi_txt_lines.extend([
+            "",
+            "=" * 80,
+            "👉 HƯỚNG DẪN KIỂM TRA & DUYỆT (GATE 1):",
+            f"- Muốn sửa câu chữ từng cảnh: /edit_beat {job_id} <cảnh_số> <nội dung mới>",
+            f"- Hoặc tải file .txt này về máy, chỉnh sửa rồi gửi lại file lên chat bot.",
+            f"- Khi đã hoàn toàn ưng ý: bấm [Duyệt Kịch Bản (G1)] hoặc gõ /approve_script {job_id}",
+            "=" * 80,
+        ])
+        kich_ban_vi_file = project_dir / f"kich_ban_VI_{job_id}.txt"
+        kich_ban_vi_file.write_text("\n".join(vi_txt_lines), encoding="utf-8")
+
+        kich_ban_en_file = project_dir / f"kich_ban_EN_{job_id}.txt"
+        if en_scenes:
+            en_txt_lines = [
+                "=" * 80,
+                "🎬 ENGLISH VOICE-OVER SCRIPT & SHOT PLAN",
+                f"Job ID: {job_id}",
+                f"Title: {source_title or 'Video'}",
+                f"Total scenes: {len(en_scenes)} scenes | Duration: ~{sum(float(s.get('duration') or 5.0) for s in en_scenes):.0f}s",
+                "=" * 80,
+                "",
+            ]
+            cum_t_en = 0.0
+            for s in en_scenes:
+                idx = s.get("index", 1)
+                sc_dur = float(s.get("duration") or default_shot_duration)
+                t_start, t_end = cum_t_en, cum_t_en + sc_dur
+                cum_t_en += sc_dur
+                en_txt_lines.append(f"[SCENE {idx:03d}] ({t_start:.1f}s - {t_end:.1f}s)")
+                en_txt_lines.append(f"Narration: {s.get('text', '')}")
+                en_txt_lines.append(f"Visual Prompt: {s.get('prompt', '')}")
+                en_txt_lines.append("-" * 40)
+            kich_ban_en_file.write_text("\n".join(en_txt_lines), encoding="utf-8")
+
+        return kich_ban_vi_file, kich_ban_en_file, est_total_duration, total_words_vi
+
+    def repolish_script(self, job_id: str) -> Dict[str, Any]:
+        """Re-run only the Phase 8 prose polish on a job that already has a script.
+
+        Gate 1 stays closed afterwards: the state machine sees new content, bumps
+        script_version and invalidates downstream assets, so the owner reviews the
+        polished text instead of the drafted one. Nothing is written unless the
+        polish passes the same hard QA the factory enforces.
+        """
+        from services.script_factory import ScriptFactory
+        from services.script_auditor import ScriptAuditor
+
+        job = self.jq.get_job(job_id)
+        if not job:
+            raise ValueError(f"Không tìm thấy job {job_id}")
+        project_dir = Path(job.get("project_dir") or (self.output_dir / job_id))
+        vi_file = project_dir / "shots_plan_vi.json"
+        en_file = project_dir / "shots_plan_en.json"
+        shots_file = project_dir / "shots_plan.json"
+        if not (vi_file.exists() and en_file.exists() and shots_file.exists()):
+            raise ValueError(
+                f"Job {job_id} thiếu shots_plan_vi.json/shots_plan_en.json nên không "
+                "re-polish được (kịch bản chưa được lưu)."
+            )
+        vi_scenes = json.loads(vi_file.read_text(encoding="utf-8"))
+        en_scenes = json.loads(en_file.read_text(encoding="utf-8"))
+        old_shots = json.loads(shots_file.read_text(encoding="utf-8"))
+
+        report = ScriptFactory().polish_scenes(vi_scenes, en_scenes)
+        if not report.get("accepted"):
+            logger.warning("Re-polish job %s rejected: %s", job_id, report.get("decision"))
+            if self.notifier.is_configured:
+                self.notifier.send_message(
+                    f"🖋 <b>[RE-POLISH {job_id}]:</b> bản editor ngoài bị loại "
+                    f"(<code>{report.get('decision')}</code>), giữ nguyên kịch bản cũ."
+                )
+            return report
+
+        # Character tags were attached to the active shots only; carry them across.
+        char_ids = {int(s.get("index", i + 1)): s.get("character_ids", [])
+                    for i, s in enumerate(old_shots)}
+        for scene in (*vi_scenes, *en_scenes):
+            scene["character_ids"] = char_ids.get(int(scene.get("index", 0)), [])
+        voice = (project_dir / "voice.txt").read_text(encoding="utf-8").strip() \
+            if (project_dir / "voice.txt").exists() else ""
+        active = vi_scenes if (not voice or voice.startswith("vi") or "vietnamese" in voice) else en_scenes
+
+        vi_file.write_text(json.dumps(vi_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
+        en_file.write_text(json.dumps(en_scenes, indent=2, ensure_ascii=False), encoding="utf-8")
+        shots_file.write_text(json.dumps(active, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        audit_res = ScriptAuditor(
+            target_scenes=len(active), algorithm_mode=True
+        ).audit_script(
+            "\n".join(s.get("text", "") for s in active),
+            preparsed_scenes=[s.get("text", "") for s in active],
+        )
+        audit_report = {
+            "is_valid": bool(audit_res.is_valid),
+            "issues": list(audit_res.issues),
+            "total_scenes": len(active),
+            "polish_notes": report.get("notes") or [],
+        }
+
+        from services.approval_state_machine import ApprovalStateMachine, BeatIntent
+        asm = ApprovalStateMachine(project_dir, job_id)
+        beats_list = [
+            BeatIntent(
+                id=int(s.get("index", i + 1)),
+                text_vi=vi_scenes[i].get("text", "") if i < len(vi_scenes) else "",
+                text_en=en_scenes[i].get("text", "") if i < len(en_scenes) else "",
+                duration=5.0,
+                character_ids=s.get("character_ids", []),
+            )
+            for i, s in enumerate(active)
+        ]
+        asm.set_script(
+            script_vi="\n".join(b.text_vi for b in beats_list if b.text_vi),
+            script_en="\n".join(b.text_en for b in beats_list if b.text_en),
+            beats=beats_list,
+            required_characters=list(asm.required_characters or []),
+            audit_report=audit_report,
+        )
+        asm.set_shots_plan(active)
+
+        algo_file = project_dir / "algorithm_result.json"
+        if algo_file.exists():
+            algo_result = json.loads(algo_file.read_text(encoding="utf-8"))
+            algo_result["polish"] = report
+            algo_result["mechanical_metrics"] = report.get("metrics_after")
+            algo_file.write_text(
+                json.dumps(algo_result, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+        kich_ban_vi_file, kich_ban_en_file, est_total, total_words = (
+            self._write_script_review_files(
+                job_id=job_id,
+                project_dir=project_dir,
+                shots=active,
+                vi_scenes=vi_scenes,
+                en_scenes=en_scenes,
+                source_title=job.get("source_title") or "Video",
+                target_voice=voice,
+                default_shot_duration=5.0,
+                polish=report,
+            )
+        )
+        if self.notifier.is_configured:
+            self.notifier.send_document(
+                str(kich_ban_vi_file),
+                caption=(
+                    f"🖋 <b>KỊCH BẢN ĐÃ CHỐT VĂN PHONG (xKiro) - Job {job_id}</b>\n"
+                    f"⏱ ~{est_total:.0f}s | {len(active)} cảnh | {total_words} từ\n"
+                    f"📉 Cụm lặp: {report.get('repetition_hits_before')} → "
+                    f"{report.get('repetition_hits_after')} (giảm {report.get('repeat_drop_pct')}%)"
+                ),
+            )
+            if kich_ban_en_file.exists():
+                self.notifier.send_document(
+                    str(kich_ban_en_file),
+                    caption=f"🖋 <b>EN SCRIPT (xKiro polish) - Job {job_id}</b>",
+                )
+            self.notifier.send_message(
+                f"🖋 <b>[KỊCH BẢN ĐÃ CHỐT LẠI - {job_id}]</b>\n"
+                f"Editor văn phong xKiro đã viết lại lời bình và vượt toàn bộ hard QA.\n"
+                f"📉 Lặp: <b>{report.get('repetition_hits_before')} → "
+                f"{report.get('repetition_hits_after')} cảnh</b> | "
+                f"Điểm chấm: <b>{report.get('score_before', '-')} → {report.get('score_after', '-')}</b>\n"
+                f"👉 Gate 1 đã mở lại — bấm <b>[📝 Duyệt Kịch Bản (G1)]</b> hoặc gõ "
+                f"<code>/approve_script {job_id}</code>."
+            )
+        logger.info(
+            "Re-polish job %s kept: %d cảnh, repeats %s -> %s",
+            job_id, len(active),
+            report.get("repetition_hits_before"), report.get("repetition_hits_after"),
+        )
+        return report
 
     def generate_gate2_and_gate3_artifacts(self, job_id: str, project_dir: Path):
         """

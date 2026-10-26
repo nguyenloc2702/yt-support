@@ -40,6 +40,27 @@ CALLBACK_VI = " ".join((
 ).split())  # 24 words
 
 
+_LETTERS = "bcghklmnprstvx"
+
+
+def _edited_line(text, seed):
+    """What the Phase 8 editor answers: identical word count, identical numbers
+    and all-caps names, and wording no other scene shares.
+
+    The word count is what keeps the reading duration, the untouched digits are
+    what keeps the facts, and a per-scene alphabet makes every 2-gram unique.
+    """
+    out = []
+    slot = 0
+    for word in text.split():
+        if re.search(r"\d|[A-Z]", word):
+            out.append(word)
+            continue
+        out.append(f"{_LETTERS[seed % 14]}o{_LETTERS[(seed * 5 + slot) % 14]}i")
+        slot += 1
+    return " ".join(out)
+
+
 def _vi_line(index, words):
     base = f"Cảnh cải tiến {index} mở ra bất ngờ về dòng tiền và điều đó thay đổi tất cả".split()
     filler = ["hôm", "nay", "câu", "chuyện", "ấy", "vẫn", "tiếp", "tục", "để", "rồi"]
@@ -65,7 +86,7 @@ class Router:
                  short_rewrites=False, fail_chunks_above=None, repair_words=None,
                  word_plan=None, repair_echo=False, empty_scene_in_chunks_above=None,
                  en_word_plan=None, plain_visual_for=(), outline=None,
-                 edit_issues=None, overflow_at_size=None):
+                 edit_issues=None, overflow_at_size=None, polish="refuse"):
         # score_plan: {angle_id: [round1_score, round2_score, ...]}
         self.score_plan = score_plan
         self.outline = outline or {
@@ -98,6 +119,9 @@ class Router:
         # Inflate every non-strict reply for chunks of this size (the live run
         # answered a 5-scene request with 23 scenes).
         self.overflow_at_size = overflow_at_size
+        # Phase 8: "refuse" answers with no scenes list (the editor is rejected and
+        # the internal script ships); "clean" answers with a contract-safe rewrite.
+        self.polish = polish
         self.rewrite_prompts = []
         self.repair_prompts = []
         self.repair_calls = 0
@@ -108,10 +132,16 @@ class Router:
         self.judge_prompts = []
         self.rewrite_calls = 0
         self.rewrite_systems = []
+        self.polish_calls = 0
+        self.polish_prompts = []
 
     def __call__(self, system_prompt, user_prompt, **kw):
         import re
 
+        if "editor lời bình" in system_prompt:
+            self.polish_calls += 1
+            self.polish_prompts.append(user_prompt)
+            return self._polish_reply(user_prompt)
         if "kiến trúc sư kịch bản" in system_prompt:
             self.outline_calls += 1
             return self.outline
@@ -306,6 +336,25 @@ class Router:
         return (
             f"But then scene {index} turned, and the money kept flowing forward anyway."
         )
+
+    def _polish_reply(self, user_prompt):
+        import re
+
+        if self.polish != "clean":
+            return {}
+        vi = {int(m[0]): m[1] for m in re.findall(r"\[(\d+)\] VI: (.*)", user_prompt)}
+        en = {int(m[0]): m[1] for m in re.findall(r"\[(\d+)\] EN: (.*)", user_prompt)}
+        return {
+            "scenes": [
+                {
+                    "index": index,
+                    "voiceover_vi": _edited_line(vi[index], index),
+                    "voiceover_en": _edited_line(en.get(index, "one two three"), index + 5),
+                }
+                for index in sorted(vi)
+            ],
+            "notes": [],
+        }
 
 
 def test_best_variant_chosen_and_result_saved(factory, tmp_path, monkeypatch):
@@ -1239,7 +1288,8 @@ def test_hard_qa_regression_reverts_even_when_the_judge_liked_it(monkeypatch):
 
     rev = result["revision"]
     assert rev["accepted"] is False
-    assert rev["decision"] == "hard_qa_regressed"
+    assert rev["decision"] == "hard_qa_regressed:number_conflicts"
+    assert rev["hard_qa_detail"] == ["number_conflicts"]
     assert rev["number_conflicts"] == 0
     assert "chiếm thị phần 16%" not in " ".join(sc["text"] for sc in vi)
     assert "nhà kho dột" in " ".join(sc["text"] for sc in vi[4:8])
@@ -1265,7 +1315,8 @@ def test_repeat_and_number_counters_are_recorded_in_the_artifact(monkeypatch, tm
     assert "nhà kho dột" in rev["repeated_phrases"]
     assert rev["repetition_worst_before"] == 12
     assert rev["number_conflicts"] == 0
-    assert rev["decision"] == "hard_qa_regressed"
+    assert rev["decision"] == "hard_qa_regressed:number_conflicts"
+    assert rev["hard_qa_detail"] == ["number_conflicts"]
     # The shipped script is the reverted draft plus the hook/callback repairs.
     assert "nhà kho dột" in metrics["repeat_phrases"]
     assert metrics["repeat_worst_scenes"] <= 12
@@ -1283,3 +1334,73 @@ def test_mechanical_metrics_name_the_conflicting_measure():
     conflicts = ScriptFactory()._mechanical_metrics(scenes)["number_conflicts"]
 
     assert conflicts == ["chiếm thị phần %: 16×S1, 8×S1"]
+
+
+def test_run_ships_the_internal_script_when_the_editor_is_rejected(tmp_path, monkeypatch):
+    """Phase 8 is additive: a polish that cannot honour the contract must not
+    touch a single scene, and the rejection has to be readable in the artifact."""
+    factory = _twelve_scene_factory(monkeypatch)
+    router = Router({"analyst": [9.2], "dramatist": [7.0], "teacher": [6.0]})
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}],
+        target_shots=12,
+        project_dir=tmp_path,
+    )
+
+    polish = result["polish"]
+    assert polish["accepted"] is False
+    assert polish["decision"] == "rejected_shape"
+    assert polish["rejection"]["stage"] == "shape"
+    assert polish["scenes_rewritten"] == 0
+    # one chunk attempted, then the whole stage gave up
+    assert router.polish_calls == 1
+    assert len(vi) == len(en) == 12
+    assert "dòng tiền" in vi[5]["text"]
+    saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
+    assert saved["polish"]["decision"] == "rejected_shape"
+    assert saved["mechanical_metrics"] == polish["metrics_after"]
+
+
+def test_run_ships_the_editors_script_and_rejudges_it(tmp_path, monkeypatch):
+    factory = _twelve_scene_factory(monkeypatch)
+    router = Router(
+        {"analyst": [9.2, 8.9], "dramatist": [7.0], "teacher": [6.0]}, polish="clean"
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}],
+        target_shots=12,
+        project_dir=tmp_path,
+    )
+
+    polish = result["polish"]
+    assert polish["accepted"] is True, polish
+    assert polish["decision"] == "repetition_reduced_within_hard_qa"
+    assert polish["scenes_rewritten"] == 12
+    assert polish["repetition_hits_before"] == 68
+    # Only "hà lan" survives: it is the proper name the four identical hook lines
+    # share, and the editor is not allowed to invent a different one.
+    assert polish["repetition_worst_after"] == 4
+    assert polish["repeat_drop_pct"] == 94.1
+    assert polish["offenders_after"] == polish["offenders_before"] == 0
+    assert polish["number_conflicts_after"] == 0
+    # 12 scenes = two chunks of eight
+    assert (polish["chunks"], polish["calls"]) == (2, 2)
+    assert router.polish_calls == 2
+    assert all(
+        f"Đợt này chỉ gửi {n} cảnh" in p
+        for p, n in zip(router.polish_prompts, [8, 4])
+    )
+    assert "dòng tiền" not in " ".join(sc["text"] for sc in vi)
+    assert re.search(r"1602", vi[0]["text"])
+    assert all(len(sc["text"].split()) in range(14, 29) for sc in vi)
+    assert all(4.0 <= sc["duration"] <= 8.0 for sc in vi)
+    assert (polish["score_before"], polish["score_after"]) == (9.2, 8.9)
+    assert result["chosen_score"] == 8.9
+
+    saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
+    assert saved["polish"]["accepted"] is True
+    assert saved["mechanical_metrics"]["repeat_phrases"] == ["hà lan"]

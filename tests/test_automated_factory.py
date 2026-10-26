@@ -1,6 +1,8 @@
 """Unit tests for AutomatedFactory Mode 1 and Mode 2 pipelines."""
 
 import json
+import math
+import re
 from pathlib import Path
 import pytest
 
@@ -346,4 +348,118 @@ def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory):
     job = test_factory.jq.get_job(job_id)
     # Status should remain APPROVED for background worker
     assert job["status"] == "APPROVED"
+
+
+def _editor_lines(text, seed):
+    """A contract-safe editor answer: same word count, same numbers and names,
+    wording no other scene shares."""
+    letters = "bcghklmnprstvx"
+    out, slot = [], 0
+    for word in text.split():
+        if re.search(r"\d|[A-Z]", word):
+            out.append(word)
+            continue
+        out.append(f"{letters[seed % 14]}o{letters[(seed * 5 + slot) % 14]}i")
+        slot += 1
+    return " ".join(out)
+
+
+def _genesis_job(test_factory, monkeypatch):
+    monkeypatch.setattr(
+        "pipeline.automated_factory.download_video", lambda url, p, **kw: p / "download.mp4"
+    )
+    monkeypatch.setattr(
+        "pipeline.automated_factory.try_extract_subtitles",
+        lambda p: [
+            {"start": i * 15.0, "end": (i + 1) * 15.0,
+             "text": f"Đoạn diễn biến lịch sử quan trọng {i + 1} đột ngột xảy ra"}
+            for i in range(12)
+        ],
+    )
+    job_id = test_factory.run_ai_genesis("https://youtube.com/watch?v=documentary_polish")
+    return job_id, test_factory.output_dir / job_id
+
+
+def test_repolish_script_rewrites_the_plan_and_reopens_gate1(test_factory, mock_xkiro_stubs, monkeypatch):
+    """Phase 8 on an already drafted script: the accepted editor answer becomes
+    the shipped plan and Gate 1 is closed again for the owner to re-approve."""
+    from services.approval_state_machine import ApprovalStateMachine
+
+    job_id, proj = _genesis_job(test_factory, monkeypatch)
+    before = json.loads((proj / "shots_plan_vi.json").read_text(encoding="utf-8"))
+    assert "dòng tiền" in " ".join(s["text"] for s in before)
+
+    calls = []
+
+    def editor(system_prompt, user_prompt, **kw):
+        assert "editor lời bình" in system_prompt
+        calls.append(user_prompt)
+        vi = {int(m[0]): m[1] for m in re.findall(r"\[(\d+)\] VI: (.*)", user_prompt)}
+        en = {int(m[0]): m[1] for m in re.findall(r"\[(\d+)\] EN: (.*)", user_prompt)}
+        return {
+            "scenes": [
+                {"index": i, "voiceover_vi": _editor_lines(vi[i], i),
+                 "voiceover_en": _editor_lines(en[i], i + 7)}
+                for i in sorted(vi)
+            ],
+            "notes": [{"index": 4, "issue": "lặp beat", "detail": "cảnh 4 kể lại cảnh 2"}],
+        }
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", editor)
+    report = test_factory.repolish_script(job_id)
+
+    assert report["accepted"] is True, report
+    assert report["scenes_rewritten"] == len(before)
+    assert len(calls) == math.ceil(len(before) / 8)
+
+    after = json.loads((proj / "shots_plan_vi.json").read_text(encoding="utf-8"))
+    assert "dòng tiền" not in " ".join(s["text"] for s in after)
+    assert [len(s["text"].split()) for s in after] == [len(s["text"].split()) for s in before]
+    assert after[-1]["character_ids"] == before[-1].get("character_ids", [])
+    # The active language plan (VI here) is rewritten too, and so is the review file.
+    assert json.loads((proj / "shots_plan.json").read_text(encoding="utf-8")) == after
+    review = (proj / f"kich_ban_VI_{job_id}.txt").read_text(encoding="utf-8")
+    assert "EDITOR VĂN PHONG BÊN NGOÀI (xKiro openai/gpt-5.6-terra): ĐÃ CHỐT BẢN NÀY" in review
+    assert "cảnh 4 kể lại cảnh 2" in review
+
+    asm = ApprovalStateMachine(proj, job_id)
+    assert asm.load() is True
+    assert asm.script_approved is False
+    assert asm.script_version >= 2
+    notes = asm.script_audit_report["polish_notes"]
+    assert [n["chunk_first_index"] for n in notes] == [1, 9, 17, 25]
+    assert all(n["detail"] == "cảnh 4 kể lại cảnh 2" for n in notes)
+
+
+def test_repolish_script_keeps_the_old_plan_when_the_editor_breaks_the_contract(
+    test_factory, mock_xkiro_stubs, monkeypatch
+):
+    from services.approval_state_machine import ApprovalStateMachine
+
+    job_id, proj = _genesis_job(test_factory, monkeypatch)
+    before = (proj / "shots_plan_vi.json").read_text(encoding="utf-8")
+    version_before = ApprovalStateMachine(proj, job_id).script_version
+
+    def editor(system_prompt, user_prompt, **kw):
+        vi = {int(m[0]): m[1] for m in re.findall(r"\[(\d+)\] VI: (.*)", user_prompt)}
+        return {
+            "scenes": [
+                {"index": i, "voiceover_vi": _editor_lines(vi[i], i).replace("1", "1998"),
+                 "voiceover_en": _editor_lines("plain english line here", i)}
+                for i in sorted(vi)
+            ],
+            "notes": [],
+        }
+
+    monkeypatch.setattr("pipeline.llm_client.chat_json", editor)
+    report = test_factory.repolish_script(job_id)
+
+    assert report["accepted"] is False
+    assert report["decision"] == "rejected_contract"
+    assert "locked_tokens" in report["rejection"]["detail"]
+    assert report["rejection"]["index"] == 1
+    assert (proj / "shots_plan_vi.json").read_text(encoding="utf-8") == before
+    asm = ApprovalStateMachine(proj, job_id)
+    assert asm.load() is True
+    assert asm.script_version == version_before
 

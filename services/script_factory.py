@@ -25,6 +25,7 @@ import math
 import re
 import statistics
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -113,6 +114,82 @@ EXPANSION_TARGET_WORDS = (23, 24)
 # last lines written before it and is told not to re-narrate an idea.
 BEAT_TAIL_SCENES = 3
 BEAT_TEXT_CHARS = 180
+
+# --- Phase 8: external prose polish ------------------------------------------
+# The factory's own chain drafts the script; an xKiro prose model locks the words
+# afterwards. It runs LAST, after every internal repair, so its output is graded
+# by exactly the hard QA the internal script already passed — and is thrown away
+# if it breaks any of it.
+POLISH_MODEL = "openai/gpt-5.6-terra"
+POLISH_CHUNK = 8  # a 130-scene script answered in one call came back truncated
+POLISH_MAX_WORDS_DRIFT = 3  # keeps the reading duration of every scene intact
+POLISH_SYSTEM_PROMPT = """Bạn là editor lời bình (voiceover) cho video tài liệu. Nhiệm vụ: viết lại lời bình cho MỊN,
+TỰ NHIÊN, SÂU SẮC như người bản xứ viết — nhưng tuyệt đối không làm hỏng cấu trúc video.
+Kịch bản VI + EN đính kèm phía dưới.
+
+QUY TẮC CỨNG (vi phạm là bản viết lại bị loại):
+1. Giữ đúng số cảnh và thứ tự: N cảnh, index 1..N. Không gộp, không tách, không thêm, không bỏ.
+2. Mỗi cảnh giữ đúng chức năng kể chuyện của nó (setup / bằng chứng / giải thích / xung đột /
+   hệ quả / payoff) và đúng vị trí trên dòng thời gian.
+3. KHÔNG đổi, KHÔNG thêm, KHÔNG bịa: số liệu, năm, tên riêng, tên công ty, đơn vị, quan hệ nhân quả.
+   Chỉ được sửa CÁCH NÓI.
+4. Nếu thấy hai cảnh mâu thuẫn số liệu hoặc kể trùng cùng một sự kiện: KHÔNG tự quyết.
+   Giữ nguyên, và ghi cảnh đó vào trường "notes".
+5. Độ dài mỗi cảnh xấp xỉ bản gốc (chênh ≤3 từ) để thời lượng đọc không đổi.
+   VI: 17–21 từ/cảnh. EN: 12–22 từ/cảnh. Không thêm câu thừa chỉ để đủ số từ.
+
+VĂN PHONG:
+- Viết để NÓI, không viết như bài báo. Câu phải đọc được thành một hơi, không hụt hơi, không dồn nhịp.
+- Bỏ câu cụt kiểu điện tín: mỗi câu trọn nghĩa.
+- Chặn lặp ở mức Ý, không chỉ mức từ: không kể trùng cùng một beat ở hai cảnh. Nếu lặp là callback
+  có chủ đích, lần sau phải cho thông tin mới hoặc trả lời câu hỏi đã mở.
+- Không dùng quá 2 lần trong toàn bài: "tương lai", "thất bại", "bức tường", "nhà kho", "bước ngoặt",
+  "điều đáng nói là", "câu hỏi thực sự là", "what really happened", "but this was not".
+- VI: collocation tiếng Việt tự nhiên, không dịch word-by-word từ EN, chủ ngữ/đối tượng rõ,
+  không chuỗi danh từ hoá dài, không mở đầu liên tiếp nhiều câu bằng cùng một mẫu.
+- EN: tiếng Anh nói kiểu documentary, KHÔNG phải bản dịch của VI. Giữ tense và subject reference
+  nhất quán. Không dùng câu fragment chỉ để nhét vừa số từ.
+- Dấu câu phục vụ TTS: dấu phẩy đặt ở ranh giới hơi thở thật, không rải đều mọi câu.
+
+TRẢ VỀ duy nhất một JSON object, không thêm text ngoài JSON:
+{"scenes":[{"index":1,"voiceover_vi":"...","voiceover_en":"..."},... đúng N phần tử],
+ "notes":[{"index":<int>,"issue":"mâu thuẫn số liệu | lặp beat | vượt quyền sửa","detail":"..."}]}"""
+
+_POLISH_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_POLISH_ACRONYM_RE = re.compile(r"[A-Z][A-Z0-9+.\-]{1,}")
+
+
+def _locked_tokens(*texts: str) -> Counter:
+    """Facts a polish pass may not touch: every number and every all-caps name."""
+    joined = " ".join(texts)
+    return Counter(
+        _POLISH_NUMBER_RE.findall(joined) + _POLISH_ACRONYM_RE.findall(joined)
+    )
+
+
+def _polish_violations(
+    origin_vi: str, origin_en: str, new_vi: str, new_en: str
+) -> List[str]:
+    """Why this rewritten scene cannot be ingested (empty list == accepted)."""
+    if not new_vi.strip() or not new_en.strip():
+        return ["empty"]
+    kinds: List[str] = []
+    vi_drift = abs(len(new_vi.split()) - len(origin_vi.split()))
+    en_drift = abs(len(new_en.split()) - len(origin_en.split()))
+    if vi_drift > POLISH_MAX_WORDS_DRIFT:
+        kinds.append(f"vi_drift:{vi_drift}")
+    if en_drift > POLISH_MAX_WORDS_DRIFT:
+        kinds.append(f"en_drift:{en_drift}")
+    before, after = _locked_tokens(origin_vi, origin_en), _locked_tokens(new_vi, new_en)
+    if before != after:
+        kinds.append(
+            "locked_tokens:"
+            + json.dumps(
+                {"before": dict(before), "after": dict(after)}, ensure_ascii=False
+            )[:200]
+        )
+    return kinds
+
 
 VARIANT_ANGLES = [
     {
@@ -366,6 +443,17 @@ class ScriptFactory:
             best, transcript_text, target_duration, on_progress
         )
 
+        # Phase 8: the external prose editor is the last stage allowed to touch the
+        # words, and only if its rewrite passes the same hard QA the internal
+        # script passed and actually lowers the repetition score.
+        polish = self.polish_scenes(best.scenes_vi, best.scenes_en, on_progress)
+        if polish.get("accepted"):
+            polish["score_before"] = round(best.score, 1)
+            score_after, breakdown, fb = self._judge(best, transcript_text, feedback_brief)
+            best.score, best.breakdown, best.judge_feedback = score_after, breakdown, fb
+            polish["score_after"] = round(score_after, 1)
+        best.metrics = polish.get("metrics_after") or best.metrics
+
         result = {
             "engine": "script_factory_best_of_n",
             "chosen_angle": best.angle["id"],
@@ -382,6 +470,7 @@ class ScriptFactory:
             "judge_breakdown": best.breakdown,
             "judge_feedback": best.judge_feedback,
             "post_repairs": post_repairs,
+            "polish": polish,
             "duration_sec": round(time.time() - started, 1),
         }
         if project_dir is not None:
@@ -1566,14 +1655,16 @@ class ScriptFactory:
         # Hard QA outranks the float: a revision that regresses word budget,
         # scene count, number conflicts or the worst repeat is thrown away even
         # if the judge liked it.
-        hard_qa_ok = (
-            len(vi) == len(snapshot_vi)
-            and report_after["offenders"] <= offenders_before
-            and len(conflicts_after) <= len(conflicts)
-            and load_after["worst"] <= load_before["worst"]
-        )
+        hard_clauses = {
+            "scene_count": len(vi) == len(snapshot_vi),
+            "word_budget": report_after["offenders"] <= offenders_before,
+            "number_conflicts": len(conflicts_after) <= len(conflicts),
+            "worst_repeat": load_after["worst"] <= load_before["worst"],
+        }
+        hard_qa_detail = [name for name, ok in hard_clauses.items() if not ok]
+        hard_qa_ok = not hard_qa_detail
         if not hard_qa_ok:
-            reason = "hard_qa_regressed"
+            reason = "hard_qa_regressed:" + ",".join(hard_qa_detail)
         elif score_after >= score_before:
             reason = "judge_not_worse"
         elif (
@@ -1597,9 +1688,11 @@ class ScriptFactory:
             conflicts_after = conflicts
         logger.info(
             "Global revision: issues=%d chunks=%d scenes=%d score %.1f -> %.1f "
-            "repeats %d -> %d (%s)",
+            "repeats %d -> %d offenders %d -> %d conflicts %d -> %d (%s)",
             len(issues), chunks, revised, score_before, score_after,
             load_before["hits"], load_after["hits"],
+            offenders_before, report_after["offenders"],
+            len(conflicts), len(conflicts_after),
             "kept:" + reason if accepted else "reverted:" + reason,
         )
         return {
@@ -1611,6 +1704,7 @@ class ScriptFactory:
             "score_after": round(score_after, 1),
             "accepted": accepted,
             "decision": reason,
+            "hard_qa_detail": hard_qa_detail,
             "repeated_phrases": load_before["phrases"],
             "repetition_hits_before": load_before["hits"],
             "repetition_hits_after": load_after["hits"],
@@ -1619,6 +1713,238 @@ class ScriptFactory:
             "repeat_drop_pct": round(drop * 100.0, 1) if accepted else 0.0,
             "number_conflicts": len(conflicts),
             "number_conflict_measures": [c["measure"] for c in conflicts][:8],
+        }
+
+    # -------------------------------------------------- Phase 8 prose polish
+
+    def _polish_batch_prompt(
+        self, scenes_vi: List[Dict[str, Any]], scenes_en: List[Dict[str, Any]], start: int, total: int
+    ) -> str:
+        """One chunk of the script, addressed by its ABSOLUTE scene indices."""
+        size = len(scenes_vi)
+        lines = []
+        for offset in range(size):
+            index = start + offset + 1
+            lines.append(f"[{index}] VI: {scenes_vi[offset].get('text', '')}")
+            en = scenes_en[start + offset].get("text", "") if start + offset < len(scenes_en) else ""
+            lines.append(f"[{index}] EN: {en}")
+        return (
+            f"Bài hoàn chỉnh có {total} cảnh (index 1..{total}). "
+            f"Đợt này chỉ gửi {size} cảnh, index {start + 1}..{start + size}.\n"
+            f"Viết lại đúng {size} cảnh đó và trả về đúng {size} phần tử với chính "
+            "các index trên; không xuất hiện index nào khác, không dịch qua lại giữa "
+            "VI và EN.\n\n"
+            "KỊCH BẢN:\n" + "\n".join(lines)
+        )
+
+    def polish_scenes(
+        self,
+        scenes_vi: List[Dict[str, Any]],
+        scenes_en: List[Dict[str, Any]],
+        on_progress: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Rewrite the finished script with an xKiro prose model, contract-gated.
+
+        The external editor is untrusted by construction: it does not know the
+        machine constraints, so every scene it returns is checked against the
+        re-ingest contract (same indices, <=3 words drift, identical numbers and
+        all-caps names) and any single violation throws away the whole polish.
+        The kept version must also not regress word budget, number conflicts or
+        the worst repeated phrase, and it must lower the repetition score —
+        otherwise the internal script stays.
+        """
+        from pipeline.llm_client import chat_json
+
+        total = len(scenes_vi)
+        if not total or not scenes_en:
+            return {"applicable": False, "accepted": False, "decision": "no scenes"}
+
+        texts_before = [str(sc.get("text", "")) for sc in scenes_vi]
+        load_before = repetition_load(texts_before, min_scenes=REPEAT_WARN_SCENES)
+        conflicts_before = numeric_conflicts(texts_before)
+        offenders_before = sum(
+            1 for vi, en in zip(scenes_vi, scenes_en) if _scene_violations(vi, en)
+        )
+        nat_before = self._naturalness_report("\n".join(texts_before))
+        duration_before = sum(float(sc.get("duration") or 0.0) for sc in scenes_vi)
+        snapshot = [
+            (
+                str(sc.get("text", "")),
+                str(en.get("text", "")),
+                float(sc.get("duration") or 0.0),
+            )
+            for sc, en in zip(scenes_vi, scenes_en)
+        ]
+
+        notes: List[Dict[str, Any]] = []
+        rejection: Optional[Dict[str, Any]] = None
+        calls = 0
+        pending: Dict[int, Tuple[str, str]] = {}
+
+        for start in range(0, total, POLISH_CHUNK):
+            chunk_vi = scenes_vi[start:start + POLISH_CHUNK]
+            want = list(range(start + 1, start + len(chunk_vi) + 1))
+            _beat(on_progress)
+            try:
+                payload = chat_json(
+                    POLISH_SYSTEM_PROMPT,
+                    self._polish_batch_prompt(chunk_vi, scenes_en, start, total),
+                    temperature=0.4,
+                    max_tokens=3000,
+                    model=POLISH_MODEL,
+                )
+            except Exception as exc:
+                rejection = {"stage": "call", "index": want[0], "detail": str(exc)[:300]}
+                break
+            calls += 1
+            rows = payload.get("scenes")
+            if not isinstance(rows, list):
+                rejection = {"stage": "shape", "index": want[0], "detail": "no scenes list"}
+                break
+            by_index: Dict[int, Tuple[str, str]] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    rejection = {"stage": "shape", "index": want[0], "detail": "scene not an object"}
+                    break
+                try:
+                    index = int(row.get("index"))
+                except (TypeError, ValueError):
+                    index = -1
+                by_index[index] = (
+                    str(row.get("voiceover_vi", "")),
+                    str(row.get("voiceover_en", "")),
+                )
+            if rejection:
+                break
+            if sorted(by_index) != want:
+                rejection = {
+                    "stage": "scene_count",
+                    "index": want[0],
+                    "detail": f"expected {want}, got {sorted(by_index)}",
+                }
+                break
+            for index in want:
+                position = index - 1
+                vi_text, en_text = by_index[index]
+                kinds = _polish_violations(
+                    snapshot[position][0], snapshot[position][1], vi_text, en_text
+                )
+                if kinds:
+                    rejection = {
+                        "stage": "contract",
+                        "index": index,
+                        "detail": "; ".join(kinds),
+                        "before": snapshot[position][0],
+                        "after": vi_text,
+                    }
+                    break
+                pending[position] = (vi_text, en_text)
+            if rejection:
+                break
+            for note in payload.get("notes") or []:
+                if isinstance(note, dict):
+                    notes.append({**note, "chunk_first_index": want[0]})
+
+        report = {
+            "applicable": True,
+            "model": POLISH_MODEL,
+            "chunks": math.ceil(total / POLISH_CHUNK),
+            "calls": calls,
+            "scenes_rewritten": len(pending) if rejection is None else 0,
+            "notes": notes[:40],
+            "rejection": rejection,
+            "repetition_phrases": load_before["phrases"],
+            "repetition_hits_before": load_before["hits"],
+            "repetition_worst_before": load_before["worst"],
+            "number_conflicts_before": len(conflicts_before),
+            "offenders_before": offenders_before,
+            "planned_duration_before": round(duration_before, 1),
+            "naturalness_before": nat_before,
+        }
+
+        if rejection is not None:
+            logger.warning(
+                "Polish rejected (%s, cảnh %s): %s",
+                rejection["stage"], rejection["index"], rejection["detail"][:160],
+            )
+            return {
+                **report,
+                "accepted": False,
+                "decision": "rejected_" + rejection["stage"],
+                "metrics_after": self._mechanical_metrics(scenes_vi),
+            }
+
+        for position, (vi_text, en_text) in pending.items():
+            scenes_vi[position]["text"] = vi_text
+            scenes_en[position]["text"] = en_text
+            natural = _reading_duration(len(vi_text.split()))
+            duration = min(
+                MAX_SCENE_DURATION, max(float(scenes_vi[position].get("duration") or 0.0), natural)
+            )
+            scenes_vi[position]["duration"] = duration
+            scenes_en[position]["duration"] = duration
+        self._fit_hook_window(scenes_vi, scenes_en)
+        self._fit_reading_rate(scenes_vi, scenes_en)
+
+        texts_after = [str(sc.get("text", "")) for sc in scenes_vi]
+        load_after = repetition_load(texts_after, min_scenes=REPEAT_WARN_SCENES)
+        conflicts_after = numeric_conflicts(texts_after)
+        offenders_after = sum(
+            1 for vi, en in zip(scenes_vi, scenes_en) if _scene_violations(vi, en)
+        )
+        nat_after = self._naturalness_report("\n".join(texts_after))
+        hard_clauses = {
+            "word_budget": offenders_after <= offenders_before,
+            "number_conflicts": len(conflicts_after) <= len(conflicts_before),
+            "worst_repeat": load_after["worst"] <= load_before["worst"],
+        }
+        hard_failed = [name for name, ok in hard_clauses.items() if not ok]
+        if hard_failed:
+            decision = "hard_qa_regressed:" + ",".join(hard_failed)
+        elif load_after["hits"] >= load_before["hits"]:
+            decision = "repetition_not_reduced"
+        else:
+            decision = "repetition_reduced_within_hard_qa"
+        accepted = not hard_failed and decision == "repetition_reduced_within_hard_qa"
+
+        if not accepted:
+            for position, (vi_text, en_text, duration) in enumerate(snapshot):
+                scenes_vi[position]["text"] = vi_text
+                scenes_en[position]["text"] = en_text
+                scenes_vi[position]["duration"] = duration
+                scenes_en[position]["duration"] = duration
+            # *_after fields keep describing the rewrite that was thrown away:
+            # that is the evidence for why the internal script stayed.
+
+        logger.info(
+            "Prose polish (%s): %d cảnh, repeats %d -> %d, worst %d -> %d, offenders %d -> %d, "
+            "conflicts %d -> %d, cv %.2f -> %.2f => %s%s",
+            POLISH_MODEL, total,
+            load_before["hits"], load_after["hits"],
+            load_before["worst"], load_after["worst"],
+            offenders_before, offenders_after,
+            len(conflicts_before), len(conflicts_after),
+            nat_before["cv"], nat_after["cv"],
+            "kept" if accepted else "reverted:" + decision,
+            f" notes={len(notes)}" if notes else "",
+        )
+        return {
+            **report,
+            "accepted": accepted,
+            "decision": decision,
+            "repetition_hits_after": load_after["hits"],
+            "repetition_worst_after": load_after["worst"],
+            "repeat_drop_pct": (
+                round((load_before["hits"] - load_after["hits"]) / load_before["hits"] * 100.0, 1)
+                if accepted and load_before["hits"] else 0.0
+            ),
+            "number_conflicts_after": len(conflicts_after),
+            "offenders_after": offenders_after,
+            "planned_duration_after": round(
+                sum(float(sc.get("duration") or 0.0) for sc in scenes_vi), 1
+            ),
+            "naturalness_after": nat_after,
+            "metrics_after": self._mechanical_metrics(scenes_vi),
         }
 
     def _judge(
