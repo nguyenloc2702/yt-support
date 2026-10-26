@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
-from services.algorithm_qa import MEAN_DUR_RANGE, SCENE_DUR_RANGE, WPM_RANGE
+from services.algorithm_qa import (
+    MEAN_DUR_RANGE,
+    PASS_SHORT_PCT,
+    SCENE_DUR_RANGE,
+    WPM_RANGE,
+)
 from services.hook_formulas import hook_formula_catalog, narration_laws_block
 from services.hook_scoring import score_hook
 from services.prompt_sanitizer import ensure_style_prefix
@@ -180,6 +185,18 @@ def _locked_tokens(*texts: str) -> Counter:
     return Counter(numbers + _POLISH_ACRONYM_RE.findall(joined))
 
 
+def _band_breaks(vi_words: int, en_words: int) -> Tuple[str, ...]:
+    """Which word-budget rules a scene of these two lengths breaks."""
+    kinds: List[str] = []
+    if vi_words < VI_MIN_WORDS:
+        kinds.append("vi_low")
+    elif vi_words > VI_MAX_WORDS:
+        kinds.append("vi_high")
+    if en_words > EN_MAX_WORDS:
+        kinds.append("en_high")
+    return tuple(kinds)
+
+
 def _polish_violations(
     origin_vi: str, origin_en: str, new_vi: str, new_en: str
 ) -> List[str]:
@@ -193,6 +210,15 @@ def _polish_violations(
         kinds.append(f"vi_drift:{vi_drift}")
     if en_drift > POLISH_MAX_WORDS_DRIFT:
         kinds.append(f"en_drift:{en_drift}")
+    # A +-3 drift is legal arithmetic on a scene that already sits on the band
+    # edge, and the band is what QA grades: 28 -> 31 VI words is a new offender
+    # even though the editor obeyed its own budget line. Measured live: the edit
+    # moved 2 offenders to 13 that way. A scene may inherit the band break it
+    # arrived with, never add one.
+    origin_breaks = _band_breaks(len(origin_vi.split()), len(origin_en.split()))
+    for kind in _band_breaks(len(new_vi.split()), len(new_en.split())):
+        if kind not in origin_breaks:
+            kinds.append(f"budget:{kind}")
     before, after = _locked_tokens(origin_vi, origin_en), _locked_tokens(new_vi, new_en)
     if before != after:
         kinds.append(
@@ -263,16 +289,10 @@ def _scene_violations(
     vi_scene: Dict[str, Any], en_scene: Dict[str, Any]
 ) -> Tuple[str, ...]:
     """Which budget rules this scene breaks ("" when it satisfies all of them)."""
-    vi_words = len(str(vi_scene.get("text", "")).split())
-    en_words = len(str(en_scene.get("text", "")).split())
-    kinds: List[str] = []
-    if vi_words < VI_MIN_WORDS:
-        kinds.append("vi_low")
-    elif vi_words > VI_MAX_WORDS:
-        kinds.append("vi_high")
-    if en_words > EN_MAX_WORDS:
-        kinds.append("en_high")
-    return tuple(kinds)
+    return _band_breaks(
+        len(str(vi_scene.get("text", "")).split()),
+        len(str(en_scene.get("text", "")).split()),
+    )
 
 
 def _reading_duration(word_count: int) -> float:
@@ -457,14 +477,35 @@ class ScriptFactory:
         )
 
         # Phase 8: the external prose editor is the last stage allowed to touch the
-        # words, and only if its rewrite passes the same hard QA the internal
-        # script passed and actually lowers the repetition score.
+        # words, and only if its rewrite turns no QA check that the internal script
+        # had passed and actually rewrote some of them.
+        drafted = [
+            (sc.get("text"), en.get("text"), sc.get("duration"), en.get("duration"))
+            for sc, en in zip(best.scenes_vi, best.scenes_en)
+        ]
         polish = self.polish_scenes(best.scenes_vi, best.scenes_en, on_progress)
         if polish.get("accepted"):
-            polish["score_before"] = round(best.score, 1)
+            score_before = best.score
+            polish["score_before"] = round(score_before, 1)
             score_after, breakdown, fb = self._judge(best, transcript_text, feedback_brief)
-            best.score, best.breakdown, best.judge_feedback = score_after, breakdown, fb
             polish["score_after"] = round(score_after, 1)
+            if score_after < self.min_score <= score_before:
+                # QA A01 grades chosen_score against this same floor, so a rewrite
+                # that tips a passing script under it would only be discovered at
+                # the last gate — after the money was spent. The drafted words come
+                # back; the polish report keeps the evidence.
+                for scene, en_scene, row in zip(best.scenes_vi, best.scenes_en, drafted):
+                    scene["text"], en_scene["text"] = row[0], row[1]
+                    scene["duration"], en_scene["duration"] = row[2], row[3]
+                polish["accepted"] = False
+                polish["decision"] = "judge_below_floor"
+                polish["metrics_after"] = self._mechanical_metrics(best.scenes_vi)
+                logger.warning(
+                    "Prose polish reverted: judge %.1f -> %.1f, floor %.1f",
+                    score_before, score_after, self.min_score,
+                )
+            else:
+                best.score, best.breakdown, best.judge_feedback = score_after, breakdown, fb
         best.metrics = polish.get("metrics_after") or best.metrics
 
         result = {
@@ -1768,13 +1809,22 @@ class ScriptFactory:
             "KỊCH BẢN:\n" + "\n".join(lines) + "\n\n"
             "NGÂN SÁCH TỪ của TỪNG cảnh (tuỳ chỉnh 1-5 của QUY TẮC CỨNG được hiểu là "
             "số dưới đây, KHÔNG phải dải 17-21 chung chung; viết lại đúng số từ đó, "
-            "chênh tối đa 3, không thêm câu chỉ để cho dài):\n" + "\n".join(budgets)
+            "chênh tối đa 3, không thêm câu chỉ để cho dài). Dải cứng máy chấm: VI "
+            f"{VI_MIN_WORDS}-{VI_MAX_WORDS} từ, EN tối đa {EN_MAX_WORDS} từ; cảnh nào "
+            "đã sát mép dải thì GIỮ NGUYÊN hoặc rút ngắn, tuyệt đối không nới thêm — "
+            "cảnh vượt mép bị loại khỏi bản chốt:\n" + "\n".join(budgets)
         )
         if corrections:
             prompt += (
                 "\n\nLẦN TRƯỚC bản này bị LOẠI vì phạm quy tắc ở chính các cảnh sau — "
                 "sửa đúng lỗi đó, mọi cảnh khác giữ cách viết lần trước:\n"
                 + "\n".join(f"[{index}] {detail}" for index, detail in sorted(corrections.items()))
+                + "\nMã lỗi: vi_drift/en_drift = đổi quá 3 số từ; budget:vi_high = VI "
+                f"vượt {VI_MAX_WORDS} từ, budget:vi_low = VI dưới {VI_MIN_WORDS} từ, "
+                f"budget:en_high = EN vượt {EN_MAX_WORDS} từ; locked_tokens = con số "
+                "hoặc tên viết tắt HOẶC tên riêng bị thêm/thừa/mất (trả lại đúng bộ số "
+                "liệu và tên đó, không lặp lại một con số hai lần trong cùng cảnh); "
+                "empty = cảnh trống."
             )
         return prompt
 
@@ -1848,13 +1898,16 @@ class ScriptFactory:
 
         The external editor is untrusted by construction: it does not know the
         machine constraints, so every scene it returns is checked against the
-        re-ingest contract (same indices, the scene's own word budget +-3, identical
-        numbers and all-caps names). A scene that breaks it is asked for once more
-        with the exact reason and, if it breaks again, is dropped while its chunk
-        neighbours are kept — but a rewrite that has to drop a quarter of the script
-        is not an editor, it is noise, and the whole pass is thrown away. What does
-        survive must also not regress word budget, number conflicts or the worst
-        repeated phrase, and it must lower the repetition score.
+        re-ingest contract (same indices, the scene's own word budget +-3 without
+        leaving the band it already sat in, identical numbers and all-caps names).
+        A scene that breaks it is asked for once more with the exact reason and, if
+        it breaks again, is dropped while its chunk neighbours are kept — but a
+        rewrite that has to drop a quarter of the script is not an editor, it is
+        noise, and the whole pass is thrown away. What survives is graded by the
+        scorecard, not by a taste of the editor's work: no cross-scene check that
+        the internal script passed may turn red (number conflicts, the S18 worst
+        repeated phrase, the S07 short-sentence floor), and the pass has to have
+        actually changed words.
         """
         total = len(scenes_vi)
         if not total or not scenes_en:
@@ -1989,19 +2042,35 @@ class ScriptFactory:
             1 for vi, en in zip(scenes_vi, scenes_en) if _scene_violations(vi, en)
         )
         nat_after = self._naturalness_report("\n".join(texts_after))
+        changed = sum(
+            1 for position, (vi_text, en_text) in pending.items()
+            if (vi_text, en_text) != snapshot[position][:2]
+        )
+        short_floor = PASS_SHORT_PCT * 100.0
+        # The word budget is not graded here: the per-scene contract already refused
+        # any rewrite that adds a band break, so offenders_after can only ever be
+        # offenders_before or fewer. These three are the cross-scene laws a scene by
+        # scene check cannot see.
         hard_clauses = {
-            "word_budget": offenders_after <= offenders_before,
             "number_conflicts": len(conflicts_after) <= len(conflicts_before),
             "worst_repeat": load_after["worst"] <= load_before["worst"],
+            # QA S07 grades exactly one thing: the short-sentence share against its
+            # floor. A polish that welds every punchline into a long clause must not
+            # turn that green check red. A script already under the floor cannot be
+            # pushed further down the same check, so grading the raw number here
+            # would be a gate the scorecard itself does not run.
+            "short_sentences": not (nat_before["punch_pct"] >= short_floor > nat_after["punch_pct"]),
         }
         hard_failed = [name for name, ok in hard_clauses.items() if not ok]
         if hard_failed:
             decision = "hard_qa_regressed:" + ",".join(hard_failed)
-        elif load_after["hits"] >= load_before["hits"]:
-            decision = "repetition_not_reduced"
+        elif not changed:
+            # Every scene came back byte-identical: shipping this would bump
+            # script_version and reopen Gate 1 for an unchanged script.
+            decision = "editor_changed_nothing"
         else:
-            decision = "repetition_reduced_within_hard_qa"
-        accepted = not hard_failed and decision == "repetition_reduced_within_hard_qa"
+            decision = "polish_within_hard_qa"
+        accepted = not hard_failed and decision == "polish_within_hard_qa"
 
         if not accepted:
             for position, (vi_text, en_text, duration) in enumerate(snapshot):
@@ -2013,14 +2082,16 @@ class ScriptFactory:
             # that is the evidence for why the internal script stayed.
 
         logger.info(
-            "Prose polish (%s): %d/%d cảnh viết lại, %d cảnh bị bỏ, repeats %d -> %d, worst %d -> %d, "
-            "offenders %d -> %d, conflicts %d -> %d, cv %.2f -> %.2f => %s%s",
-            POLISH_MODEL, len(pending), total, len(skipped),
+            "Prose polish (%s): %d/%d cảnh viết lại (%d cảnh đổi chữ), %d cảnh bị bỏ, "
+            "repeats %d -> %d, worst %d -> %d, offenders %d -> %d, conflicts %d -> %d, "
+            "cv %.2f -> %.2f, câu ngắn %.1f%% -> %.1f%% => %s%s",
+            POLISH_MODEL, len(pending), total, changed, len(skipped),
             load_before["hits"], load_after["hits"],
             load_before["worst"], load_after["worst"],
             offenders_before, offenders_after,
             len(conflicts_before), len(conflicts_after),
             nat_before["cv"], nat_after["cv"],
+            nat_before["punch_pct"], nat_after["punch_pct"],
             "kept" if accepted else "reverted:" + decision,
             f" notes={len(notes)}" if notes else "",
         )
@@ -2028,6 +2099,7 @@ class ScriptFactory:
             **report,
             "accepted": accepted,
             "decision": decision,
+            "scenes_changed": changed,
             "repetition_hits_after": load_after["hits"],
             "repetition_worst_after": load_after["worst"],
             "repeat_drop_pct": (

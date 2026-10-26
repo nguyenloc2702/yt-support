@@ -1378,8 +1378,9 @@ def test_run_ships_the_editors_script_and_rejudges_it(tmp_path, monkeypatch):
 
     polish = result["polish"]
     assert polish["accepted"] is True, polish
-    assert polish["decision"] == "repetition_reduced_within_hard_qa"
+    assert polish["decision"] == "polish_within_hard_qa"
     assert polish["scenes_rewritten"] == 12
+    assert polish["scenes_changed"] == 12
     assert polish["repetition_hits_before"] == 68
     # Only "hà lan" survives: it is the proper name the four identical hook lines
     # share, and the editor is not allowed to invent a different one.
@@ -1404,3 +1405,36 @@ def test_run_ships_the_editors_script_and_rejudges_it(tmp_path, monkeypatch):
     saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
     assert saved["polish"]["accepted"] is True
     assert saved["mechanical_metrics"]["repeat_phrases"] == ["hà lan"]
+
+
+def test_run_keeps_the_draft_when_the_polish_tips_the_judge_under_the_floor(
+    tmp_path, monkeypatch
+):
+    """QA A01 grades chosen_score against this same floor.
+
+    A rewrite that takes a passing script under it is not a polish: the score is
+    only discovered at the last gate, by which time the assets and the audio have
+    been paid for. The drafted words come back and the report keeps the verdict.
+    """
+    factory = _twelve_scene_factory(monkeypatch)
+    router = Router(
+        {"analyst": [9.2, 7.4], "dramatist": [7.0], "teacher": [6.0]}, polish="clean"
+    )
+    monkeypatch.setattr("pipeline.llm_client.chat_json", router)
+
+    vi, en, result = factory.run(
+        [{"start": 0, "end": 100, "text": TRANSCRIPT}],
+        target_shots=12,
+        project_dir=tmp_path,
+    )
+
+    polish = result["polish"]
+    assert polish["accepted"] is False
+    assert polish["decision"] == "judge_below_floor"
+    assert (polish["score_before"], polish["score_after"]) == (9.2, 7.4)
+    assert result["chosen_score"] == 9.2
+    assert "dòng tiền" in " ".join(sc["text"] for sc in vi)
+    assert all(len(sc["text"].split()) in range(14, 29) for sc in vi)
+    saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
+    assert saved["polish"]["accepted"] is False
+    assert saved["mechanical_metrics"] == polish["metrics_after"]

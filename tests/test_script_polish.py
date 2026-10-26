@@ -68,6 +68,15 @@ def en_line(index):
     )
 
 
+def punchy_line(index):
+    """Three sentences, two of them short: the rhythm QA S07 asks for."""
+    i = (index - 1) % len(_NOUNS)
+    return (
+        f"{_NOUNS[i]} của hãng {_VERBS[i]} ngay giữa kho hàng cũ kỹ của thành Delft. "
+        "Bốn đêm liền. Không ai hay."
+    )
+
+
 def scenes(count, vi=None, en=None, duration=6.0):
     vi = vi or vi_line
     en = en or en_line
@@ -139,6 +148,17 @@ class Editor:
                     new_vi = " ".join(new_vi.split() + _PAD[:4])
             elif self.mode == "en_long":
                 new_en = new_en.rstrip(".") + " and later"
+            elif self.mode == "en_edge_one":
+                # Legal drift (+3 words), illegal band: the scene sat one word off
+                # the EN ceiling, so the extra words make it a QA offender.
+                if index == 3:
+                    new_en = new_en.rstrip(".") + " and later"
+            elif self.mode == "flatten":
+                # A prose editor's favourite habit: weld the punch lines into one
+                # flowing sentence. Same words, no short sentence left.
+                new_vi = re.sub(
+                    r"\. ([A-ZÀ-Ỹ])", lambda m: ", " + m.group(1).lower(), new_vi
+                )
             rows.append({"index": index, "voiceover_vi": new_vi, "voiceover_en": new_en})
         if self.mode == "missing":
             rows.pop()
@@ -174,10 +194,11 @@ def test_clean_polish_is_kept_and_rewrites_every_scene(factory, polish_call):
     report = factory.polish_scenes(vi, en)
 
     assert report["accepted"] is True
-    assert report["decision"] == "repetition_reduced_within_hard_qa"
+    assert report["decision"] == "polish_within_hard_qa"
     assert report["model"] == POLISH_MODEL
     assert report["chunks"] == 2 and report["calls"] == 2
     assert report["scenes_rewritten"] == 10
+    assert report["scenes_changed"] == 10
     assert report["repetition_hits_before"] > 0
     assert report["repetition_hits_after"] == 0
     assert report["repeat_drop_pct"] == 100.0
@@ -299,7 +320,8 @@ def test_an_extra_scene_rejects_the_whole_polish(factory, polish_call):
     assert [sc["text"] for sc in vi] == before
 
 
-def test_a_polish_that_breaks_the_word_budget_is_reverted(factory, polish_call):
+def test_a_polish_that_walks_every_scene_to_the_band_edge_is_refused(factory, polish_call):
+    """The live failure: 2 offenders became 13 because +3 words is legal drift."""
     vi, en = scenes(9)
     before_en = [sc["text"] for sc in en]
     polish_call(Editor("en_long"))
@@ -308,12 +330,67 @@ def test_a_polish_that_breaks_the_word_budget_is_reverted(factory, polish_call):
 
     assert report["accepted"] is False
     assert report["offenders_before"] == 0
-    assert report["decision"] == "hard_qa_regressed:word_budget"
-    assert report["offenders_after"] > report["offenders_before"]
+    assert report["decision"] == "rejected_scene_drops"
+    assert report["scenes_skipped"] == 5
+    assert "budget:en_high" in report["skipped"][0]["detail"]
     assert [sc["text"] for sc in en] == before_en
 
 
-def test_a_polish_that_keeps_the_repeats_is_not_worth_shipping(factory, polish_call):
+def test_a_scene_pushed_over_the_band_edge_is_dropped_and_the_rest_ships(
+    factory, polish_call
+):
+    """One legal-drift-but-over-band line must cost that line, not the script."""
+    vi, en = scenes(9)
+    before_en = [sc["text"] for sc in en]
+    polish_call(Editor("en_edge_one"))
+
+    report = factory.polish_scenes(vi, en)
+
+    assert report["accepted"] is True, report
+    assert report["scenes_rewritten"] == 8
+    assert report["skipped"][0]["detail"].startswith("budget:en_high")
+    assert report["offenders_after"] == report["offenders_before"] == 0
+    assert en[2]["text"] == before_en[2]
+
+
+def test_a_polish_that_welds_the_punch_lines_shut_is_reverted(factory, polish_call):
+    """QA S07 grades the short-sentence share: green before, red after is a regress."""
+    vi, en = scenes(9, vi=punchy_line)
+    before = [sc["text"] for sc in vi]
+    polish_call(Editor("flatten"))
+
+    report = factory.polish_scenes(vi, en)
+
+    assert report["naturalness_before"]["punch_pct"] >= 35.0
+    assert report["naturalness_after"]["punch_pct"] < 35.0
+    assert report["accepted"] is False
+    assert report["decision"] == "hard_qa_regressed:short_sentences"
+    assert [sc["text"] for sc in vi] == before
+
+
+def test_a_polish_under_an_already_red_s07_is_still_judged_on_qa(factory, polish_call):
+    """The script came in under the S07 floor, so the editor cannot regress it.
+
+    This is the live shape: the draft sits at 28% short sentences and the prose
+    editor naturally lengthens clauses. Grading the raw number would be a gate
+    the scorecard does not run, and it is what threw away a 115-scene rewrite.
+    """
+    vi, en = scenes(9, vi=punchy_line)
+    polish_call(Editor("flatten"))
+
+    lenient = ScriptFactory()
+    report = lenient.polish_scenes(vi, en)
+    assert report["decision"] == "hard_qa_regressed:short_sentences"
+
+    vi2, en2 = scenes(9)
+    polish_call(Editor("clean"))
+    shipped = ScriptFactory().polish_scenes(vi2, en2)
+    assert shipped["naturalness_before"]["punch_pct"] < 35.0
+    assert shipped["naturalness_after"]["punch_pct"] < 35.0
+    assert shipped["accepted"] is True
+
+
+def test_a_polish_that_changes_no_words_is_not_worth_shipping(factory, polish_call):
     vi, en = scenes(10)
     before = [sc["text"] for sc in vi]
     polish_call(Editor("echo"))
@@ -321,7 +398,8 @@ def test_a_polish_that_keeps_the_repeats_is_not_worth_shipping(factory, polish_c
     report = factory.polish_scenes(vi, en)
 
     assert report["accepted"] is False
-    assert report["decision"] == "repetition_not_reduced"
+    assert report["decision"] == "editor_changed_nothing"
+    assert report["scenes_changed"] == 0
     assert report["rejection"] is None
     assert report["repetition_hits_after"] == report["repetition_hits_before"]
     assert [sc["text"] for sc in vi] == before
