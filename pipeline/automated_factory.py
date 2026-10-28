@@ -134,6 +134,19 @@ def deduplicate_vtt_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, A
     return deduped
 
 
+def voice_language(voice: str) -> str:
+    """Language a TTS voice id speaks.
+
+    Voice ids name their language differently per provider — edge uses
+    ``vi-VN-...``/``en-US-...``, xKiro appends ``-vietnamese``. Testing for the
+    literal word "vietnamese" read every edge VI voice as English.
+    """
+    v = (voice or "").strip().lower()
+    if "english" in v or v.startswith("en"):
+        return "en"
+    return "vi"
+
+
 def send_voice_previews(notifier: TelegramNotifier, job_id: str, project_dir: Path, target_lang: str = "vi") -> None:
     """Generates 3 short voice samples (Nam Minh, Hoai My, Guy) and sends them to Telegram."""
     if not notifier or not notifier.is_configured:
@@ -734,7 +747,7 @@ class AutomatedFactory:
                     },
                 )
 
-                if chosen_voice and "vietnamese" not in chosen_voice:
+                if chosen_voice and voice_language(chosen_voice) == "en":
                     shots = en_scenes
                 else:
                     shots = vi_scenes
@@ -1415,31 +1428,75 @@ class AutomatedFactory:
                 report.local_wpm_mean, len(report.errors), len(report.warnings),
             )
 
-        def _apply_timing(plan: List[Dict[str, Any]], report) -> None:
+        def _apply_timing(plan: List[Dict[str, Any]], report) -> bool:
+            """Copy word windows onto the plan, refusing a failed audit.
+
+            When the audit reports errors the text->audio match is untrustworthy
+            (WER too high, nothing recognized): its windows collapse some scenes
+            to 0s and stretch others, so the plan keeps its script-stage
+            durations until the audio is regenerated.
+            """
+            if getattr(report, "errors", None):
+                logger.warning(
+                    "Audio audit %s failed (%s) — keeping planned durations, no word timeline",
+                    report.language, "; ".join(report.errors)[:200],
+                )
+                return False
             by_index = {
                 int(sc.get("index", i + 1)): sc for i, sc in enumerate(plan)
             }
+            windows = {
+                int(win.get("index", i + 1)): win
+                for i, win in enumerate(getattr(report, "word_timeline", None) or [])
+            }
             for entry in report.timing_map:
                 sc = by_index.get(int(entry["index"]))
-                if sc is not None:
-                    # Keep the script-stage estimate: the QA scorecard grades the
-                    # planned durations (the algorithm law), while `duration`
-                    # becomes the real narration audio (audio-first timeline).
-                    if "planned_duration" not in sc:
-                        sc["planned_duration"] = float(sc.get("duration", 0.0))
+                if sc is None:
+                    continue
+                # Keep the script-stage estimate: the QA scorecard grades the
+                # planned durations (the algorithm law), while `duration`
+                # becomes the real narration audio (audio-first timeline).
+                if "planned_duration" not in sc:
+                    sc["planned_duration"] = float(sc.get("duration", 0.0))
+                win = windows.get(int(entry["index"]))
+                if win:
+                    sc["duration"] = float(win["duration"])
+                    sc["audio_start"] = float(win["start"])
+                    sc["audio_end"] = float(win["end"])
+                    if win.get("words"):
+                        sc["audio_words"] = win["words"]
+                else:
                     sc["duration"] = float(entry["duration_sec"])
+            return True
 
         for lang, report in reports.items():
             if lang not in plans:
                 continue
-            _apply_timing(plans[lang], report)
+            if not _apply_timing(plans[lang], report):
+                (project_dir / f"narration_words_{lang}.json").unlink(missing_ok=True)
+                continue
             plan_files[lang].write_text(
                 json.dumps(plans[lang], indent=2, ensure_ascii=False), encoding="utf-8"
             )
+            if getattr(report, "word_timeline", None):
+                (project_dir / f"narration_words_{lang}.json").write_text(
+                    json.dumps(
+                        {
+                            "language": lang,
+                            "audio_path": report.audio_path,
+                            "total_sec": report.audio_duration_sec,
+                            "cut_policy": "mid_pause",
+                            "scenes": report.word_timeline,
+                        },
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
 
         voice_file = project_dir / "voice.txt"
         voice = voice_file.read_text(encoding="utf-8").strip() if voice_file.is_file() else ""
-        active_lang = "en" if (voice and "vietnamese" not in voice) else "vi"
+        active_lang = voice_language(voice) if voice else "vi"
         active_report = reports.get(active_lang)
         active_path = project_dir / "shots_plan.json"
         if active_report and active_path.is_file():
@@ -1447,8 +1504,7 @@ class AutomatedFactory:
                 active_plan = json.loads(active_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 active_plan = plans.get(active_lang)
-            if isinstance(active_plan, list) and active_plan:
-                _apply_timing(active_plan, active_report)
+            if isinstance(active_plan, list) and active_plan and _apply_timing(active_plan, active_report):
                 active_path.write_text(
                     json.dumps(active_plan, indent=2, ensure_ascii=False), encoding="utf-8"
                 )

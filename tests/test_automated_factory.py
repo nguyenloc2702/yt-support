@@ -294,6 +294,252 @@ def test_gate2_audio_audit_applies_audio_first_timing(tmp_path, monkeypatch):
     assert [sc["duration"] for sc in asm.shots] == [6.2, 4.4]
 
 
+def test_gate2_active_plan_follows_edge_voice_language(tmp_path, monkeypatch):
+    """An edge VI voice id (vi-VN-*) must select the VI windows for the render plan.
+
+    The old check only recognized the word "vietnamese" in xKiro voice ids, so
+    every edge VI voice sent the EN word windows into shots_plan.json and the
+    rendered cuts drifted from the Vietnamese narration.
+    """
+    import types
+
+    import pipeline.audio_audit as audit_mod
+    from pipeline.audio_audit import AudioAuditResult
+
+    windows = {"vi": [6.2, 4.4], "en": [5.0, 5.6]}
+
+    def fake_audit(audio_path, plan, language, **kw):
+        d1, d2 = windows[language]
+        return AudioAuditResult(
+            language=language,
+            audio_path=str(audio_path),
+            audio_duration_sec=d1 + d2,
+            plan_duration_sec=10.0,
+            duration_drift=0.0,
+            wer=0.0,
+            word_accuracy=1.0,
+            matched_words=4,
+            expected_words=4,
+            asr_words=4,
+            local_wpm_mean=200.0,
+            local_wpm_std=2.0,
+            global_wpm=200.0,
+            pause_count=1,
+            pause_total_sec=0.2,
+            pause_ratio=0.02,
+            pause_histogram={},
+            timing_map=[
+                {"index": 1, "start_sec": 0.0, "duration_sec": d1, "hold_sec": d1},
+                {"index": 2, "start_sec": d1, "duration_sec": d2, "hold_sec": d2},
+            ],
+        )
+
+    monkeypatch.setattr(audit_mod, "audit_audio", fake_audit)
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs", db_path=tmp_path / "jobs.sqlite3"
+    )
+
+    for voice, lang in (
+        ("vi-VN-NamMinhNeural", "vi"),
+        ("confident-male-vietnamese", "vi"),
+        ("en-US-ChristopherNeural", "en"),
+    ):
+        project_dir = tmp_path / voice
+        project_dir.mkdir()
+        plan = [
+            {"index": 1, "text": "cảnh một", "duration": 5.0},
+            {"index": 2, "text": "cảnh hai", "duration": 5.0},
+        ]
+        for name in ("shots_plan_vi.json", "shots_plan_en.json", "shots_plan.json"):
+            (project_dir / name).write_text(json.dumps(plan), encoding="utf-8")
+        (project_dir / "voice.txt").write_text(voice, encoding="utf-8")
+        (project_dir / "audio_vi_full.mp3").write_bytes(b"ID3")
+        (project_dir / "audio_en_full.mp3").write_bytes(b"ID3")
+
+        asm = types.SimpleNamespace(set_shots_plan=lambda _shots: None)
+        factory._audit_gate2_audio("job1", project_dir, asm)
+
+        active = json.loads((project_dir / "shots_plan.json").read_text(encoding="utf-8"))
+        assert [sc["duration"] for sc in active] == windows[lang], voice
+
+
+def test_gate2_word_windows_drive_plan_and_artifact(tmp_path, monkeypatch):
+    import pipeline.audio_audit as audit_mod
+    from pipeline.audio_audit import AudioAuditResult
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    plan = [
+        {"index": 1, "text": "x cảnh một", "duration": 5.0},
+        {"index": 2, "text": "x cảnh hai", "duration": 5.0},
+    ]
+    for name in ("shots_plan_vi.json", "shots_plan_en.json", "shots_plan.json"):
+        (project_dir / name).write_text(json.dumps(plan), encoding="utf-8")
+    (project_dir / "voice.txt").write_text("vi-VN-NamMinhTri", encoding="utf-8")
+    (project_dir / "audio_vi_full.mp3").write_bytes(b"ID3")
+    (project_dir / "audio_en_full.mp3").write_bytes(b"ID3")
+
+    words = [
+        {"w": "cảnh", "start": 0.0, "end": 0.3, "rel": 0.0},
+        {"w": "một", "start": 0.3, "end": 0.6, "rel": 0.3},
+    ]
+    word_timeline = [
+        {"index": 1, "start": 0.0, "end": 4.8, "duration": 4.8,
+         "speech_start": 0.0, "speech_end": 4.6, "words": words},
+        {"index": 2, "start": 4.8, "end": 10.2, "duration": 5.4,
+         "speech_start": 5.0, "speech_end": 10.2, "words": []},
+    ]
+    timing_map = [
+        {"index": 1, "start_sec": 0.0, "duration_sec": 4.8, "hold_sec": 4.8},
+        {"index": 2, "start_sec": 5.0, "duration_sec": 5.4, "hold_sec": 5.4},
+    ]
+
+    def fake_audit(audio_path, plan, language, **kw):
+        return AudioAuditResult(
+            language=language,
+            audio_path=str(audio_path),
+            audio_duration_sec=10.2,
+            plan_duration_sec=10.0,
+            duration_drift=0.02,
+            wer=0.0,
+            word_accuracy=1.0,
+            matched_words=8,
+            expected_words=8,
+            asr_words=8,
+            local_wpm_mean=206.0,
+            local_wpm_std=4.0,
+            global_wpm=206.0,
+            pause_count=1,
+            pause_total_sec=0.4,
+            pause_ratio=0.04,
+            pause_histogram={},
+            timing_map=[dict(entry) for entry in timing_map],
+            word_timeline=[dict(entry) for entry in word_timeline],
+        )
+
+    monkeypatch.setattr(audit_mod, "audit_audio", fake_audit)
+
+    class FakeASM:
+        def __init__(self):
+            self.shots = None
+
+        def set_shots_plan(self, shots):
+            self.shots = shots
+
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs", db_path=tmp_path / "jobs.sqlite3"
+    )
+    factory._audit_gate2_audio("job1", project_dir, FakeASM())
+
+    for lang in ("vi", "en"):
+        saved = json.loads(
+            (project_dir / f"shots_plan_{lang}.json").read_text(encoding="utf-8")
+        )
+        # Durations are the word windows, not the clamped timing-map holds.
+        assert [sc["duration"] for sc in saved] == [4.8, 5.4]
+        assert [sc["planned_duration"] for sc in saved] == [5.0, 5.0]
+        assert saved[0]["audio_start"] == 0.0
+        assert saved[0]["audio_end"] == 4.8
+        assert saved[0]["audio_words"][1]["rel"] == 0.3
+        assert "audio_words" not in saved[1]
+
+        artifact = json.loads(
+            (project_dir / f"narration_words_{lang}.json").read_text(encoding="utf-8")
+        )
+        assert artifact["cut_policy"] == "mid_pause"
+        assert artifact["total_sec"] == 10.2
+        assert artifact["scenes"] == word_timeline
+
+
+def test_gate2_failed_audit_keeps_plan_and_drops_word_artifact(tmp_path, monkeypatch):
+    import pipeline.audio_audit as audit_mod
+    from pipeline.audio_audit import AudioAuditResult
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    plan = [
+        {"index": 1, "text": "x cảnh một", "duration": 5.0},
+        {"index": 2, "text": "x cảnh hai", "duration": 5.0},
+    ]
+    for name in ("shots_plan_vi.json", "shots_plan_en.json", "shots_plan.json"):
+        (project_dir / name).write_text(json.dumps(plan), encoding="utf-8")
+    (project_dir / "voice.txt").write_text("vi-VN-NamMinhTri", encoding="utf-8")
+    (project_dir / "audio_vi_full.mp3").write_bytes(b"ID3")
+    (project_dir / "audio_en_full.mp3").write_bytes(b"ID3")
+    # Artifacts from an earlier, aligned run must not survive a failed audit.
+    for lang in ("vi", "en"):
+        (project_dir / f"narration_words_{lang}.json").write_text(
+            '{"scenes": []}', encoding="utf-8"
+        )
+
+    # Windows an unaligned transcript produces: one collapsed scene, one stretched.
+    broken_windows = [
+        {"index": 1, "start": 0.0, "end": 0.5, "duration": 0.5,
+         "speech_start": 0.0, "speech_end": 0.5, "words": []},
+        {"index": 2, "start": 0.5, "end": 62.0, "duration": 61.5,
+         "speech_start": 1.0, "speech_end": 62.0, "words": []},
+    ]
+
+    def fake_audit(audio_path, plan, language, **kw):
+        return AudioAuditResult(
+            language=language,
+            audio_path=str(audio_path),
+            audio_duration_sec=62.0,
+            plan_duration_sec=10.0,
+            duration_drift=5.2,
+            wer=0.676,
+            word_accuracy=0.324,
+            matched_words=498,
+            expected_words=1304,
+            asr_words=877,
+            local_wpm_mean=163.5,
+            local_wpm_std=10.0,
+            global_wpm=133.6,
+            pause_count=3,
+            pause_total_sec=20.0,
+            pause_ratio=0.32,
+            pause_histogram={},
+            timing_map=[
+                {"index": 1, "start_sec": 0.0, "duration_sec": 0.5, "hold_sec": 0.5},
+                {"index": 2, "start_sec": 0.5, "duration_sec": 61.5, "hold_sec": 61.5},
+            ],
+            word_timeline=[dict(entry) for entry in broken_windows],
+            errors=["WER 67.6% quá cao — giọng đọc có thể sai từ/số liệu"],
+        )
+
+    monkeypatch.setattr(audit_mod, "audit_audio", fake_audit)
+
+    class FakeASM:
+        def __init__(self):
+            self.calls = 0
+
+        def set_shots_plan(self, shots):
+            self.calls += 1
+
+    factory = AutomatedFactory(
+        output_dir=tmp_path / "runs", db_path=tmp_path / "jobs.sqlite3"
+    )
+    asm = FakeASM()
+    reports = factory._audit_gate2_audio("job1", project_dir, asm)
+
+    assert set(reports) == {"vi", "en"}
+    for lang in ("vi", "en"):
+        saved = json.loads(
+            (project_dir / f"shots_plan_{lang}.json").read_text(encoding="utf-8")
+        )
+        # Script-stage durations are untouched: no 0.5s/61.5s windows land.
+        assert [sc["duration"] for sc in saved] == [5.0, 5.0]
+        assert "audio_start" not in saved[0]
+        assert "planned_duration" not in saved[0]
+        assert (project_dir / f"audio_sync_{lang}.json").is_file()
+        assert not (project_dir / f"narration_words_{lang}.json").exists()
+
+    active = json.loads((project_dir / "shots_plan.json").read_text(encoding="utf-8"))
+    assert [sc["duration"] for sc in active] == [5.0, 5.0]
+    assert asm.calls == 0
+
+
 def test_gate2_audio_audit_skips_missing_audio(tmp_path):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()

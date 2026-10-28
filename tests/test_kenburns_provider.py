@@ -126,8 +126,9 @@ def test_ref_image_copy_and_dynamic_kenburns_duration(kb_provider, tmp_path, mon
     assert "s=1920x1080" in graph
     assert "scale=2304:1296" in graph
     assert "crop=2304:1296" in graph
-    # 7s -> 175 frames split around the mid-clip reframe cut
-    assert "d=87" in graph and "d=88" in graph
+    # 7s at 24fps -> one continuous 168-frame move, no mid-clip cut
+    assert "d=168" in graph
+    assert "concat=n=2" not in graph
     assert f"{duration:.2f}" in captured_cmds[0]
 
 
@@ -138,9 +139,9 @@ def test_camera_moves_vary_between_shots():
     assert len(set(short)) == len(short)
     long = [build_kenburns_filter(seed, 8.0) for seed in range(6)]
     assert len(set(long)) == len(long)
-    # Long shots cut to a second framing mid-clip; short ones do not.
-    assert all("concat=n=2" in g for g in long)
-    assert all("concat=n=2" not in g for g in short)
+    # Every shot is one continuous move: a reframe cut mid-clip read as a jump.
+    assert all("concat=n=2" not in g for g in short + long)
+    assert all(g.count("zoompan=") == 1 for g in short + long)
 
 
 def test_duration_clamped_between_2_and_15(kb_provider, tmp_path, monkeypatch):
@@ -163,20 +164,21 @@ def test_duration_clamped_between_2_and_15(kb_provider, tmp_path, monkeypatch):
         prompt="scene", out_path=out, session_file=None, ref_image=ref, duration=60.0
     )
     assert res.ok is True
-    # 60s clamped to 15s -> 375 frames, split 187/188 around the reframe cut
+    # 60s clamped to 15s -> one 360-frame move
     graph = captured_cmds[0][captured_cmds[0].index("-filter_complex") + 1]
-    assert "d=187" in graph and "d=188" in graph
+    assert "d=360" in graph
 
 
-def test_ink_boil_wobbles_on_a_stepped_hold():
-    """Flat explainer art only reads as animated when the ink line moves, so
-    every camera move carries a stepped wobble clamped inside the canvas."""
-    from services.image_kenburns_provider import BOIL_HOLD_FRAMES, build_kenburns_filter
+def test_camera_move_is_smooth_without_ink_boil():
+    """The owner judged the stepped ink wobble as jitter, so each move must be a
+    single monotonic expression with no per-frame offset."""
+    from services.image_kenburns_provider import build_kenburns_filter
 
     graph = build_kenburns_filter(3, 4.0)
-    assert f"floor(on/{BOIL_HOLD_FRAMES})" in graph
-    assert "min(max(" in graph
-    # The wobble differs per shot, otherwise every clip boils in lockstep.
+    assert "floor(on/" not in graph
+    assert "sin(" not in graph
+    assert "min(max(" not in graph
+    # Motion still differs per shot, otherwise every clip moves identically.
     assert build_kenburns_filter(3, 4.0) != build_kenburns_filter(4, 4.0)
 
 
@@ -225,7 +227,7 @@ def test_pose_keyframes_become_a_multi_input_blend(kb_provider, tmp_path, monkey
     assert f"xfade=transition=fade:duration={POSE_BLEND_SECONDS:.2f}" in graph
     assert "[2:v]" in graph
     # xfade needs a declared constant frame rate on both inputs
-    assert "setpts=PTS-STARTPTS,fps=25" in graph
+    assert "setpts=PTS-STARTPTS,fps=24" in graph
 
 
 def test_pose_blend_is_skipped_when_edits_fail(kb_provider, tmp_path, monkeypatch):

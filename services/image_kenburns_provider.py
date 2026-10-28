@@ -28,7 +28,9 @@ from services.prompt_sanitizer import (
 
 logger = logging.getLogger("image_kenburns_provider")
 
-KENBURNS_FPS = 25
+# The assembler renders the final film at 24fps; rendering shots at any other
+# rate makes it resample, and the duplicated/dropped frames read as judder.
+KENBURNS_FPS = 24
 KENBURNS_WIDTH = 2304
 KENBURNS_HEIGHT = 1296
 KENBURNS_OUTPUT = "1920x1080"
@@ -42,13 +44,6 @@ KENBURNS_MOTIONS = (
     "pan_up",
     "pan_down",
 )
-# Shots longer than this get a mid-clip reframe cut so the image changes
-# framing while the narration continues.
-REFRAAME_CUT_MIN_SECONDS = 5.5
-# Hand-drawn "boil": the ink line wobbles every few frames, which is what makes
-# flat explainer art read as animated instead of as a frozen still.
-BOIL_PIXELS = 3
-BOIL_HOLD_FRAMES = 3
 # One drawing cannot move, so each shot is drawn in a few poses and blended:
 # the same character visibly changes action across the clip.
 POSES_PER_SHOT = 3
@@ -69,15 +64,14 @@ def _shot_seed(out_path: Path) -> int:
     return sum(out_path.stem.encode("utf-8")) % 97
 
 
-def _boil_expr(seed: int, phase: float) -> str:
-    """Stepped pseudo-random offset in input pixels, recomputed every hold."""
-    rate = 12.9898 + (seed % 7) * 0.73 + phase
-    return f"{BOIL_PIXELS}*sin(floor(on/{BOIL_HOLD_FRAMES})*{rate:.4f})"
+def _zoompan_filter(motion: str, frames: int) -> str:
+    """zoompan expression for one camera move over `frames` output frames.
 
-
-def _zoompan_filter(motion: str, frames: int, seed: int = 0) -> str:
-    """zoompan expression for one camera move over `frames` output frames."""
-    progress = f"(on/{max(1, frames - 1)})"
+    Progress is eased in and out: a linear move starts and stops at full speed,
+    which on a still reads as a step at both ends of the shot.
+    """
+    p = f"(on/{max(1, frames - 1)})"
+    progress = f"({p}*{p}*(3-2*{p}))"
     center_x = "(iw-iw/zoom)/2"
     center_y = "(ih-ih/zoom)/2"
     if motion == "zoom_in":
@@ -94,9 +88,6 @@ def _zoompan_filter(motion: str, frames: int, seed: int = 0) -> str:
         z, x, y = "1.22", center_x, f"(ih-ih/zoom)*(1-{progress})"
     else:  # zoom_diag
         z, x, y = f"(1.08+0.22*{progress})", f"(iw-iw/zoom)*{progress}", f"(ih-ih/zoom)*(1-{progress})"
-    # Clamp after wobbling so the crop never runs past the canvas edge.
-    x = f"min(max(({x})+({_boil_expr(seed, 0.0)}),0),iw-iw/zoom)"
-    y = f"min(max(({y})+({_boil_expr(seed, 5.1)}),0),ih-ih/zoom)"
     return (
         f"zoompan=z='{z}':x='{x}':y='{y}'"
         f":d={frames}:s={KENBURNS_OUTPUT}:fps={KENBURNS_FPS}"
@@ -104,7 +95,7 @@ def _zoompan_filter(motion: str, frames: int, seed: int = 0) -> str:
 
 
 def build_kenburns_filter(seed: int, duration: float, image_count: int = 1) -> str:
-    """Return an ffmpeg filter_complex graph: one cover crop plus 1-2 moves.
+    """Return an ffmpeg filter_complex graph: one cover crop plus one camera move.
 
     The source image is cover-cropped to the overscan canvas (never stretched),
     so pans have real room to travel and faces keep their proportions. With
@@ -121,24 +112,10 @@ def build_kenburns_filter(seed: int, duration: float, image_count: int = 1) -> s
     if image_count > 1:
         return _pose_graph(seed, duration, image_count, cover)
 
-    first = KENBURNS_MOTIONS[seed % len(KENBURNS_MOTIONS)]
-
-    if duration < REFRAAME_CUT_MIN_SECONDS:
-        return (
-            f"[0:v]{cover},{_zoompan_filter(first, total_frames, seed)},"
-            f"format=yuv420p[v]"
-        )
-
-    frames_a = total_frames // 2
-    frames_b = total_frames - frames_a
-    second = KENBURNS_MOTIONS[(seed + 3) % len(KENBURNS_MOTIONS)]
+    motion = KENBURNS_MOTIONS[seed % len(KENBURNS_MOTIONS)]
     return (
-        f"[0:v]{cover},split=2[a][b];"
-        f"[a]{_zoompan_filter(first, frames_a, seed)},trim=end_frame={frames_a},"
-        f"setpts=PTS-STARTPTS[va];"
-        f"[b]{_zoompan_filter(second, frames_b, seed + 1)},trim=end_frame={frames_b},"
-        f"setpts=PTS-STARTPTS[vb];"
-        f"[va][vb]concat=n=2:v=1:a=0,format=yuv420p[v]"
+        f"[0:v]{cover},{_zoompan_filter(motion, total_frames)},"
+        f"format=yuv420p[v]"
     )
 
 
@@ -151,7 +128,7 @@ def _pose_graph(seed: int, duration: float, image_count: int, cover: str) -> str
     for i in range(image_count):
         motion = KENBURNS_MOTIONS[(seed + i * 2) % len(KENBURNS_MOTIONS)]
         parts.append(
-            f"[{i}:v]{cover},{_zoompan_filter(motion, frames, seed + i)},"
+            f"[{i}:v]{cover},{_zoompan_filter(motion, frames)},"
             # xfade rejects a stream without an explicit constant frame rate.
             f"trim=end_frame={frames},setpts=PTS-STARTPTS,fps={KENBURNS_FPS},setsar=1[p{i}]"
         )

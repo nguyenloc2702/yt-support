@@ -79,9 +79,12 @@ def test_clean_audio_matches_plan(tmp_path):
     assert 195 <= result.local_wpm_mean <= 214
     assert result.pause_count == 1
     assert result.pause_histogram["0.30-0.60"] == 1
-    # Scene 1 holds through the 0.4s inter-scene pause (audio-first timing).
-    assert [t["duration_sec"] for t in result.timing_map] == [5.91, 5.51]
-    assert sum(t["hold_sec"] for t in result.timing_map) == pytest.approx(duration, abs=0.02)
+    # Scene 1 speaks until 5.51s and scene 2 starts at 5.91s, so the cut sits
+    # in the middle of the 0.4s pause (5.71s) instead of on a spoken word.
+    assert [t["duration_sec"] for t in result.timing_map] == [5.71, 5.71]
+    assert sum(t["duration_sec"] for t in result.timing_map) == pytest.approx(duration, abs=0.02)
+    assert result.word_timeline[0]["end"] == pytest.approx(5.71, abs=0.01)
+    assert result.word_timeline[0]["words"][0]["rel"] == 0.0
     assert result.errors == []
     assert not any("WER" in w for w in result.warnings)
 
@@ -112,17 +115,21 @@ def test_missing_scene_is_flagged(tmp_path):
     assert result.wer >= 0.4
 
 
-def test_total_drift_and_timing_map_clamp(tmp_path):
+def test_long_audio_keeps_exact_windows_and_warns_out_of_band(tmp_path):
     plan = _plan(n=2, duration=5.2)
     words, _ = _fake_timings([plan[0]["text"]], word_dur=0.5)
     result = audit_audio(
         _audio(tmp_path), plan, "vi",
         transcriber=_transcriber(words, 100.0),
     )
-    # 36 words * 0.5 = 18s vs 10.4s plan -> drift beyond the error threshold
+    # 19 words * 0.5 = 9.5s vs 10.4s plan -> drift beyond the error threshold
     assert result.duration_drift > 0.25
     assert any("lệch plan" in e for e in result.errors)
-    assert all(4.0 <= t["duration_sec"] <= 8.0 for t in result.timing_map)
+    # No 4-8s clamp: the windows are the real audio spans and still tile the
+    # track, because a clamp would shift every later scene against the voice.
+    assert [t["duration_sec"] for t in result.timing_map] == pytest.approx([9.5, 90.5], abs=0.02)
+    assert sum(t["duration_sec"] for t in result.timing_map) == pytest.approx(100.0, abs=0.02)
+    assert any("trên ngưỡng vật lý 10.5s" in w for w in result.warnings)
 
 
 def test_rate_fit_sidecar_drives_naturalness(tmp_path):
@@ -204,6 +211,7 @@ def test_save_and_load_roundtrip(tmp_path):
     assert len(loaded.scenes) == len(result.scenes)
     assert loaded.scenes[1].duration_sec == result.scenes[1].duration_sec
     assert loaded.timing_map == result.timing_map
+    assert loaded.word_timeline == result.word_timeline
     assert load_audio_audit(tmp_path / "missing.json") is None
 
 

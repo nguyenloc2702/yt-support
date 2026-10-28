@@ -10,6 +10,8 @@ Gate 2:
 - the TTS rate-fit sidecar (native WPM / atempo) so an over-stretched voice is
   visible before approval
 - an audio-first timing map the Gate 2 handler can copy onto the shot plan
+- a word-level window timeline (cuts land in the pauses between scenes) that
+  carries per-word timings for anything keyed to the spoken words
 
 The audit is advisory: it returns warnings/errors instead of raising, and the
 Gate 2 human approval stays the hard gate.
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
+from pipeline.word_timing import build_scene_windows, summarize_windows
 
 logger = get_logger(__name__)
 
@@ -43,8 +46,6 @@ def wpm_band(language: str) -> Tuple[float, float, float]:
     if (language or "").lower().startswith("en"):
         return EN_TARGET_WPM, EN_MIN_WPM, EN_MAX_WPM
     return TARGET_WPM, MIN_WPM, MAX_WPM
-SCENE_MIN_DUR = 4.0
-SCENE_MAX_DUR = 8.0
 MIN_PAUSE_SEC = 0.15
 PAUSE_BUCKETS = (
     ("0.15-0.30", 0.15, 0.30),
@@ -155,6 +156,7 @@ class AudioAuditResult:
     naturalness: Dict[str, Any] = field(default_factory=dict)
     scenes: List[SceneSync] = field(default_factory=list)
     timing_map: List[Dict[str, Any]] = field(default_factory=list)
+    word_timeline: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     transcriber: str = "faster-whisper"
@@ -399,33 +401,34 @@ def audit_audio(
             missing=missing,
         ))
 
-    # Audio-first timing: a shot holds until the next scene starts, so inter-scene
-    # pauses are absorbed by the shot instead of vanishing from the plan.
+    # Audio-first timing: a shot holds exactly as long as the narration takes,
+    # and each cut sits in the pause before the next scene's first word. The
+    # windows tile the whole track, so the plan sums to the approved audio.
+    word_timeline = build_scene_windows(
+        ref_scene_slices, ref_tokens, mapping, audio_duration
+    )
+    windows = word_timeline["scenes"]
+    # The plan may number its scenes; keep the plan's ids so Gate 2 can match.
+    for pos, (win, plan_scene) in enumerate(zip(windows, plan)):
+        win["index"] = int(plan_scene.get("index", pos + 1))
+    scene_by_index = {sc.index: sc for sc in scenes}
+
     timing_map: List[Dict[str, Any]] = []
-    clamped = 0
-    for i, sc in enumerate(scenes):
-        if sc.missing:
-            hold = sc.plan_duration_sec
-        elif i + 1 < len(scenes):
-            hold = max(0.0, scenes[i + 1].start_sec - sc.start_sec)
-        else:
-            hold = max(0.0, audio_duration - sc.start_sec)
-        target_dur = min(SCENE_MAX_DUR, max(SCENE_MIN_DUR, hold))
-        if abs(target_dur - hold) > 0.05:
-            clamped += 1
+    for win, plan_scene in zip(windows, plan):
+        idx = int(win["index"])
+        sc = scene_by_index.get(idx)
         timing_map.append({
-            "index": sc.index,
-            "start_sec": sc.start_sec,
-            "end_sec": sc.end_sec,
-            "audio_duration_sec": sc.duration_sec,
-            "plan_duration_sec": sc.plan_duration_sec,
-            "hold_sec": round(hold, 2),
-            "duration_sec": round(target_dur, 2),
-            "drift": sc.drift,
+            "index": idx,
+            "start_sec": sc.start_sec if sc else win["start"],
+            "end_sec": sc.end_sec if sc else win["end"],
+            "audio_duration_sec": sc.duration_sec if sc else win["duration"],
+            "plan_duration_sec": round(float(plan_scene.get("duration", 0.0)), 2),
+            "hold_sec": win["duration"],
+            "duration_sec": win["duration"],
+            "drift": sc.drift if sc else 0.0,
         })
 
-    if clamped:
-        warnings.append(f"{clamped} cảnh có thời lượng giữ khung ngoài 4-8s (đã kẹp trong timing map)")
+    warnings.extend(summarize_windows(windows))
 
     valid_wpm = [sc.wpm for sc in scenes if sc.wpm > 0 and not sc.missing]
     local_wpm_mean = statistics.fmean(valid_wpm) if valid_wpm else 0.0
@@ -510,6 +513,7 @@ def audit_audio(
         naturalness=naturalness,
         scenes=scenes,
         timing_map=timing_map,
+        word_timeline=windows,
         warnings=warnings,
         errors=errors,
     )
