@@ -447,7 +447,9 @@ def test_gate2_word_windows_drive_plan_and_artifact(tmp_path, monkeypatch):
         artifact = json.loads(
             (project_dir / f"narration_words_{lang}.json").read_text(encoding="utf-8")
         )
-        assert artifact["cut_policy"] == "mid_pause"
+        # P2: the timeline is the mid_clause cut sheet (over-band scenes split
+        # at their own breathing points, parts keeping the scene index).
+        assert artifact["cut_policy"] == "mid_clause"
         assert artifact["total_sec"] == 10.2
         assert artifact["scenes"] == word_timeline
 
@@ -594,6 +596,39 @@ def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory):
     job = test_factory.jq.get_job(job_id)
     # Status should remain APPROVED for background worker
     assert job["status"] == "APPROVED"
+
+
+def test_execute_approved_mode2_submits_exact_approved_script(test_factory, monkeypatch):
+    job_id = test_factory.jq.create_job(
+        mode="remake",
+        url="https://youtube.com/watch?v=mode2_muse",
+        target_duration=240.0,
+    )
+    project_dir = test_factory.output_dir / job_id
+    project_dir.mkdir(parents=True)
+    script_file = project_dir / f"kich_ban_VI_{job_id}.txt"
+    script_file.write_text("[CẢNH 001]\nLời thoại: Kịch bản đã duyệt.", encoding="utf-8")
+    test_factory.jq.update_job_status(job_id, "APPROVED", script_file=str(script_file))
+    with test_factory.jq._get_conn() as conn:
+        conn.execute(
+            "UPDATE factory_jobs SET project_dir = ?, source_title = ? WHERE id = ?",
+            (str(project_dir), "Muse test", job_id),
+        )
+        conn.commit()
+
+    monkeypatch.setenv("MUSE_VIDEO_ENABLED", "true")
+    submitted = {}
+
+    def fake_submit(**kwargs):
+        submitted.update(kwargs)
+        return {"job_id": "video-remake-test-abc"}
+
+    monkeypatch.setattr(test_factory, "submit_muse_video_job", fake_submit)
+
+    assert test_factory.execute_approved_reup(job_id) is True
+    assert submitted["script"] == script_file
+    assert submitted["target_duration_sec"] == 240.0
+    assert test_factory.jq.get_job(job_id)["status"] == "RENDERING"
 
 
 def _editor_lines(text, seed):

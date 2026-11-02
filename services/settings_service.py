@@ -115,6 +115,9 @@ LLM_PROVIDER_PRESET_KEY = "llm_provider_preset"
 VLM_MODEL_KEY = "vlm_model"
 VLM_ENABLED_KEY = "vlm_enabled"
 VEO_ENABLED_KEY = "veo_enabled"
+MUSE_VIDEO_ENABLED_KEY = "muse_video_enabled"
+GEMINI_IMAGE_ENABLED_KEY = "gemini_image_enabled"
+IMAGE_PROVIDER_KEY = "image_provider"
 
 # Role-specific xKiro models (Phase 1: xKiro-first generation stack).
 # Generation model handles translation, script rewrite, judging, character
@@ -294,6 +297,66 @@ def is_veo_enabled() -> bool:
 
 def set_veo_enabled(enabled: bool) -> None:
     set_setting(VEO_ENABLED_KEY, "true" if enabled else "false")
+
+
+def is_muse_video_enabled() -> bool:
+    """Return whether new video jobs should be delegated to Muse."""
+    value = get_setting(MUSE_VIDEO_ENABLED_KEY)
+    if value is None:
+        return os.environ.get("MUSE_VIDEO_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_muse_video_enabled(enabled: bool) -> None:
+    """Enable or disable Muse as the production video orchestration path."""
+    set_setting(MUSE_VIDEO_ENABLED_KEY, "true" if enabled else "false")
+
+
+def is_gemini_image_enabled() -> bool:
+    """Check if Gemini (Imagen 3) is enabled for image generation.
+
+    Default is False (opt-in) to prioritize dependable xKiro generation
+    until Google session cookies are verified and active.
+    """
+    val = get_setting(GEMINI_IMAGE_ENABLED_KEY)
+    if val is not None:
+        return val.strip().lower() in ("true", "1", "yes")
+    prov = get_setting(IMAGE_PROVIDER_KEY)
+    if prov is not None:
+        return prov.strip().lower() in ("gemini", "imagen")
+    env_val = os.environ.get("GEMINI_IMAGE_ENABLED") or os.environ.get("IMAGE_PROVIDER")
+    if env_val:
+        return env_val.strip().lower() in ("true", "1", "yes", "gemini", "imagen")
+    return False
+
+
+def set_gemini_image_enabled(enabled: bool) -> None:
+    """Turn Gemini image generation on/off."""
+    set_setting(GEMINI_IMAGE_ENABLED_KEY, "true" if enabled else "false")
+    set_setting(IMAGE_PROVIDER_KEY, "gemini" if enabled else "xkiro")
+
+
+def get_image_provider() -> str:
+    """Return active image provider ('gemini' or 'xkiro')."""
+    if is_gemini_image_enabled():
+        return "gemini"
+    prov = get_setting(IMAGE_PROVIDER_KEY)
+    if prov:
+        return prov.strip().lower()
+    return "xkiro"
+
+
+def set_image_provider(provider: str) -> None:
+    """Set active image provider ('gemini', 'xkiro', or 'auto')."""
+    p = (provider or "").strip().lower()
+    if p in ("gemini", "imagen"):
+        set_gemini_image_enabled(True)
+    elif p in ("xkiro", "gpt-image"):
+        set_gemini_image_enabled(False)
+    elif p in ("auto", "fallback"):
+        set_gemini_image_enabled(True)
+    else:
+        raise ValueError(f"Invalid image provider '{provider}'. Must be 'gemini', 'xkiro', or 'auto'.")
 
 
 def verify_provider_connection(

@@ -32,8 +32,12 @@ QA_GATE_MIN_SCORE = 8.0
 TARGET_SHORT_PCT = 0.40
 PASS_SHORT_PCT = 0.35
 WPM_RANGE = (150.0, 210.0)
-SCENE_DUR_RANGE = (4.0, 8.0)
-MEAN_DUR_RANGE = (4.5, 6.5)
+# Shot law, measured from the 17-clip reference corpus (plans/visual_standard.md):
+# median scene 4.13s, p10-p90 3.10-5.49s, 9.05-16.2 cuts/min. The old 4-8s window
+# graded our own 6.6-7.1s median as legal, which is why every render cut ~8 times
+# a minute instead of ~13.
+SCENE_DUR_RANGE = (3.5, 6.0)
+MEAN_DUR_RANGE = (3.7, 5.1)
 AUDIO_SYNC_WER_MAX = 0.15
 AUDIO_SYNC_MIN_COVERAGE = 0.90
 
@@ -286,7 +290,7 @@ def c_wpm(pd: Path, ctx):
     return WPM_RANGE[0] <= wpm <= WPM_RANGE[1], wpm, "150-210"
 
 
-@_check("S09", "Kịch bản", "Duration từng cảnh 4.0-8.0s", "script")
+@_check("S09", "Kịch bản", f"Duration từng cảnh {SCENE_DUR_RANGE[0]:g}-{SCENE_DUR_RANGE[1]:g}s", "script")
 def c_scene_dur(pd: Path, ctx):
     plan = ctx.get("plan") or []
     # Grade the PLANNED durations the script was built on. After Gate 2 the
@@ -296,15 +300,15 @@ def c_scene_dur(pd: Path, ctx):
         1 for sc in plan
         if not (SCENE_DUR_RANGE[0] <= float(sc.get("planned_duration", sc.get("duration", 0))) <= SCENE_DUR_RANGE[1])
     )
-    return bad == 0, bad, "= 0 cảnh ngoài 4-8s"
+    return bad == 0, bad, f"= 0 cảnh ngoài {SCENE_DUR_RANGE[0]:g}-{SCENE_DUR_RANGE[1]:g}s"
 
 
-@_check("S10", "Kịch bản", "Duration trung bình 4.5-6.5s", "script")
+@_check("S10", "Kịch bản", f"Duration trung bình {MEAN_DUR_RANGE[0]:g}-{MEAN_DUR_RANGE[1]:g}s", "script")
 def c_mean_dur(pd: Path, ctx):
     plan = ctx.get("plan") or []
     durs = [float(sc.get("planned_duration", sc.get("duration", 0))) for sc in plan]
     mean = sum(durs) / len(durs) if durs else 0.0
-    return MEAN_DUR_RANGE[0] <= mean <= MEAN_DUR_RANGE[1], mean, "4.5-6.5"
+    return MEAN_DUR_RANGE[0] <= mean <= MEAN_DUR_RANGE[1], mean, f"{MEAN_DUR_RANGE[0]:g}-{MEAN_DUR_RANGE[1]:g}"
 
 
 @_check("S11", "Kịch bản", "Tổng duration gần target", "script")
@@ -743,6 +747,10 @@ def c_video_lufs(pd: Path, ctx):
 
 @_check("V07", "Video", "Không có file placeholder", "video")
 def c_no_placeholder(pd: Path, ctx):
+    # The old fake-card failure wrote *placeholder* / *caption_card* files when
+    # a generation died; those stay forbidden. Intentional black cards from
+    # pipeline/title_cards.py are named title_card_* exactly so this check
+    # keeps telling the two apart (they replace a successful shot's picture).
     bad = list(pd.rglob("*placeholder*")) + list(pd.rglob("*caption_card*"))
     return len(bad) == 0, [str(b.name) for b in bad[:5]], "= 0"
 

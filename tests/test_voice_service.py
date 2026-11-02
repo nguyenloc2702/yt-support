@@ -81,10 +81,12 @@ def test_provider_failure_no_cache_raises(monkeypatch):
 
 
 def test_xkiro_voices_metadata():
-    assert len(voice_service.XKIRO_VOICES_METADATA) == 4
+    assert len(voice_service.XKIRO_VOICES_METADATA) == 6
     ids = {v["id"] for v in voice_service.XKIRO_VOICES_METADATA}
     assert "confident-male-vietnamese" in ids
     assert "sweet-female-vietnamese" in ids
+    assert "male-narrator" in ids
+    assert "american-male" in ids
 
 
 def test_preview_voice_routes_xkiro(monkeypatch, tmp_path):

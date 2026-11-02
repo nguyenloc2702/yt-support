@@ -23,8 +23,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # script problem the owner must see at Gate 2, before producing shots.
 MIN_PHYSICAL_DUR = 3.0
 MAX_PHYSICAL_DUR = 10.5
-BAND_MIN_DUR = 4.0
-BAND_MAX_DUR = 8.0
+# Advisory only, and deliberately the same window the scorecard grades
+# (services/algorithm_qa.py SCENE_DUR_RANGE), which itself comes from the
+# reference corpus: median 4.13s, p10-p90 3.10-5.49s.
+BAND_MIN_DUR = 3.5
+BAND_MAX_DUR = 6.0
 EPS = 1e-6
 
 Span = Tuple[float, float]
@@ -80,6 +83,7 @@ def build_scene_windows(
     tokens: Sequence[str],
     spans: Sequence[Optional[Span]],
     audio_duration: float,
+    cut_policy: str = "mid_pause",
 ) -> Dict[str, Any]:
     """
     Build contiguous scene windows over the narration audio.
@@ -90,14 +94,20 @@ def build_scene_windows(
         spans: aligned (start, end) seconds per token; missing spans fall back
             to the surrounding silence.
         audio_duration: total length of the narration track in seconds.
+        cut_policy: "mid_pause" cuts only at the pause between two scenes;
+            "mid_clause" additionally splits any scene whose window runs past
+            the 6.0s band top at its own loudest in-sentence breathing points
+            (comma-preferred), so one long sentence can own more than one
+            picture. Parts keep the parent scene's index, so plan-stage
+            consumers can merge them back 1:1.
 
     Returns:
-        {"scenes": [...], "total": float, "cut_policy": "mid_pause",
+        {"scenes": [...], "total": float, "cut_policy": cut_policy,
          "warnings": [...]}
     """
     count = len(scene_slices)
     if count == 0:
-        return {"scenes": [], "total": 0.0, "cut_policy": "mid_pause", "warnings": []}
+        return {"scenes": [], "total": 0.0, "cut_policy": cut_policy, "warnings": []}
 
     padded_spans: List[Optional[Span]] = list(spans)
     if len(padded_spans) < len(tokens):
@@ -153,12 +163,138 @@ def build_scene_windows(
             }
         )
 
+    if cut_policy == "mid_clause":
+        windows = split_overband_windows(windows)
+
     return {
         "scenes": windows,
         "total": round(bounds[-1], 3),
-        "cut_policy": "mid_pause",
+        "cut_policy": cut_policy,
         "warnings": summarize_windows(windows),
     }
+
+
+# Clause separators a narrator breathes after: cuts go here before anywhere else.
+_CLAUSE_PUNCT = (",", ";", ":", "—", "–", "!", "?")
+
+
+def _clause_cut_points(
+    words: Sequence[Dict[str, Any]], lo: float, hi: float, min_dur: float,
+    max_dur: float,
+) -> List[float]:
+    """Legal cut midpoints inside [lo, hi], best first.
+
+    A cut must leave both sides at least `min_dur` seconds and sit in the gap
+    between two words. A gap that follows a clause separator — the narrator's
+    own breathing point — always wins. Without one, the cut goes to the gap
+    closest to the band top so the first piece fills its allowance and the
+    remainder stays as long as the law allows.
+    """
+    ideal = max(min(hi - min_dur, lo + max_dur), lo + min_dur)
+    candidates: List[Tuple[int, float, float]] = []
+    for a, b in zip(words, words[1:]):
+        a_end, b_start = float(a["end"]), float(b["start"])
+        mid = (a_end + b_start) / 2.0
+        if not (lo + min_dur - EPS <= mid <= hi - min_dur + EPS):
+            continue
+        after_punct = str(a.get("w", "")).strip().endswith(_CLAUSE_PUNCT)
+        gap = b_start - a_end
+        # Sort key: comma breaths first (widest silence among them), then the
+        # cut closest to the band top.
+        rank = (-(gap), mid) if after_punct else (abs(mid - ideal), mid)
+        candidates.append((0 if after_punct else 1, rank[0], rank[1]))
+    candidates.sort()
+    return [c[2] for c in candidates]
+
+
+def _split_one_window(
+    window: Dict[str, Any], max_dur: float, min_dur: float
+) -> List[Dict[str, Any]]:
+    """Split one over-band window at its best clause pauses.
+
+    The pieces tile the original span exactly (no audio moves), each piece is
+    at least `min_dur` long, and every piece keeps the parent's scene index so
+    plan-stage code can merge them back 1:1. A window with no legal cut point
+    (no breathing room inside) is returned untouched.
+    """
+    duration = float(window.get("duration") or 0.0)
+    if duration <= max_dur + EPS:
+        return [window]
+    words = [
+        w for w in (window.get("words") or [])
+        if float(w.get("end", 0.0)) - float(w.get("start", 0.0)) > EPS
+    ]
+    if len(words) < 2:
+        return [window]
+    start = float(window["start"])
+    end = float(window["end"])
+
+    # Stack of (words, span) still too long to ship as one picture.
+    stack: List[Tuple[List[Dict[str, Any]], float, float]] = [(words, start, end)]
+    parts: List[Tuple[List[Dict[str, Any]], float, float]] = []
+    while stack:
+        group, lo, hi = stack.pop()
+        if hi - lo <= max_dur + EPS:
+            parts.append((group, lo, hi))
+            continue
+        cuts = _clause_cut_points(group, lo, hi, min_dur, max_dur)
+        if not cuts:
+            parts.append((group, lo, hi))
+            continue
+        mid = cuts[0]
+        left = [w for w in group if float(w["end"]) <= mid + EPS]
+        right = [w for w in group if float(w["start"]) >= mid - EPS]
+        stack.append((right, mid, hi))
+        stack.append((left, lo, mid))
+    parts.sort(key=lambda item: item[1])
+
+    total_parts = len(parts)
+    if total_parts < 2:
+        return [window]
+    split: List[Dict[str, Any]] = []
+    for part_no, (group, lo, hi) in enumerate(parts, start=1):
+        spoken = [w for w in group if lo - EPS <= float(w["start"]) < hi - EPS]
+        split.append(
+            {
+                "index": window.get("index"),
+                "part": part_no,
+                "of": total_parts,
+                "start": round(lo, 3),
+                "end": round(hi, 3),
+                "duration": round(max(0.0, hi - lo), 3),
+                "speech_start": round(float(spoken[0]["start"]), 3) if spoken else float(window.get("speech_start", lo)),
+                "speech_end": round(float(spoken[-1]["end"]), 3) if spoken else float(window.get("speech_end", hi)),
+                "words": [
+                    {
+                        **w,
+                        "rel": round(max(0.0, float(w["start"]) - lo), 3),
+                    }
+                    for w in group
+                ],
+            }
+        )
+    return split
+
+
+def split_overband_windows(
+    windows: Sequence[Dict[str, Any]],
+    max_dur: float = BAND_MAX_DUR,
+    min_dur: float = MIN_PHYSICAL_DUR,
+) -> List[Dict[str, Any]]:
+    """Apply the mid_clause split to every window past the band top."""
+    result: List[Dict[str, Any]] = []
+    for window in windows:
+        result.extend(_split_one_window(window, max_dur, min_dur))
+    return result
+
+
+def _split_overband_windows(
+    windows: List[Dict[str, Any]],
+    max_dur: float = BAND_MAX_DUR,
+    min_dur: float = MIN_PHYSICAL_DUR,
+) -> List[Dict[str, Any]]:
+    """Backwards-compatible alias for :func:`split_overband_windows`."""
+    return split_overband_windows(windows, max_dur, min_dur)
 
 
 def summarize_windows(windows: Sequence[Dict[str, Any]]) -> List[str]:

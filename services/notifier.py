@@ -9,7 +9,10 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
 import requests
+
+load_dotenv()
 
 logger = logging.getLogger("telegram_notifier")
 
@@ -197,7 +200,7 @@ class TelegramNotifier:
                     "title": title or path.stem,
                     "performer": performer or "Video Voiceover",
                 }
-                resp = requests.post(url, data=data, files=files, timeout=45)
+                resp = requests.post(url, data=data, files=files, timeout=180)
                 return resp.status_code == 200
         except Exception as e:
             logger.error("Failed to send Telegram audio: %s", e)
@@ -218,7 +221,7 @@ class TelegramNotifier:
                 data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "HTML"}
                 if reply_markup is not None:
                     data["reply_markup"] = json.dumps(reply_markup)
-                resp = requests.post(url, data=data, files=files, timeout=45)
+                resp = requests.post(url, data=data, files=files, timeout=180)
                 return resp.status_code == 200
         except Exception as e:
             logger.error("Failed to send Telegram document: %s", e)

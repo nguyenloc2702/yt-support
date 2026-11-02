@@ -209,3 +209,32 @@ def test_qa_report_available_after_gate(tmp_path):
     report = asm.get_qa_report()
     assert report is not None
     assert "ALGORITHM SCORECARD" in report
+
+
+def test_no_placeholder_allows_intentional_title_cards(tmp_path):
+    """P2: three intentional black cards must not fail V07 c_no_placeholder.
+
+    The zero-fake check exists for the *placeholder*/ *caption_card* files the
+    old fake-card failure wrote when a generation died; title_card_* files are
+    produced frames (pipeline.title_cards.py) and stay legal.
+    """
+    _seed_remake_project(tmp_path, _good_plan(), _good_algo())
+    for i in (3, 7, 11):
+        (tmp_path / f"title_card_{i:03d}.mp4").write_bytes(b"\x00" * 2048)
+
+    from services.algorithm_qa import c_no_placeholder
+
+    passed, value, _ = c_no_placeholder(tmp_path, {"plan": _good_plan()})
+    assert passed is True
+    assert value == []
+
+
+def test_no_placeholder_still_rejects_fake_caption_cards(tmp_path):
+    _seed_remake_project(tmp_path, _good_plan(), _good_algo())
+    (tmp_path / "caption_card_scene_02.mp4").write_bytes(b"\x00" * 512)
+
+    from services.algorithm_qa import c_no_placeholder
+
+    passed, value, _ = c_no_placeholder(tmp_path, {"plan": _good_plan()})
+    assert passed is False
+    assert any("caption_card" in v for v in value)

@@ -86,11 +86,13 @@ def assemble_documentary(
     output_path: Optional[Path] = None,
     audio_path: Optional[Path] = None,
     voice: Optional[str] = None,
+    subtitle_path: Optional[Path] = None,
 ) -> Path:
 
     """
     Strictly normalizes and concatenates all raw shot clips for job_id into a single documentary video.
     Overlays per-shot aligned narration/soundtrack, validates output, and cleans up temp files.
+    When subtitle_path is given, its cues are burned into the final encode.
     """
     project_dir = Path(project_dir)
     shots_dir = project_dir / "shots"
@@ -136,18 +138,73 @@ def assemble_documentary(
     temp_assembled = project_dir / f"assembled_temp_{job_id}.mp4"
 
     try:
+        # 0. Plan the intentional black cards (corpus law: 1.4 cards/min on the
+        # idea-closing / big-number scenes). A card REPLACES a shot's picture
+        # for that scene's own narration span, so durations never move.
+        card_indexes: set = set()
+        if shots_data:
+            try:
+                from pipeline.title_cards import plan_cards
+
+                card_indexes = set(plan_cards(shots_data))
+                if card_indexes:
+                    logger.info("Planned %d black cards on scenes %s.",
+                                len(card_indexes), sorted(card_indexes))
+            except Exception as e:
+                logger.warning("Card planning failed (rendering without cards): %s", e)
+
         # 1. Strictly normalize each shot to standard 1080p (1920x1080), 24fps, yuv420p (strip internal audio)
         logger.info("Normalizing %d shots for Job %s to 1080p 24fps yuv420p...", len(shot_files), job_id)
         norm_shot_files = []
         shot_durations = []
+        card_records: List[Dict[str, Any]] = []
+        card_span_start = 0.0
 
         for idx_num, sf in indexed_files:
+            scene_idx = idx_num  # shot files are numbered like their scenes
+
+            # A card scene skips normalization entirely: its picture is a
+            # freshly rendered black card cut to the shot's own narration span.
+            if scene_idx in card_indexes:
+                scene = next((s for s in shots_data if int(s.get("index", -1)) == scene_idx), None)
+                text = str((scene or {}).get("text", ""))
+                raw_dur = probe_duration(sf)
+                dur = max(0.8, raw_dur) if raw_dur > 0 else max(0.8, float((scene or {}).get("duration", 5.0)))
+                try:
+                    from pipeline.title_cards import build_card, card_text
+
+                    card_path = norm_dir / f"title_card_{scene_idx:03d}.mp4"
+                    build_card(text, dur, card_path)
+                    card_dur = probe_duration(card_path)
+                    if card_dur > 0 and abs(card_dur - dur) <= 0.2:
+                        dur = max(0.8, card_dur)
+                        card_records.append({
+                            "index": scene_idx,
+                            "start": round(card_span_start, 3),
+                            "end": round(card_span_start + dur, 3),
+                            "text": card_text(text),
+                        })
+                        shot_durations.append(dur)
+                        card_span_start += dur
+                        norm_shot_files.append(card_path)
+                        logger.info("Scene %d rendered as an intentional black card (%.2fs).", scene_idx, dur)
+                        continue
+                    logger.warning("Card for scene %d drifted %.2fs from its span; keeping the shot.",
+                                   scene_idx, abs((card_dur or 0) - dur))
+                except Exception as e:
+                    logger.warning("Card render for scene %d failed (keeping the shot): %s", scene_idx, e)
+
             norm_sf = norm_dir / f"norm_{sf.name}"
+            scene = next((s for s in shots_data if int(s.get("index", -1)) == scene_idx), None)
+            planned_dur = float((scene or {}).get("duration", 0.0))
+            raw_dur = probe_duration(sf)
+            target_dur = planned_dur if planned_dur > 0 else (raw_dur if raw_dur > 0 else 10.0)
             cmd_norm = [
                 "ffmpeg", "-y",
                 "-i", str(sf),
                 "-map", "0:v:0",
                 "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p",
+                "-t", f"{target_dur:.3f}",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                 "-an",
                 str(norm_sf)
@@ -174,6 +231,7 @@ def assemble_documentary(
             dur = probe_duration(norm_sf)
             dur = max(0.5, dur) if dur > 0 else 10.0
             shot_durations.append(dur)
+            card_span_start += dur
             norm_shot_files.append(norm_sf)
 
         total_video_duration = sum(shot_durations)
@@ -186,6 +244,12 @@ def assemble_documentary(
 
         # 3. Prepare or synthesize Master Narration Timeline (Per-Shot Aligned)
         target_audio = audio_path
+        if not target_audio:
+            for cand in [project_dir / "audio_vi_full.mp3", project_dir / "narration_vi.mp3"]:
+                if cand.exists():
+                    target_audio = cand
+                    logger.info("Using Gate 2 master narration track: %s", cand)
+                    break
         if target_audio and Path(target_audio).exists():
             # P1.5: Pad or trim external audio to exact total_video_duration
             padded_ext = project_dir / "temp_ext_aligned.wav"
@@ -427,6 +491,15 @@ def assemble_documentary(
             except Exception as e:
                 logger.warning("Failed to parse algorithm_result.json for audio: %s", e)
 
+        # No BGM in the algorithm result (or no algorithm result): lay one cue
+        # per narrative act from the shot lengths.
+        if bgm_mgr is None and shot_durations:
+            planner = BGMManager(rotation_seed=project_dir.name)
+            planned = planner.create_from_shot_durations(shot_durations, total_video_duration)
+            if planned:
+                bgm_mgr = planner
+                logger.info("Planned %d BGM cues from %d shots.", len(planned), len(shot_durations))
+
         # Execute Advanced Mixing if Managers are present
         if bgm_mgr or sfx_mgr:
             try:
@@ -493,10 +566,17 @@ def assemble_documentary(
                     all_audio_labels.append(vocal_label)
                 all_audio_labels.extend(bgm_labels)
                 all_audio_labels.extend(sfx_labels)
-                
+
                 # Only execute amix if we actually have music/sfx tracks to mix with vocal
                 if len(all_audio_labels) > 1:
-                    amix_str = ";".join(filters) + ";" + "".join([f"[{l}]" for l in all_audio_labels]) + f"amix=inputs={len(all_audio_labels)}:duration=first:dropout_transition=2[aout]"
+                    # Keep the narration at its natural level: each BGM cue is already
+                    # ~20 dB under the voice, so amix must not divide the sum. amix's
+                    # normalisation also rebalances whenever a cue ends, which lifts the
+                    # narration by several dB during a music break.
+                    amix_str = ";".join(filters) + ";" + "".join([f"[{l}]" for l in all_audio_labels]) + (
+                        f"amix=inputs={len(all_audio_labels)}:duration=first:normalize=0,"
+                        "alimiter=limit=0.794:level=false[aout]"
+                    )
                     
                     cmd_mix_adv = [
                         "ffmpeg", "-y",
@@ -567,33 +647,43 @@ def assemble_documentary(
             "-i", str(concat_list_file),
         ]
 
+        encode_opts = [
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-pix_fmt", "yuv420p",
+            "-r", "24",
+            "-c:a", "aac", "-b:a", "192k",
+            "-t", f"{total_video_duration:.3f}",
+        ]
+
         if mixed_audio and mixed_audio.exists():
-            cmd += [
-                "-i", str(mixed_audio),
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                "-pix_fmt", "yuv420p",
-                "-r", "24",
-                "-c:a", "aac", "-b:a", "192k",
-                "-t", f"{total_video_duration:.3f}",
-                str(temp_assembled),
-            ]
+            cmd += ["-i", str(mixed_audio)] + encode_opts
         else:
             cmd += [
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                "-pix_fmt", "yuv420p",
-                "-r", "24",
-                "-c:a", "aac", "-b:a", "192k",
-                "-t", f"{total_video_duration:.3f}",
-                str(temp_assembled),
-            ]
+            ] + encode_opts
+
+        # Burn the karaoke cues into the same encode that already re-encodes
+        # video, so captions cost no extra pass. If libass refuses (missing
+        # filter, unreadable path) the job still ships: an uncaptioned render is
+        # worse than the deadline, and the standard report will show coverage 0.
+        vf_args: List[str] = []
+        captions_burned = False
+        if subtitle_path and Path(subtitle_path).is_file():
+            escaped = (str(subtitle_path).replace("\\", "/")
+                       .replace(":", "\\:").replace("'", "\\'"))
+            vf_args = ["-vf", f"subtitles=filename='{escaped}'"]
+        cmd += vf_args + [str(temp_assembled)]
 
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if res.returncode != 0 and vf_args:
+                logger.error("Burn caption thất bại, dựng lại không chữ: %s", res.stderr[-300:])
+                cmd = cmd[:-len(vf_args) - 1] + [str(temp_assembled)]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            else:
+                captions_burned = bool(vf_args)
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"FFmpeg assembly timed out after 900s: {e}")
 
@@ -627,12 +717,28 @@ def assemble_documentary(
             output_final.unlink()
         temp_assembled.replace(output_final)
 
+        # What the grader may trust about captions: the cue file outlives a failed
+        # burn, so only this render records whether words are actually in its pixels.
+        (output_final.with_suffix(".captions.json")).write_text(json.dumps({
+            "burned": captions_burned,
+            "cue_file": Path(subtitle_path).name if captions_burned and subtitle_path else None,
+        }), encoding="utf-8")
+
+        # The intentional black cards, with their exact spans: the standard
+        # report's blackdetect counts these on purpose, not as defects.
+        try:
+            from pipeline.title_cards import write_cards_sidecar
+
+            write_cards_sidecar(output_final, card_records)
+        except Exception as e:
+            logger.warning("Cards sidecar write failed: %s", e)
+
         # 8. Quality Control validation
         val_res = validate_rendered_output(output_final)
         if not val_res.is_valid:
             raise ValueError(f"Documentary QC validation failed: {val_res.error_message}")
 
-        logger.info("✔ Documentary assembly successfully completed for %s: %s (%.1f MB, %.2fs)",
+        logger.info("Documentary assembly successfully completed for %s: %s (%.1f MB, %.2fs)",
                     job_id, output_final.name, output_final.stat().st_size / (1024 * 1024), actual_video_dur)
         return output_final
 

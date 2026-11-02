@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import uuid
+from typing import Optional
 
 from pipeline.automated_factory import AutomatedFactory
 from services.account_pool import AccountPoolManager
@@ -123,16 +124,18 @@ class VideoAutomationWorker:
         if self.bot.is_configured:
             self.bot.start_polling()
 
-        # 3b. Start auto keep-alive daemon to renew Google cookies 24/7 — only
-        # when Veo actually consumes them, so a Veo-off worker never pings Google.
-        if veo_enabled:
+        # 3b. Start auto keep-alive daemon to renew Google cookies 24/7 —
+        # when Veo or Gemini Image generation is active.
+        from services.settings_service import is_gemini_image_enabled
+        gemini_img_enabled = is_gemini_image_enabled()
+        if veo_enabled or gemini_img_enabled:
             self.account_pool.start_keep_alive(
                 interval_seconds=1800,
                 provider=self.primary_provider,
                 notifier=self.notifier,
             )
         else:
-            logger.info("Keep-alive Google không chạy vì Veo đang tắt (bật bằng /veo on).")
+            logger.info("Keep-alive Google không chạy vì cả Veo và Gemini Image đều đang tắt.")
 
         # 4. Main processing loop (Dedup based strictly on DB state, no in-memory sets)
         self._scan_and_assemble_pending_jobs()
@@ -155,27 +158,38 @@ class VideoAutomationWorker:
 
                 if u_vid_path and u_vid_path.exists():
                     logger.info("☁️ Uploading shot %s (video: %s)...", u_shot_id, u_vid_path.name)
-                    upload_ok, gdrive_url = self.uploader.upload_and_clean(
-                        local_path=u_vid_path,
-                        remote_filename=out_filename,
-                        remote_folder=f"Video_Projects/{u_job_id}/raw_shots",
-                        clean_local=False,
-                    )
-                    if upload_ok:
+                    if not self.uploader.is_rclone_available:
                         self.jq.mark_shot_done(
                             shot_id=u_shot_id,
                             account_id=upload_shot.get("account_id") or "local",
                             video_path=str(u_vid_path),
-                            drive_url=gdrive_url,
+                            drive_url=str(u_vid_path.resolve()),
                         )
-                        logger.info("✔ Shot %s upload thành công: %s", u_shot_id, gdrive_url)
-                        # Check if all shots finished and trigger assembly
+                        logger.info("✔ Shot %s lưu cục bộ thành công (rclone không khả dụng): %s", u_shot_id, u_vid_path)
                         summ = self.jq.get_job_summary(u_job_id)
                         if summ["total"] > 0 and summ["done"] >= summ["total"]:
                             self._assemble_and_finalize_documentary(u_job_id, summ)
                     else:
-                        is_final = self.jq.mark_shot_upload_failed(u_shot_id, "Upload to Google Drive failed")
-                        logger.error("Upload shot %s thất bại (is_final=%s)", u_shot_id, is_final)
+                        upload_ok, gdrive_url = self.uploader.upload_and_clean(
+                            local_path=u_vid_path,
+                            remote_filename=out_filename,
+                            remote_folder=f"Video_Projects/{u_job_id}/raw_shots",
+                            clean_local=False,
+                        )
+                        if upload_ok:
+                            self.jq.mark_shot_done(
+                                shot_id=u_shot_id,
+                                account_id=upload_shot.get("account_id") or "local",
+                                video_path=str(u_vid_path),
+                                drive_url=gdrive_url,
+                            )
+                            logger.info("✔ Shot %s upload thành công: %s", u_shot_id, gdrive_url)
+                            summ = self.jq.get_job_summary(u_job_id)
+                            if summ["total"] > 0 and summ["done"] >= summ["total"]:
+                                self._assemble_and_finalize_documentary(u_job_id, summ)
+                        else:
+                            is_final = self.jq.mark_shot_upload_failed(u_shot_id, "Upload to Google Drive failed")
+                            logger.error("Upload shot %s thất bại (is_final=%s)", u_shot_id, is_final)
                 else:
                     self.jq.mark_shot_upload_failed(u_shot_id, f"Local file not found: {u_vid_path}")
 
@@ -262,7 +276,11 @@ class VideoAutomationWorker:
                     continue
 
                 start_time = time.time()
-                res = self.primary_provider.generate(prompt=prompt, out_path=target_out_path, session_file=session_file)
+                seed_image = self._veo_seed_image(prompt, target_out_path, session_file, ref_images)
+                res = self.primary_provider.generate(
+                    prompt=prompt, out_path=target_out_path, session_file=session_file,
+                    seed_image=seed_image,
+                )
                 duration = time.time() - start_time
             else:
                 acc_id = "ken_burns_local"
@@ -379,6 +397,87 @@ class VideoAutomationWorker:
 
         logger.info("Worker dừng an toàn (Graceful Shutdown completed).")
 
+    def _veo_seed_image(
+        self,
+        prompt: str,
+        out_path: Path,
+        session_file: Path,
+        ref_images: list,
+    ):
+        """The AI-drawn still Veo animates — the image-first law.
+
+        Priority: the canonical character reference from Gate 3, then a fresh
+        Gemini (Imagen 3) drawing on the SAME Pro session, then the xKiro
+        gateway. Returns None only when every image provider fails, and Veo
+        then runs text-only instead of blocking the shot.
+        """
+        seed = out_path.with_suffix(".seed.jpg")
+        try:
+            for cand in ref_images or []:
+                if Path(cand).is_file():
+                    shutil.copyfile(str(cand), str(seed))
+                    logger.info("Veo seed image = character reference %s", Path(cand).name)
+                    return seed
+
+            from services.prompt_sanitizer import STYLE_PREFIX, sanitize_veo_prompt
+
+            styled = f"{STYLE_PREFIX}{sanitize_veo_prompt(prompt, for_video=False)}"
+            try:
+                from services.gemini_image_provider import generate_gemini_image
+
+                if generate_gemini_image(styled, seed, session_file=session_file) and seed.exists():
+                    logger.info("Veo seed image via Gemini (Imagen 3): %s", seed.name)
+                    return seed
+            except Exception as exc:
+                logger.warning("Gemini seed image failed (%s); trying xKiro.", exc)
+
+            try:
+                from services.xkiro_image_provider import generate_xkiro_image
+
+                generate_xkiro_image(styled, seed, size="1792x1024")
+                if seed.exists() and seed.stat().st_size > 1000:
+                    logger.info("Veo seed image via xKiro: %s", seed.name)
+                    return seed
+            except Exception as exc:
+                logger.warning("xKiro seed image failed (%s); Veo will run text-only.", exc)
+        except Exception as exc:
+            logger.warning("Seed image pipeline failed (%s); Veo will run text-only.", exc)
+        return None
+
+    def _build_caption_file(self, project_dir: Path, lang: str) -> Optional[Path]:
+        """Karaoke ASS from the audio-first word timeline of this language.
+
+        The word times are absolute on the narration track, which is the final
+        video's own timeline, so the cues need no rescaling. Returns None when
+        the job has no word timeline (a job assembled from an older run).
+        """
+        timeline_file = project_dir / f"narration_words_{lang}.json"
+        if not timeline_file.is_file():
+            logger.warning("Job ở %s không có %s nên video sẽ không có caption.",
+                           project_dir.name, timeline_file.name)
+            return None
+        from pipeline.subtitles import build_ass_from_word_timeline
+
+        timeline = json.loads(timeline_file.read_text(encoding="utf-8"))
+        return build_ass_from_word_timeline(timeline, project_dir / f"subtitles_{lang}.ass")
+
+    def _grade_against_standard(self, project_dir: Path, video: Path) -> None:
+        """Score the finished render against plans/visual_standard.md.
+
+        Informational only — it writes standard_report.json and never blocks a
+        gate, because the QA scorecard stays the source of truth.
+        """
+        try:
+            from tools.standard_report import report_from_video, write_standard_report
+
+            result = report_from_video(video, out_dir=project_dir)
+            write_standard_report(result, project_dir)
+            s = result["summary"]
+            logger.info("Chuẩn tham chiếu %s: %d đạt / %d lệch / %d thiếu (%s)",
+                        project_dir.name, s["pass"], s["warn"], s["miss"], video.name)
+        except Exception as exc:
+            logger.warning("Không đo được chuẩn tham chiếu cho %s: %s", project_dir, exc)
+
     def _assemble_and_finalize_documentary(self, job_id: str, summary: dict):
         """Assembles all generated shots into a final documentary video and uploads to Google Drive with idempotent recovery."""
         job = self.jq.get_job(job_id)
@@ -414,7 +513,27 @@ class VideoAutomationWorker:
                 with self.jq.heavy_lock_lease(job_id, interval=15.0):
                     from pipeline.documentary_assembler import assemble_documentary
                     logger.info("Assembling full documentary for Job %s...", job_id)
-                    final_video = assemble_documentary(job_id=job_id, project_dir=project_dir)
+                    out_vi = project_dir / f"documentary_final_{job_id}_vi.mp4"
+                    out_en = project_dir / f"documentary_final_{job_id}_en.mp4"
+                    audio_vi = project_dir / "audio_vi_full.mp3"
+                    audio_en = project_dir / "audio_en_full.mp3"
+
+                    if audio_vi.exists():
+                        logger.info("Assembling Vietnamese documentary for Job %s...", job_id)
+                        assemble_documentary(job_id=job_id, project_dir=project_dir, output_path=out_vi,
+                                             audio_path=audio_vi,
+                                             subtitle_path=self._build_caption_file(project_dir, "vi"))
+                    if audio_en.exists():
+                        logger.info("Assembling English documentary for Job %s...", job_id)
+                        assemble_documentary(job_id=job_id, project_dir=project_dir, output_path=out_en,
+                                             audio_path=audio_en,
+                                             subtitle_path=self._build_caption_file(project_dir, "en"))
+
+                    if out_vi.exists():
+                        import shutil
+                        shutil.copyfile(str(out_vi), str(final_video))
+                    else:
+                        final_video = assemble_documentary(job_id=job_id, project_dir=project_dir)
 
                 # Save local manifest before upload attempt
                 manifest = {
@@ -424,6 +543,7 @@ class VideoAutomationWorker:
                     "assembled_at": time.time(),
                 }
                 (project_dir / "assembly_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+                self._grade_against_standard(project_dir, out_en if out_en.exists() else final_video)
                 self.jq.transition_job(
                     job_id,
                     to_state="FINAL_UPLOAD_PENDING",
@@ -473,13 +593,18 @@ class VideoAutomationWorker:
                 self.uploader.upload_and_clean(local_path=source_txt, remote_folder=final_folder, clean_local=False)
 
             # Upload standard backup to Video_Projects/{job_id}
-            remote_name = f"documentary_final_{job_id}.mp4"
-            upload_ok, drive_url = self.uploader.upload_and_clean(
-                local_path=final_video,
-                remote_filename=remote_name,
-                remote_folder=f"Video_Projects/{job_id}",
-                clean_local=False,
-            )
+            if not self.uploader.is_rclone_available:
+                upload_ok = True
+                drive_url = str(final_video.resolve())
+                logger.info("Rclone không khả dụng — hoàn tất và bảo tồn video hoàn chỉnh cục bộ tại %s", final_video)
+            else:
+                remote_name = f"documentary_final_{job_id}.mp4"
+                upload_ok, drive_url = self.uploader.upload_and_clean(
+                    local_path=final_video,
+                    remote_filename=remote_name,
+                    remote_folder=f"Video_Projects/{job_id}",
+                    clean_local=False,
+                )
 
             if upload_ok:
                 # Update DB state FIRST before cleaning any local buffers!
@@ -497,13 +622,14 @@ class VideoAutomationWorker:
                         asm.mark_completed()
                     except Exception as e:
                         logger.warning("Failed to mark state machine completed for %s: %s", job_id, e)
-                # Safe to clean local shots only after DB state is committed
-                shutil.rmtree(project_dir / "shots", ignore_errors=True)
-                final_video.unlink(missing_ok=True)
-                if out_vi.exists():
-                    out_vi.unlink(missing_ok=True)
-                if out_en.exists():
-                    out_en.unlink(missing_ok=True)
+                # Safe to clean local shots only after DB state is committed and only if rclone was used
+                if self.uploader.is_rclone_available:
+                    shutil.rmtree(project_dir / "shots", ignore_errors=True)
+                    final_video.unlink(missing_ok=True)
+                    if out_vi.exists():
+                        out_vi.unlink(missing_ok=True)
+                    if out_en.exists():
+                        out_en.unlink(missing_ok=True)
                 if self.notifier.is_configured:
                     title_info = f"🎬 <b>Tiêu đề:</b> {source_title}\n" if source_title else ""
                     yt_info = f"🔗 <b>YouTube gốc:</b> https://youtu.be/{source_id}\n" if source_id else ""

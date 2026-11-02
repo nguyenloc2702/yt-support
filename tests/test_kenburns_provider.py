@@ -25,9 +25,21 @@ def test_no_provider_fails_loudly_without_placeholder(kb_provider, tmp_path, mon
     """Zero-fake policy: with no Imagen session, no ref image and no OPENAI key,
     generation must FAIL with FATAL — never render a placeholder caption card."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the provider priority: the ambient settings DB must not decide
+    # which branch this test exercises.
+    monkeypatch.setattr(
+        "services.settings_service.is_gemini_image_enabled", lambda: False
+    )
     monkeypatch.setattr(
         "services.xkiro_image_provider.generate_xkiro_image",
         lambda prompt, out_path, **kw: (_ for _ in ()).throw(RuntimeError("xKiro image down")),
+    )
+    # The Gemini-webapi fallback would happily succeed through the LIVE account
+    # pool's cookies — this test simulates every provider being down, so the
+    # Gemini branch is pinned dead too.
+    monkeypatch.setattr(
+        "services.gemini_image_provider.generate_gemini_image",
+        lambda prompt, out_path, **kw: False,
     )
 
     out = tmp_path / "shots" / "shot_01.mp4"
@@ -72,6 +84,11 @@ def test_xkiro_image_is_the_primary_provider(kb_provider, tmp_path, monkeypatch)
         ),
     )
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the provider priority: the ambient settings DB must not decide
+    # which branch this test exercises.
+    monkeypatch.setattr(
+        "services.settings_service.is_gemini_image_enabled", lambda: False
+    )
 
     res = kb_provider.generate(
         prompt="A banker counting coins",
@@ -107,6 +124,11 @@ def test_ref_image_copy_and_dynamic_kenburns_duration(kb_provider, tmp_path, mon
 
     monkeypatch.setattr("services.image_kenburns_provider.subprocess.run", fake_run)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the provider priority: the ambient settings DB must not decide
+    # which branch this test exercises.
+    monkeypatch.setattr(
+        "services.settings_service.is_gemini_image_enabled", lambda: False
+    )
 
     duration = 7.0
     res = kb_provider.generate(
@@ -159,6 +181,11 @@ def test_duration_clamped_between_2_and_15(kb_provider, tmp_path, monkeypatch):
 
     monkeypatch.setattr("services.image_kenburns_provider.subprocess.run", fake_run)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the provider priority: the ambient settings DB must not decide
+    # which branch this test exercises.
+    monkeypatch.setattr(
+        "services.settings_service.is_gemini_image_enabled", lambda: False
+    )
 
     res = kb_provider.generate(
         prompt="scene", out_path=out, session_file=None, ref_image=ref, duration=60.0
@@ -210,6 +237,11 @@ def test_pose_keyframes_become_a_multi_input_blend(kb_provider, tmp_path, monkey
     monkeypatch.setattr("services.xkiro_image_provider.edit_xkiro_image", fake_edit)
     monkeypatch.setattr("services.image_kenburns_provider.subprocess.run", fake_run)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the provider priority: the ambient settings DB must not decide
+    # which branch this test exercises.
+    monkeypatch.setattr(
+        "services.settings_service.is_gemini_image_enabled", lambda: False
+    )
 
     res = kb_provider.generate(
         prompt="Werner pointing at a keyboard",
@@ -251,6 +283,11 @@ def test_pose_blend_is_skipped_when_edits_fail(kb_provider, tmp_path, monkeypatc
     )
     monkeypatch.setattr("services.image_kenburns_provider.subprocess.run", fake_run)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Pin the provider priority: the ambient settings DB must not decide
+    # which branch this test exercises.
+    monkeypatch.setattr(
+        "services.settings_service.is_gemini_image_enabled", lambda: False
+    )
 
     res = kb_provider.generate(prompt="scene", out_path=out, session_file=None, ref_image=None)
 

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.logging_config import get_logger
-from pipeline.word_timing import build_scene_windows, summarize_windows
+from pipeline.word_timing import build_scene_windows, split_overband_windows, summarize_windows
 
 logger = get_logger(__name__)
 
@@ -427,6 +427,15 @@ def audit_audio(
             "duration_sec": win["duration"],
             "drift": sc.drift if sc else 0.0,
         })
+
+    # Mid-clause cut sheet: a scene past the 6.0s band top splits at the
+    # narrator's own breathing points. Parts keep the plan scene index, so the
+    # plan mapping (and the one-shot-per-scene manifest) stays 1:1 while the
+    # caption builder and any later cut logic see the finer windows. Built
+    # AFTER the per-scene timing map above, which must stay 1:1 with the plan.
+    windows = split_overband_windows(windows)
+    word_timeline["scenes"] = windows
+    word_timeline["cut_policy"] = "mid_clause"
 
     warnings.extend(summarize_windows(windows))
 

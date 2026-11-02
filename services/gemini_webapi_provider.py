@@ -1,3 +1,4 @@
+import re
 """Gemini WebAPI Provider (Internal Veo RPC via gemini-webapi).
 
 Primary video generator:
@@ -34,6 +35,35 @@ except ImportError:
     GeminiClient = None
 
 logger = logging.getLogger("gemini_webapi_provider")
+
+def prepare_veo_prompt(prompt: str) -> str:
+    """Sanitizes prompt for Veo: replaces banned public figures and enforces Generate a video prefix."""
+    replacements = [
+        (r"\bWang\s+Chuanfu\b", "an ambitious Chinese tech founder and CEO in formal business suit"),
+        (r"\bVương\s+Truyền\s+Phúc\b", "an ambitious Chinese tech founder and CEO in formal business suit"),
+        (r"\bElon\s+Musk\b", "a prominent tech visionary executive in modern blazer"),
+        (r"\bLou\s+Shiangyang\b", "a sharp corporate investor and co-founder in business attire"),
+        (r"\bLu\s+Xiangyang\b", "a sharp corporate investor and co-founder in business attire"),
+        (r"\bLữ\s+Hướng\s+Dương\b", "a sharp corporate investor and co-founder in business attire"),
+    ]
+    clean = prompt.strip()
+    # Strip any leading 'Generate a video:' to avoid double prefixing
+    clean = re.sub(r"^Generate a video:\s*", "", clean, flags=re.IGNORECASE)
+    for pat, rep in replacements:
+        clean = re.sub(pat, rep, clean, flags=re.IGNORECASE)
+    
+    # Strip flat cartoon keywords if user wants real documentary
+    clean = re.sub(r"Clean flat vector cartoon[^.]*\.\s*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"Characters: rounded cartoon characters[^.]*\.\s*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"Motion: smooth cutout-style[^.]*\.\s*", "", clean, flags=re.IGNORECASE)
+    
+    clean = clean.strip(" ,.-;:")
+    if not clean:
+        clean = "modern electric car manufacturing factory in Shenzhen with high-tech automated robotic arms"
+    
+    final_prompt = f"Generate a video: {clean}, cinematic documentary lighting, 4k 24fps"
+    return final_prompt
+
 
 
 def extract_cookies_from_file(session_file: Path) -> Tuple[Optional[str], Optional[str]]:
@@ -124,7 +154,7 @@ def persist_rotated_cookie(client, session_file: Path, psid: str, psidts: Option
         new_psidts = client.cookies.get("__Secure-1PSIDTS") if hasattr(client, "cookies") else None
     except Exception:
         return
-    if new_psidts and new_psidts != psidts:
+    if new_psidts and isinstance(new_psidts, str) and new_psidts != psidts:
         atomic_save_session(session_file, psid, new_psidts)
         logger.info("🔄 Đã lưu __Secure-1PSIDTS mới vào %s", session_file.name)
 
@@ -162,6 +192,8 @@ class GeminiWebApiProvider(VideoProvider):
             secure_1psid=psid,
             secure_1psidts=psidts,
             proxy=self.proxy,
+            watchdog_timeout=240.0,
+            timeout=300.0,
         )
 
         try:
@@ -238,8 +270,13 @@ class GeminiWebApiProvider(VideoProvider):
         prompt: str,
         out_path: Path,
         session_file: Optional[Path] = None,
+        seed_image: Optional[Path] = None,
     ) -> ProviderResult:
-        """Synchronous wrapper to generate a video shot via async RPC."""
+        """Synchronous wrapper to generate a video shot via async RPC.
+
+        `seed_image` (khi có) là ảnh still đã sinh sẵn — Veo animate chính ảnh
+        đó thay vì vẽ tự do từ chữ, giữ nhân vật & style khớp ảnh AI.
+        """
         if not session_file or not session_file.exists():
             return ProviderResult(
                 ok=False,
@@ -255,7 +292,7 @@ class GeminiWebApiProvider(VideoProvider):
                 error_message=f"Cannot extract __Secure-1PSID from {session_file}",
             )
 
-        return asyncio.run(self._async_generate(prompt, out_path, session_file, psid, psidts))
+        return asyncio.run(self._async_generate(prompt, out_path, session_file, psid, psidts, seed_image))
 
     async def _async_generate(
         self,
@@ -264,12 +301,15 @@ class GeminiWebApiProvider(VideoProvider):
         session_file: Path,
         psid: str,
         psidts: Optional[str],
+        seed_image: Optional[Path] = None,
     ) -> ProviderResult:
         start_time = time.time()
         client = GeminiClient(
             secure_1psid=psid,
             secure_1psidts=psidts,
             proxy=self.proxy,
+            watchdog_timeout=240.0,
+            timeout=300.0,
         )
 
         try:
@@ -287,10 +327,19 @@ class GeminiWebApiProvider(VideoProvider):
                         duration_sec=time.time() - start_time,
                     )
 
-            veo_prompt = sanitize_veo_prompt(prompt)
+            veo_prompt = prepare_veo_prompt(prompt)
 
-            logger.info("Submitting Veo prompt: '%s'...", veo_prompt[:80])
-            response = await client.generate_content(prompt=veo_prompt)
+            if seed_image and Path(seed_image).is_file():
+                # Image-first: Veo animates the AI-drawn still instead of
+                # inventing its own look, so character & style stay consistent.
+                logger.info("Submitting Veo prompt with seed image %s: '%s'...",
+                            Path(seed_image).name, veo_prompt[:80])
+                response = await client.generate_content(
+                    prompt=veo_prompt, files=[str(Path(seed_image))]
+                )
+            else:
+                logger.info("Submitting Veo prompt (text-only, no seed image): '%s'...", veo_prompt[:80])
+                response = await client.generate_content(prompt=veo_prompt)
 
             if not response.videos:
                 resp_text = (response.text or "").strip()

@@ -25,7 +25,9 @@ from services.settings_service import (
     get_provider_preset,
     get_vlm_model,
     get_xkiro_fallback_models,
+    is_gemini_image_enabled,
     is_veo_enabled,
+    set_gemini_image_enabled,
     is_vlm_enabled,
     mask_secret,
     set_setting,
@@ -299,6 +301,17 @@ _veo_toggle = st.toggle(
 if _veo_toggle != _veo_now:
     set_veo_enabled(_veo_toggle)
     st.success(f"Đã {'bật' if _veo_toggle else 'tắt'} Veo. Worker đang chạy sẽ áp dụng từ cảnh kế tiếp.")
+
+_gemini_img_now = is_gemini_image_enabled()
+_gemini_img_toggle = st.toggle(
+    "Dùng Google Gemini (Imagen 3) sinh ảnh tĩnh (Gate 3 Character & Gate 4 Ken Burns)",
+    value=_gemini_img_now,
+    key="gemini_img_enabled_toggle",
+    help="Bật = dùng Imagen 3 miễn phí từ tài khoản Google Pro; Tắt = dùng xKiro API.",
+)
+if _gemini_img_toggle != _gemini_img_now:
+    set_gemini_image_enabled(_gemini_img_toggle)
+    st.success(f"Đã {'bật' if _gemini_img_toggle else 'tắt'} Gemini Imagen 3 cho sinh ảnh. Áp dụng ngay.")
 
 try:
     # Read the pool state file directly: AccountPoolManager() would rewrite it and

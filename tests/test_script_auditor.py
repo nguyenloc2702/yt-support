@@ -260,7 +260,9 @@ def test_build_dual_scripts_raises_on_translation_failure(monkeypatch):
 
 
 def test_audit_algorithm_mode_pacing_and_duration():
-    # 40 scenes, each 12 to 24 words (4-8s at ~3 words/s)
+    # Scenes land on the target duration at 3.5 words/s; 12 to 24 words was the
+    # old enforcement window. Now the window is 13-21 words, with a steering
+    # band of 13-17 words = 3.7-4.9s toward the corpus median.
     auditor = ScriptAuditor(algorithm_mode=True)
     raw = "\n".join([
         f"{i}. Đây là cảnh số {i} với nội dung đủ dài để đạt mười hai từ trở lên."
@@ -269,8 +271,8 @@ def test_audit_algorithm_mode_pacing_and_duration():
     res = auditor.audit_script(raw)
     assert res.is_valid is True
     assert len(res.scenes) == 40
-    assert res.scenes[0]["duration"] == 6.0
-    assert 12 <= res.scenes[0]["word_count"] <= 24
+    assert res.scenes[0]["duration"] == auditor.target_shot_duration
+    assert res.scenes[0]["word_count"] == 17
 
 
 
@@ -319,7 +321,9 @@ def test_slicer_prompt_states_the_derived_budget_not_a_hardcoded_one(monkeypatch
 
     def fake_chat_json(system_prompt, user_prompt, **kw):
         seen["prompt"] = user_prompt
-        return {"items": []}
+        return {"items": [{"situation": "một tình huống cụ thể",
+                           "voiceover_vi": "ngân hàng siết vốn cho vay rủi ro cao",
+                           "voiceover_en": "the bank tightens lending to risky borrowers"}]}
 
     monkeypatch.setattr("pipeline.llm_client.chat_json", fake_chat_json)
     lo, hi = sa.RECOMMENDED_WORDS_PER_SHOT_ALGORITHM

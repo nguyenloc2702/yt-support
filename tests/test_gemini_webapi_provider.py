@@ -165,6 +165,36 @@ def test_generate_quota_exhausted(mock_client_cls, tmp_path: Path):
     assert result.ok is False
     assert result.error_kind == ErrorKind.QUOTA
     assert "quota exhausted" in result.error_message.lower()
-    # Ensure the vector cartoon frame was passed to generate_content
+    # Veo gets the sanitized real-documentary prompt: the cartoon style prefix
+    # is stripped by prepare_veo_prompt and the "Generate a video:" wrapper is
+    # applied in its place.
     call_args = mock_client.generate_content.call_args[1]
-    assert call_args["prompt"].startswith("Clean flat vector cartoon animation")
+    assert call_args["prompt"].startswith("Generate a video: ")
+    assert "cartoon" not in call_args["prompt"].lower()
+
+
+@patch("services.gemini_webapi_provider.GeminiClient")
+def test_generate_with_seed_image_passes_the_file(mock_client_cls, tmp_path: Path):
+    """Image-first Veo: a seed image must ride along in generate_content files."""
+    session_file = tmp_path / "acc.json"
+    atomic_save_session(session_file, "psid", "psidts")
+    out_video = tmp_path / "output.mp4"
+    seed = tmp_path / "shot_010.seed.jpg"
+    seed.write_bytes(b"fake-jpeg" * 400)
+
+    mock_resp = MagicMock()
+    mock_resp.videos = []  # video handling is covered by test_generate_success
+
+    mock_client = MagicMock()
+    mock_client.init = AsyncMock()
+    mock_client.close = AsyncMock()
+    mock_client.generate_content = AsyncMock(return_value=mock_resp)
+    mock_client.usage_info = {"tier": {"label": "PRO"}}
+    mock_client.cookies = {}
+    mock_client_cls.return_value = mock_client
+
+    provider = GeminiWebApiProvider()
+    provider.generate("A cinematic shot", out_video, session_file, seed_image=seed)
+
+    call_kwargs = mock_client.generate_content.call_args[1]
+    assert call_kwargs.get("files") == [str(seed)]

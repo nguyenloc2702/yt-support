@@ -24,7 +24,7 @@ logger = logging.getLogger("account_pool")
 
 DEFAULT_SESSION_DIR = Path("sessions")
 DEFAULT_POOL_STATE_FILE = Path("sessions/pool_state.json")
-MAX_SHOTS_PER_ACCOUNT_DAY = 20  # Safe ~70% daily budget per Pro account
+MAX_SHOTS_PER_ACCOUNT_DAY = 500  # High budget per Pro account with rolling 5h resets
 
 # A dead cookie cannot be pinged back to life, so repeated AUTH rejections must
 # park the account and tell the owner instead of silently retrying for days.

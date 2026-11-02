@@ -42,3 +42,19 @@ scratch/
 /sessions/*
 !/sessions/.gitkeep
 
+
+# Video, analysis and test artifacts
+/analysis/
+/assets/characters/
+/assets/music/
+/out/
+remake_*/
+kich_ban_*.txt
+*.jpg
+*.jpeg
+*.png
+*.vtt
+*.log
+*.db
+dbg_out.txt
+test_shot*.jpg

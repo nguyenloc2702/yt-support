@@ -26,6 +26,7 @@ Usage:
 import json
 import logging
 import subprocess
+import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -78,6 +79,60 @@ BEAT_ROLE_TO_MOOD = {
     "payoff": "celebratory_groove",
     "moral": "reflective_guitar",
 }
+
+# Families a beat role may draw from; the pick rotates per cue.
+BEAT_ROLE_MOODS = {
+    "hook": ["mysterious"],
+    "setup": ["nostalgic", "gentle"],
+    "rising": ["energetic", "quirky"],
+    "crisis": ["ominous"],
+    "breakthrough": ["triumphant"],
+    "payoff": ["celebratory"],
+    "moral": ["reflective", "gentle"],
+}
+
+# Legacy mood tokens ("mysterious_pizzicato") and plain moods ("mysterious")
+# both resolve to the same family of files named "<family>__<slug>.mp3".
+MOOD_FAMILY = {mood: mood.split("_")[0] for mood in MOOD_TO_FILE}
+
+# Narrative position -> beat role, used when only shot durations are known.
+BEAT_ROLE_POSITION = [
+    (0.08, "hook"),
+    (0.25, "setup"),
+    (0.60, "rising"),
+    (0.80, "crisis"),
+    (0.94, "breakthrough"),
+    (1.01, "payoff"),
+]
+
+# Cues shorter than this are folded into the previous cue so the bed does not
+# flip every few seconds.
+MIN_CUE_S = 20.0
+
+# Silence the bed for this long just before the closing cue (the reference
+# channel drops music entirely under its last line).
+MUSIC_BREAK_S = 10.0
+
+# Every cue is levelled to this integrated loudness so a hot master cannot sit
+# on top of the narration. Our TTS narration measures about -20 LUFS, so the
+# bed lands ~18 dB underneath it.
+BED_TARGET_LUFS = -38.0
+LOUDNESS_FILE = "LOUDNESS.json"
+
+
+def role_for_position(pos: float) -> str:
+    for limit, role in BEAT_ROLE_POSITION:
+        if pos < limit:
+            return role
+    return "payoff"
+
+
+def mood_family(mood: str) -> str:
+    """Collapse a mood or legacy mood token to its pack family name."""
+    if not mood:
+        return ""
+    return MOOD_FAMILY.get(mood, mood.split("_")[0])
+
 
 
 # =============================================================================
@@ -256,16 +311,20 @@ class BGMManager:
     - FFmpeg command generation for mixing
     """
     
-    def __init__(self, bgm_dir: Optional[Path] = None):
+    def __init__(self, bgm_dir: Optional[Path] = None, rotation_seed: str = ""):
         """
         Initialize the BGM manager.
         
         Args:
             bgm_dir: Directory containing BGM audio files.
                     Defaults to DEFAULT_BGM_DIR.
+            rotation_seed: Stable string (e.g. a job id) that shifts which
+                    track inside a mood family gets picked.
         """
         self.bgm_dir = Path(bgm_dir) if bgm_dir else DEFAULT_BGM_DIR
         self.bgm_dir.mkdir(parents=True, exist_ok=True)
+        self.rotation_seed = rotation_seed
+        self._loudness = self._load_loudness()
         
         # Track registry
         self.tracks: Dict[str, BGMTrack] = {}
@@ -312,7 +371,7 @@ class BGMManager:
         """
         # If path is not provided, try to find a matching file
         if path is None:
-            path = self._find_bgm_file(mood)
+            path = self._find_bgm_file(mood, key=track_id)
             if path is None:
                 # Use a default file
                 path = self.bgm_dir / MOOD_TO_FILE.get(mood, "default.mp3")
@@ -341,8 +400,37 @@ class BGMManager:
         
         return track_id
     
-    def _find_bgm_file(self, mood: str) -> Optional[Path]:
-        """Find a BGM file matching the mood."""
+    def _load_loudness(self) -> Dict[str, Dict[str, float]]:
+        path = self.bgm_dir / LOUDNESS_FILE
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("tracks", {})
+        except (OSError, ValueError):
+            return {}
+
+    def _bed_gain_db(self, track_path: Path) -> float:
+        """Gain that puts this track at BED_TARGET_LUFS, or the default if unmeasured."""
+        entry = self._loudness.get(track_path.name)
+        if not entry or entry.get("lufs") is None:
+            return DEFAULT_BGM_VOLUME
+        return max(-30.0, min(-6.0, BED_TARGET_LUFS - float(entry["lufs"])))
+
+    def _find_bgm_file(self, mood: str, key: str = "") -> Optional[Path]:
+        """Find a BGM file for a mood, rotating inside its pack family.
+
+        Files are named "<family>__<slug>.mp3"; the choice is a stable hash of
+        (rotation_seed, key), so one render is reproducible while different
+        roles and jobs land on different tracks.
+        """
+        family = mood_family(mood)
+        if family:
+            pool: List[Path] = []
+            for ext in ("*.mp3", "*.wav", "*.aac", "*.ogg"):
+                pool.extend(self.bgm_dir.glob(f"{family}__{ext}"))
+            if pool:
+                pool.sort()
+                idx = zlib.crc32(f"{self.rotation_seed}|{key or mood}".encode()) % len(pool)
+                return pool[idx]
+
         # Try exact match
         for ext in ["*.mp3", "*.wav", "*.aac", "*.ogg"]:
             for file_path in self.bgm_dir.glob(ext):
@@ -709,6 +797,69 @@ class BGMManager:
                 track_ids.append(track_id)
                 current_time = end_time
         
+        return track_ids
+
+    def create_from_shot_durations(
+        self,
+        durations: List[float],
+        total_duration: Optional[float] = None,
+    ) -> List[str]:
+        """Lay one BGM cue per narrative act when only shot lengths are known.
+
+        The act is chosen by the scene's position in the story, and each act
+        gets its own mood family ([[BEAT_ROLE_TO_MOOD]]); the file inside the
+        family rotates per track id.
+        """
+        weights = [max(0.5, float(d or 0)) for d in durations]
+        if not weights:
+            return []
+        span = float(total_duration or sum(weights))
+        scale = span / sum(weights)
+
+        segments: List[List[Any]] = []
+        cursor = 0.0
+        for weight in weights:
+            length = weight * scale
+            role = role_for_position((cursor + length / 2) / span)
+            end = min(span, cursor + length)
+            if segments and segments[-1][0] == role:
+                segments[-1][2] = end
+            else:
+                segments.append([role, cursor, end])
+            cursor = end
+
+        merged: List[List[Any]] = []
+        for role, start, end in segments:
+            if merged and end - start < MIN_CUE_S:
+                merged[-1][2] = end
+            else:
+                merged.append([role, start, end])
+
+        if MUSIC_BREAK_S > 0 and len(merged) >= 2:
+            previous, closing = merged[-2], merged[-1]
+            cut = closing[1] - MUSIC_BREAK_S
+            if cut - previous[1] >= MIN_CUE_S:
+                previous[2] = cut
+
+        track_ids = []
+        for k, (role, start, end) in enumerate(merged):
+            track_id = f"beat_{role}_{k}"
+            options = BEAT_ROLE_MOODS.get(role) or [BEAT_ROLE_TO_MOOD.get(role)]
+            options = [m for m in options if m]
+            if not options:
+                continue
+            mood = options[zlib.crc32(track_id.encode()) % len(options)]
+            if self._find_bgm_file(mood, key=track_id) is None:
+                continue
+            self.add_track(
+                track_id=track_id,
+                mood=mood,
+                start_time=start,
+                end_time=end,
+                beat_role=role,
+            )
+            self.tracks[track_id].volume_db = self._bed_gain_db(self.tracks[track_id].path)
+            track_ids.append(track_id)
         return track_ids
     
     def get_mood_shift_schedule(self) -> List[Dict[str, Any]]:

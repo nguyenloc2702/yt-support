@@ -1,0 +1,15 @@
+[Unit]
+Description=Muse Job Inbox API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/support-video-edit
+EnvironmentFile=/opt/support-video-edit/.env
+ExecStart=/opt/support-video-edit/.venv/bin/uvicorn services.job_inbox_api:app --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=5
+User=video
+
+[Install]
+WantedBy=multi-user.target

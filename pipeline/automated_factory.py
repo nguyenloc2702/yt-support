@@ -172,6 +172,60 @@ def send_voice_previews(notifier: TelegramNotifier, job_id: str, project_dir: Pa
 
 
 class AutomatedFactory:
+    """Coordinates local analysis and delivery around the Muse video path."""
+
+    def submit_muse_video_job(
+        self,
+        *,
+        job_id: str,
+        script: str | Path,
+        target_duration_sec: float,
+        title: str = "",
+        language: str = "vi",
+        chosen_voice: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit an approved script to Muse when the feature flag is enabled.
+
+        This method deliberately does not call Gemini or render locally. The
+        local factory remains responsible for preparing the approved artifact;
+        Muse owns ``make_video`` execution after this idempotent submission.
+        """
+        from services.settings_service import is_muse_video_enabled
+
+        if not is_muse_video_enabled():
+            raise RuntimeError(
+                "Muse video path is disabled; enable MUSE_VIDEO_ENABLED before submission"
+            )
+
+        from services.muse_job_client import MuseJobClient, submit_make_video
+
+        response = submit_make_video(
+            client=MuseJobClient(),
+            factory_job_id=job_id,
+            script=script,
+            target_duration_sec=target_duration_sec,
+            title=title,
+            language=language,
+            voice=chosen_voice or "vi-VN-NamMinhNeural",
+            note=note,
+        )
+        muse_job_id = response.get("job_id") or response.get("id")
+        logger.info(
+            "Submitted factory job %s to Muse Job Inbox as %s (duplicate=%s)",
+            job_id,
+            muse_job_id,
+            response.get("duplicate", False),
+        )
+        if self.notifier.is_configured:
+            self.notifier.send_message(
+                f"🧠 <b>Đã gửi Muse xử lý video</b>\n"
+                f"Job local: <code>{job_id}</code>\n"
+                f"Job Muse: <code>{muse_job_id or 'unknown'}</code>\n"
+                f"Trạng thái: <b>{response.get('status', 'pending')}</b>"
+            )
+        return response
+
     def __init__(
         self,
         output_dir: Optional[Path] = None,
@@ -402,8 +456,38 @@ class AutomatedFactory:
             return job_id
 
     def execute_approved_reup(self, job_id: str):
-        """Executes the rendering phase for an approved Mode 1 job."""
+        """Execute an approved job, delegating approved Mode 2 video to Muse."""
         job = self.jq.get_job(job_id)
+        if job and job.get("status") == "APPROVED" and str(job.get("mode", "")).lower() in ("mode2", "remake", "ai_genesis"):
+            from services.settings_service import is_muse_video_enabled
+
+            if is_muse_video_enabled():
+                project_dir = Path(job.get("project_dir") or (self.output_dir / job_id))
+                script_file = Path(job.get("script_file") or "")
+                if not script_file.is_file():
+                    script_file = project_dir / f"kich_ban_VI_{job_id}.txt"
+                if not script_file.is_file():
+                    candidates = sorted(project_dir.glob(f"kich_ban_VI_{job_id}*.txt"))
+                    script_file = candidates[0] if candidates else Path()
+                if not script_file.is_file():
+                    raise FileNotFoundError(
+                        f"No approved Vietnamese script artifact found for Muse job {job_id}"
+                    )
+                response = self.submit_muse_video_job(
+                    job_id=job_id,
+                    script=script_file,
+                    target_duration_sec=float(job.get("target_duration") or 180.0),
+                    title=str(job.get("source_title") or ""),
+                    note="Approved Mode 2 job delegated to Muse make_video",
+                )
+                muse_job_id = response.get("job_id") or response.get("id")
+                self.jq.update_job_status(
+                    job_id,
+                    status="RENDERING",
+                    script_summary=f"Đã gửi Muse make_video: {muse_job_id or 'unknown'}",
+                )
+                return True
+
         if not job or job.get("status") != "APPROVED" or str(job.get("mode", "")).upper() not in ("SMART_REUP", "REUP"):
             logger.info("Job %s is not an APPROVED Smart Reup job. Skipping reup execution.", job_id)
             return False
@@ -622,7 +706,7 @@ class AutomatedFactory:
         """
         source_title = probe_youtube_title(youtube_url)
         if not job_id:
-            job_id = self.jq.create_job(mode="remake", url=youtube_url, target_duration=target_duration or 180.0, source_title=source_title)
+            job_id = self.jq.create_job(mode="remake", url=youtube_url, target_duration=target_duration, source_title=source_title)
         elif source_title:
             with self.jq._get_conn() as conn:
                 conn.execute("UPDATE factory_jobs SET source_title = ? WHERE id = ? AND (source_title IS NULL OR source_title = '')", (source_title, job_id))
@@ -720,7 +804,7 @@ class AutomatedFactory:
                 effective_duration = float(target_duration) if (target_duration and target_duration > 0) else total_dur
                 # Planned scenes average ~6s (14-28 words at 3.5 words/s), so divide
                 # by 6 rather than 5 to land the script on the requested duration.
-                target_shots = max(6, min(180, int(round(effective_duration / 6.0))))
+                target_shots = max(6, int(round(effective_duration / 6.0)))
 
                 # Phase 2: best-of-N grounded rewrite with LLM judging.
                 # Fails loudly (ScriptFactoryError) when the xKiro gateway is unusable.
@@ -1310,10 +1394,15 @@ class AutomatedFactory:
                 from pipeline.tts import _probe_duration, synthesize_one_xkiro_with_fallback
                 from services.script_auditor import VOICE_MAP
 
-                voice_en = VOICE_MAP["en"]["default"]
+                voice_file = project_dir / "voice_en.txt"
+                if not voice_file.exists():
+                    voice_file = project_dir / "voice.txt"
+                voice_en = voice_file.read_text(encoding="utf-8").strip() if voice_file.exists() else VOICE_MAP["en"]["default"]
                 out_en = project_dir / "audio_en_full.mp3"
                 txt_en = asm.script_en_text
                 if txt_en:
+                    from services.english_script_normalizer import normalize_english_narration
+                    txt_en = normalize_english_narration(txt_en)
                     used_voice = synthesize_one_xkiro_with_fallback(txt_en, voice_en, out_en)
                     dur = _probe_duration(out_en)
                     asm.set_audio_generated(language="en", file_path=out_en, duration=dur, voice_id=used_voice)
@@ -1445,10 +1534,33 @@ class AutomatedFactory:
             by_index = {
                 int(sc.get("index", i + 1)): sc for i, sc in enumerate(plan)
             }
-            windows = {
-                int(win.get("index", i + 1)): win
-                for i, win in enumerate(getattr(report, "word_timeline", None) or [])
-            }
+            # A mid_clause timeline may split one scene into several windows
+            # (same index, part k of n); the plan needs the whole span back, so
+            # merge the parts 1:1 before copying them onto the scenes.
+            windows: Dict[int, Dict[str, Any]] = {}
+            for pos, win in enumerate(getattr(report, "word_timeline", None) or []):
+                idx = int(win.get("index", pos + 1))
+                start = float(win.get("start", 0.0))
+                end = float(win.get("end", start))
+                cur = windows.get(idx)
+                if cur is None:
+                    windows[idx] = {
+                        "index": idx,
+                        "start": start,
+                        "end": end,
+                        # Keep the window's own (already rounded) duration; the
+                        # merged case below re-derives it from the spans.
+                        "duration": float(win.get("duration", max(0.0, end - start))),
+                        "speech_start": float(win.get("speech_start", start)),
+                        "speech_end": float(win.get("speech_end", end)),
+                        "words": list(win.get("words") or []),
+                    }
+                else:
+                    cur["end"] = max(cur["end"], end)
+                    cur["duration"] = round(max(0.0, cur["end"] - cur["start"]), 3)
+                    cur["speech_start"] = min(cur["speech_start"], float(win.get("speech_start", start)))
+                    cur["speech_end"] = max(cur["speech_end"], float(win.get("speech_end", end)))
+                    cur["words"].extend(win.get("words") or [])
             for entry in report.timing_map:
                 sc = by_index.get(int(entry["index"]))
                 if sc is None:
@@ -1485,7 +1597,7 @@ class AutomatedFactory:
                             "language": lang,
                             "audio_path": report.audio_path,
                             "total_sec": report.audio_duration_sec,
-                            "cut_policy": "mid_pause",
+                            "cut_policy": "mid_clause",
                             "scenes": report.word_timeline,
                         },
                         indent=2,
@@ -1522,52 +1634,47 @@ class AutomatedFactory:
         (OPENAI_API_KEY). Raises when no provider succeeds — no placeholder
         images are ever written (zero-fake policy).
         """
-        try:
-            from services.xkiro_image_provider import generate_xkiro_image
+        from services.settings_service import is_gemini_image_enabled
+        from services.gemini_image_provider import generate_gemini_image
 
-            used_model = generate_xkiro_image(prompt, ref_path)
-            logger.info("Character reference generated via xKiro (%s): %s", used_model, ref_path)
-            return
-        except Exception as exc:
-            logger.warning("xKiro character image failed (%s). Trying Imagen.", exc)
+        gemini_first = is_gemini_image_enabled()
 
-        session_file: Optional[Path] = None
-        try:
-            account = self.account_pool.get_available_account(reserve=False)
-            if account and Path(account.session_file).exists():
-                session_file = Path(account.session_file)
-        except Exception as exc:
-            logger.warning("Account pool unavailable for character image: %s", exc)
-
-        if session_file:
+        def _try_gemini() -> bool:
             try:
-                import asyncio
-
-                from gemini_webapi import GeminiClient
-                from services.gemini_webapi_provider import (
-                    extract_cookies_from_file,
-                    persist_rotated_cookie,
+                ok = generate_gemini_image(
+                    prompt=prompt,
+                    out_path=ref_path,
+                    account_pool=self.account_pool,
+                    sanitize=False,
                 )
-
-                psid, psidts = extract_cookies_from_file(session_file)
-                if psid:
-                    async def _gen_img():
-                        c = GeminiClient(secure_1psid=psid, secure_1psidts=psidts)
-                        try:
-                            await c.init(timeout=60, auto_refresh=False, verbose=False)
-                            out = await c.generate_content(prompt)
-                            if out.images:
-                                await out.images[0].save(path=str(ref_path.parent), filename=ref_path.name)
-                        finally:
-                            persist_rotated_cookie(c, session_file, psid, psidts)
-                            await c.close()
-
-                    asyncio.run(asyncio.wait_for(_gen_img(), timeout=120.0))
-                    if ref_path.exists() and ref_path.stat().st_size > 1000:
-                        logger.info("Character reference generated via Imagen: %s", ref_path)
-                        return
+                if ok and ref_path.exists() and ref_path.stat().st_size >= 1000:
+                    logger.info("Character reference generated via Gemini (Imagen 3): %s", ref_path)
+                    return True
             except Exception as exc:
-                logger.warning("Imagen character image failed (%s). Trying DALL-E.", exc)
+                logger.warning("Gemini character image failed: %s", exc)
+            return False
+
+        def _try_xkiro() -> bool:
+            try:
+                from services.xkiro_image_provider import generate_xkiro_image
+
+                used_model = generate_xkiro_image(prompt, ref_path)
+                logger.info("Character reference generated via xKiro (%s): %s", used_model, ref_path)
+                return True
+            except Exception as exc:
+                logger.warning("xKiro character image failed (%s). Trying next provider.", exc)
+                return False
+
+        if gemini_first:
+            if _try_gemini():
+                return
+            if _try_xkiro():
+                return
+        else:
+            if _try_xkiro():
+                return
+            if _try_gemini():
+                return
 
         import os
 

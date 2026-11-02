@@ -13,6 +13,7 @@ from pipeline.audio_audit import (
     normalize_tokens,
     save_audio_audit,
 )
+from pipeline.word_timing import MAX_PHYSICAL_DUR
 
 WORD_DUR = 0.29
 SCENE_GAP = 0.4
@@ -125,11 +126,19 @@ def test_long_audio_keeps_exact_windows_and_warns_out_of_band(tmp_path):
     # 19 words * 0.5 = 9.5s vs 10.4s plan -> drift beyond the error threshold
     assert result.duration_drift > 0.25
     assert any("lệch plan" in e for e in result.errors)
-    # No 4-8s clamp: the windows are the real audio spans and still tile the
-    # track, because a clamp would shift every later scene against the voice.
+    # No 4-8s clamp on the plan mapping: the timing stays the real audio span.
     assert [t["duration_sec"] for t in result.timing_map] == pytest.approx([9.5, 90.5], abs=0.02)
     assert sum(t["duration_sec"] for t in result.timing_map) == pytest.approx(100.0, abs=0.02)
-    assert any("trên ngưỡng vật lý 10.5s" in w for w in result.warnings)
+    # The mid_clause cut sheet splits both over-band scenes at their breathing
+    # points (the unspoken tail follows the interpolated word grid) and the
+    # cut windows stay under the physical cap; what cannot split (the silent
+    # 9.05s tail) stays visible as an off-band warning.
+    durs = [w["duration"] for w in result.word_timeline]
+    assert sum(durs) == pytest.approx(100.0, abs=0.02)
+    assert all(d <= MAX_PHYSICAL_DUR + 0.01 for d in durs)
+    assert any(w.get("of", 1) >= 2 for w in result.word_timeline)
+    assert not any("trên ngưỡng vật lý" in w for w in result.warnings)
+    assert any("ngoài band" in w for w in result.warnings)
 
 
 def test_rate_fit_sidecar_drives_naturalness(tmp_path):
@@ -215,9 +224,11 @@ def test_save_and_load_roundtrip(tmp_path):
     assert load_audio_audit(tmp_path / "missing.json") is None
 
 
-def test_wpm_band_is_language_aware(tmp_path):
-    # Same 160-WPM articulation: out of band for VI, natural for EN.
-    plan = _plan(n=1)
+def test_wpm_band_is_language_aware(tmp_path, monkeypatch):
+    # Same 160-WPM articulation: out of band for VI, natural for EN. 13 words
+    # at 0.375s/word = a 4.88s scene window, inside the 3.5-6s shot band, so
+    # this test is about the WPM band and not the shot band.
+    plan = [{"index": 1, "text": _scene_text(1, filler=5), "duration": 5.51}]
     words, duration = _fake_timings([plan[0]["text"]], word_dur=0.375)
     audio = _audio(tmp_path)
 

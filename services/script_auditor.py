@@ -44,25 +44,24 @@ GENERATED_WORD_WINDOW = (
     ceil(MIN_SHOT_DURATION_ALGORITHM * SCENE_WORDS_PER_SECOND),
     floor(MAX_SHOT_DURATION_ALGORITHM * SCENE_WORDS_PER_SECOND),
 )
-# Custom scripts keep the historical 12-word floor; generated scripts are steered
+# Custom scripts keep a floor of their own; generated scripts are steered
 # toward RECOMMENDED_WORDS_PER_SHOT_ALGORITHM but only gated on GENERATED_WORD_WINDOW.
-MIN_WORDS_PER_SHOT_ALGORITHM = 12
+MIN_WORDS_PER_SHOT_ALGORITHM = 9
 # The band every prompt (and the owner-facing Gate 1 copy) asks the writer for:
-# 17-21 words = 4.9-6.0s. The top edge has to sit *inside* QA S10's 6.5s mean
-# ceiling — the old 18-24 band ended at 6.9s and a live run that followed it
-# landed at 6.68s mean, i.e. the steering was pushing the script out of the
-# band that grades it. The enforced window stays GENERATED_WORD_WINDOW.
-RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (17, 21)
+# 13-17 words = 3.7-4.9s at the measured VI pace of 3.46 words/s. The reference
+# corpus cuts every 4.13s (median), so the old 17-21 words (4.9-6.0s) planned
+# every scene ~1.7s long and every render landed at ~8 cuts/min instead of ~13.
+# The enforced window stays GENERATED_WORD_WINDOW.
+RECOMMENDED_WORDS_PER_SHOT_ALGORITHM = (13, 17)
 MAX_WORDS_PER_SHOT_ALGORITHM = GENERATED_WORD_WINDOW[1]
-# EN lines follow the EN voice pace, not the VI one: documentary EN reads
-# ~160 wpm (edge) so a 4-8s scene carries 12-22 words. Capping EN at the old
-# 16 left every line 60% the length of its VI twin and the EN audio gasping
-# between sentences. Shared by the slicer prompt and the factory's rewrite.
-EN_MAX_WORDS_ALGORITHM = 22
+# EN lines follow the EN voice pace, not the VI one: the EN narration track
+# measures 2.54 words/s, so a 4.13s scene carries ~10.5 words. Shared by the
+# slicer prompt and the factory's rewrite.
+EN_MAX_WORDS_ALGORITHM = 15
 # EN instruction floor: shorter lines leave the EN voice gasping between
-# sentences (the dead air the owner rejected in job 7fb1a8).
-EN_MIN_WORDS = 12
-TARGET_SHOT_DURATION_ALGORITHM = 6.0  # seconds (4-8s scenes at ~3.5 words/s)
+# sentences (the dead air the owner rejected in job 7fb1a8). 9 words = 3.5s.
+EN_MIN_WORDS = 9
+TARGET_SHOT_DURATION_ALGORITHM = 4.3  # seconds, the corpus median
 # Share of scenes allowed outside the word window. The factory gate and the
 # Gate 1 audit must agree, or a script the factory accepted gets rejected one
 # step later for the same outlier.
@@ -924,7 +923,7 @@ Chỉ trả về JSON thuần túy."""
 
     scenes_data: Optional[List[Dict[str, Any]]] = None
     block_feedback = ""
-    min_acceptable = max(3, int(scenes_per_block * 0.7))
+    min_acceptable = max(1, int(scenes_per_block * 0.6))
     last_err: Optional[Exception] = None
     for _attempt in range(2):
         try:
@@ -938,10 +937,18 @@ Chỉ trả về JSON thuần túy."""
             last_err = exc
             continue
         candidate = None
-        for key in ("items", "scenes", "data"):
-            if isinstance(parsed.get(key), list):
-                candidate = parsed[key]
-                break
+        if isinstance(parsed, list):
+            candidate = parsed
+        elif isinstance(parsed, dict):
+            for key in ("items", "scenes", "data", "results", "scenes_data", "list", "output"):
+                if isinstance(parsed.get(key), list):
+                    candidate = parsed[key]
+                    break
+            if candidate is None:
+                for val in parsed.values():
+                    if isinstance(val, list) and (not val or isinstance(val[0], dict)):
+                        candidate = val
+                        break
         if candidate is None:
             last_err = ValueError("semantic slicing returned unexpected JSON shape")
             continue
@@ -957,7 +964,7 @@ Chỉ trả về JSON thuần túy."""
             f"Khối này PHẢI có đúng {scenes_per_block} cảnh (sai số ±1), "
             f"mỗi cảnh {rec_lo}-{rec_hi} từ, không gộp nhiều ý vào một cảnh."
         )
-    if scenes_data is None:
+    if not scenes_data:
         raise last_err or RuntimeError("Slicer block returned no usable scenes")
     return scenes_data
 
@@ -1034,7 +1041,7 @@ def build_semantic_dual_scripts_from_transcript(
         # sized so each call emits a manageable scene count while the whole script
         # still reaches the requested target_shots.
         target_scenes = max(6, int(target_shots))
-        num_blocks = max(1, min(16, int(round(total_dur / 75.0))))
+        num_blocks = max(1, int(round(total_dur / 75.0)))
         block_dur = total_dur / num_blocks
         scenes_per_block = max(3, int(round(target_scenes / num_blocks)))
 

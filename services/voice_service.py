@@ -92,6 +92,18 @@ XKIRO_VOICES_METADATA: List[Dict[str, Any]] = [
         "gender": "Female",
         "styles": ["xKiro AI", "Nữ chuẩn (VIP)"],
     },
+    {
+        "id": "male-narrator",
+        "locale": "en-US",
+        "gender": "Male",
+        "styles": ["xKiro AI", "Dramatic Narrator", "Documentary / Cinema"],
+    },
+    {
+        "id": "american-male",
+        "locale": "en-US",
+        "gender": "Male",
+        "styles": ["xKiro AI", "American Male", "Explainer / Modern Tech"],
+    },
 ]
 
 

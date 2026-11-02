@@ -230,3 +230,30 @@ def test_worker_loop_wires_the_reaper():
 
     source = inspect.getsource(VideoAutomationWorker.run)
     assert source.count("self._reap_orphans()") == 2  # startup + idle branch
+
+
+def test_caption_file_is_built_from_the_job_word_timeline(temp_worker: VideoAutomationWorker,
+                                                          tmp_path: Path):
+    """P1: the worker, not a hand-run script, produces the cue file the render burns."""
+    proj = tmp_path / "job_dir"
+    proj.mkdir()
+    timeline = {"scenes": [{"index": 1, "words": [
+        {"w": "hello", "start": 0.5, "end": 0.9},
+        {"w": "world", "start": 1.0, "end": 1.4},
+    ]}]}
+    (proj / "narration_words_en.json").write_text(json.dumps(timeline), encoding="utf-8")
+
+    out = temp_worker._build_caption_file(proj, "en")
+
+    assert out is not None and out == proj / "subtitles_en.ass" and out.is_file()
+    text = out.read_text(encoding="utf-8")
+    assert "hello" in text and "world" in text and "\\k" in text
+
+
+def test_caption_file_absent_when_the_job_has_no_word_timeline(temp_worker: VideoAutomationWorker,
+                                                              tmp_path: Path):
+    """An old job without timing must still render, simply without captions."""
+    proj = tmp_path / "old_job_dir"
+    proj.mkdir()
+
+    assert temp_worker._build_caption_file(proj, "vi") is None

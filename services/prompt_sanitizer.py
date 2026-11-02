@@ -135,8 +135,9 @@ _NEGATED_PHOTO = re.compile(
 )
 
 
-def clean_narration_for_tts(text: str) -> str:
-    """Removes subtitle artifacts, VTT metadata headers, sound tags, and bracketed notes for clean TTS voiceover."""
+def clean_narration_for_tts(text: str, language: str = "") -> str:
+    """Removes subtitle artifacts, VTT metadata headers, sound tags, bracketed notes,
+    and runs English script normalization when language is 'en'."""
     if not text:
         return ""
     cleaned = text
@@ -165,6 +166,15 @@ def clean_narration_for_tts(text: str) -> str:
 
     # 5. Clean whitespace and surrounding punctuation
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\n\r\"'->:")
+
+    # 6. Apply English script normalization if language is English
+    if language and language.lower().startswith("en"):
+        try:
+            from services.english_script_normalizer import normalize_english_narration
+            cleaned = normalize_english_narration(cleaned)
+        except Exception:
+            pass
+
     return cleaned
 
 

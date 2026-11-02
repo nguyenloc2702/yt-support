@@ -43,6 +43,7 @@ from services.prompt_sanitizer import ensure_style_prefix
 from services.script_auditor import (
     BUDGET_RATIO_FLOOR,
     EN_MAX_WORDS_ALGORITHM,
+    EN_MIN_WORDS,
     GENERATED_WORD_WINDOW,
     RECOMMENDED_WORDS_PER_SHOT_ALGORITHM,
     REPEAT_WARN_SCENES,
@@ -80,17 +81,18 @@ MAX_WPM = 214.0
 TARGET_WPM = 205.0
 MIN_SCENE_DURATION = SCENE_DUR_RANGE[0]
 MAX_SCENE_DURATION = SCENE_DUR_RANGE[1]
-# The per-scene word window is nothing but the QA duration window (S09: 4-8s)
-# expressed in words. It used to be a free-floating 18-24 that no downstream
-# check required, while the slicer feeding it deliberately emitted 6-26 words.
+# The per-scene word window is nothing but the QA duration window (S09:
+# 3.5-6.0s) expressed in words. It used to be a free-floating 18-24 that no
+# downstream check required, while the slicer feeding it deliberately emitted
+# 6-26 words.
 VI_MIN_WORDS, VI_MAX_WORDS = GENERATED_WORD_WINDOW
-# Steering band quoted to the model: it aims the script at ~6s scenes without
-# being the thing that invalidates a variant. Only the edges above are enforced.
+# Steering band quoted to the model: it aims the script at the corpus's ~4.3s
+# scenes without being the thing that invalidates a variant. Only the edges
+# above are enforced.
 VI_TARGET_WORDS = RECOMMENDED_WORDS_PER_SHOT_ALGORITHM
 EN_MAX_WORDS = EN_MAX_WORDS_ALGORITHM
 # EN instruction floor: a line shorter than this leaves the EN voice gasping
 # between sentences (the 48%-pause "dead air" the owner rejected).
-EN_MIN_WORDS = 12
 # Acceptance mirrors the scorecard instead of out-tightening it: a flat AND over
 # every scene asks ~170 independent LLM draws to land in one narrow window at
 # once, which is unwinnable (measured 55-65% per-scene compliance => ~1e-32).
@@ -99,21 +101,31 @@ MIN_BUDGET_RATIO = BUDGET_RATIO_FLOOR
 # the word count, so a compliant script is exactly 210 WPM by construction and
 # the only way to cross S08's ceiling is the <=5% outliers the ratio rule
 # deliberately tolerates. QA measures WPM on the real audio, which is the law.
-# Hook window: QA S16 allows <=32s. Four hook scenes of 24-28 words land at
-# 27.4-32.0s at 3.5 w/s; the repair targets 105-112 words so the 30s boundary
-# falls inside scene 4 and the scene never overflows the 32s tolerance.
-HOOK_SCENE_COUNT = 4
-HOOK_MIN_WORDS = 24
-HOOK_MAX_WORDS = 28
+# Hook window: QA S16 allows <=32s. The 105-112 word target (30-32s at 3.5 w/s)
+# is unchanged, but under the 3.5-6.0s scorecard band a scene tops out at 21
+# words, so four 24-28-word hook scenes (6.9-8.0s each) would put four permanent
+# S09 offenders on every script. Six scenes of 16-20 words cover the same target
+# (96-120) while every hook scene reads 4.6-5.7s, inside the band.
+HOOK_SCENE_COUNT = 6
+HOOK_MIN_WORDS = 16
+HOOK_MAX_WORDS = 20
 HOOK_TARGET_WORDS = (105, 112)
 # QA S16 walks scenes until the cumulative run time crosses 30s and demands
 # <=32s at that boundary. Aim at 30.6s so rounding on either side still passes.
 HOOK_BOUNDARY_SEC = 30.6
+# Ceiling for the two aggregate fits (S08's WPM and S16's 30s hook window).
+# The scorecard band tops at 6.0s, but the hook cannot reach 30s inside
+# 6 x 6.0s once the word repair underdelivers, so the fits may stretch a
+# placeholder to the old 8.0s physical top. Gate 2 re-derives durations from
+# real speech; these are planning values, graded as outliers if they ship.
+FIT_PAD_MAX_SEC = 8.0
 REPAIR_BATCH = 10
 MAX_REPAIR_ROUNDS = 3
 EXPANSION_BATCHES = 4
 EXPANSION_DRIFT_THRESHOLD = 0.28
-EXPANSION_TARGET_WORDS = (23, 24)
+# 19-21 words = 5.4-6.0s: the top of the scorecard band, where a topped-up
+# scene stays legal under S09. The old 23-24 target planned 6.6-6.9s scenes.
+EXPANSION_TARGET_WORDS = (19, 21)
 # Cross-chunk continuity (S0.3). The phrase registry alone was not enough: scenes
 # 2 and 25 told the same beat in different words, so a chunk now also gets the
 # last lines written before it and is told not to re-narrate an idea.
@@ -616,12 +628,12 @@ class ScriptFactory:
         """Variant verdict derived from the QA scorecard, not a stricter copy.
 
         S09 grades scene durations and S10 the mean, and both are already
-        enforced by deriving every duration from its word count inside the 4-8s
-        window — a 13-word scene is a legal 195 WPM read at the 4s floor. The
-        per-scene word ratio is a repair target (it aims the script at ~6s
-        scenes), never a veto: rejecting on it discarded two of three variants
-        in a live run, spending a third of the script phase on rewrites whose
-        only flaw was pacing the scorecard accepts.
+        enforced by deriving every duration from its word count inside the
+        3.5-6.0s window — a 13-word scene is a legal 3.71s read at the 3.5s
+        floor. The per-scene word ratio is a repair target (it aims the script
+        at the corpus's ~4.3s scenes), never a veto: rejecting on it discarded
+        two of three variants in a live run, spending a third of the script
+        phase on rewrites whose only flaw was pacing the scorecard accepts.
 
         The mean-duration band is a planning target too, not a verdict. A live
         run rejected a variant whose only flaw was 6.68s mean against a 6.5s
@@ -780,7 +792,7 @@ class ScriptFactory:
                 "BỐN CẢNH MỞ ĐẦU CẦN VIẾT LẠI (HOOK 30 GIÂY):\n"
                 f"{json.dumps(items, ensure_ascii=False, indent=1)}\n\n"
                 f"Yêu cầu: giữ nguyên index và thứ tự. MỖI voiceover_vi {HOOK_MIN_WORDS}-{HOOK_MAX_WORDS} từ; "
-                f"TỔNG 4 cảnh {HOOK_TARGET_WORDS[0]}-{HOOK_TARGET_WORDS[1]} từ. "
+                f"TỔNG {HOOK_SCENE_COUNT} cảnh {HOOK_TARGET_WORDS[0]}-{HOOK_TARGET_WORDS[1]} từ. "
                 "Cảnh 1 phải mở bằng số liệu khủng hoặc nghịch lý và kết bằng câu hỏi treo. "
                 "Đan xen câu ngắn dứt khoát (<= 6 từ), không chào hỏi, chỉ dùng số liệu có trong transcript. "
                 f"voiceover_en tối đa {EN_MAX_WORDS} từ, khớp ý từng cảnh.\n"
@@ -867,7 +879,7 @@ class ScriptFactory:
         A scene over the word window is capped at 8s, which on its own pushes the
         whole script above the 210 WPM ceiling. Durations are planning
         placeholders (Gate 2 re-derives them from real speech), so the missing
-        seconds go to scenes that still have room inside the 4-8s window.
+        seconds go to scenes that still have room inside the fit ceiling.
         """
         words = sum(len(str(sc.get("text", "")).split()) for sc in scenes_vi)
         total = sum(float(sc.get("duration", 0.0)) for sc in scenes_vi)
@@ -879,11 +891,11 @@ class ScriptFactory:
             if needed - added <= 0.0005:
                 break
             current = float(scene.get("duration", 0.0))
-            headroom = MAX_SCENE_DURATION - current
+            headroom = FIT_PAD_MAX_SEC - current
             if headroom <= 0:
                 continue
             stretched = min(
-                MAX_SCENE_DURATION,
+                FIT_PAD_MAX_SEC,
                 math.ceil((current + min(headroom, needed - added)) * 1000) / 1000,
             )
             scene["duration"] = stretched
@@ -898,11 +910,11 @@ class ScriptFactory:
     ) -> float:
         """Land QA S16's 30s window inside the hook and under its 32s ceiling.
 
-        S16 reads the cumulative duration up to the scene that reaches 30s. Four
-        hook scenes adding up to less than that push the window into scene 5,
-        where one more scene overshoots 32s (live: 28.86s of hook + a 4.3s scene
-        5 = 33.15s). Durations are placeholders that Gate 2 re-derives from real
-        speech, so the hook may be stretched inside the 4-8s band.
+        S16 reads the cumulative duration up to the scene that reaches 30s. Hook
+        scenes adding up to less than that push the window into a later scene,
+        where one more scene overshoots 32s (live: 28.86s of hook + a 4.3s next
+        scene = 33.15s). Durations are placeholders that Gate 2 re-derives from
+        real speech, so the hook may be stretched to the 8.0s fit ceiling.
         """
         hook_count = min(HOOK_SCENE_COUNT, len(scenes_vi))
         if not hook_count:
@@ -918,7 +930,7 @@ class ScriptFactory:
                 if need <= 0.0005:
                     break
                 current = float(hook[i].get("duration", 0.0))
-                grow = min(MAX_SCENE_DURATION - current, need)
+                grow = min(FIT_PAD_MAX_SEC - current, need)
                 if grow <= 0:
                     continue
                 new_dur = round(current + grow, 3)
@@ -992,6 +1004,10 @@ class ScriptFactory:
                 text_vi = str(rec.get("voiceover_vi", "")).strip()
                 text_en = str(rec.get("voiceover_en", "")).strip()
                 if text_vi:
+                    # The callback scene is a plain band scene (13-21 words, 6.0s
+                    # top): a longer close would be one more S09 offender. Same
+                    # mechanical cap the hook repair applies to its own replies.
+                    text_vi = _trim_to_word_cap(text_vi, VI_MAX_WORDS)
                     last["text"] = text_vi
                     dur = _reading_duration(len(text_vi.split()))
                     last["duration"] = dur
@@ -1028,7 +1044,7 @@ class ScriptFactory:
         target_duration: Optional[float],
         on_progress: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        """Top up short scripts by rewriting the leanest scenes to 23-24 words."""
+        """Top up short scripts by rewriting the leanest scenes to 19-21 words."""
         if not target_duration or target_duration <= 0:
             return {"applicable": False}
         target = float(target_duration)
@@ -1043,7 +1059,9 @@ class ScriptFactory:
             candidates = [
                 i
                 for i in range(HOOK_SCENE_COUNT, len(scenes_vi) - 1)
-                if len(str(scenes_vi[i].get("text", "")).split()) < EXPANSION_TARGET_WORDS[0]
+                # Anything under the band top can still grow: a script parked on
+                # the 19-word steering target must stay eligible for topping up.
+                if len(str(scenes_vi[i].get("text", "")).split()) < EXPANSION_TARGET_WORDS[1]
             ]
             if not candidates:
                 break
@@ -1694,13 +1712,18 @@ class ScriptFactory:
                 "revised_scenes": 0, "accepted": False,
             }
 
-        self._repair_word_budget(variant.angle, vi, en, transcript_text, on_progress)
-        score_after, breakdown, fb = self._judge(variant, transcript_text, feedback_brief)
-        report_after = self._acceptance_report(vi, en)
+        # Hard QA grades what the revision WROTE, so the repeat and number loads
+        # are read off the revision's own output before the word-budget repair
+        # below can replace an over-band line (and launder a regression it
+        # introduced into a clean-looking acceptance). The word-budget clause
+        # alone grades the post-repair script, because that is what would ship.
         load_after = repetition_load(
             [str(sc.get("text", "")) for sc in vi], min_scenes=REPEAT_WARN_SCENES
         )
         conflicts_after = numeric_conflicts([str(sc.get("text", "")) for sc in vi])
+        self._repair_word_budget(variant.angle, vi, en, transcript_text, on_progress)
+        score_after, breakdown, fb = self._judge(variant, transcript_text, feedback_brief)
+        report_after = self._acceptance_report(vi, en)
         offenders_before = int((variant.budget_report or {}).get("offenders") or 0)
         drop = (
             (load_before["hits"] - load_after["hits"]) / load_before["hits"]

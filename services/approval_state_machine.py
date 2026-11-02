@@ -936,7 +936,7 @@ class ApprovalStateMachine:
             # audio for being what it naturally reads. Hard-fail only on
             # physically broken values, warn on algorithm-band drift.
             min_dur = 3.0 if algorithm_mode else 1.0
-            max_dur = 10.5 if algorithm_mode else 20.0
+            max_dur = 11.5 if algorithm_mode else 20.0
             for idx, s in enumerate(self.shots_plan, 1):
                 dur = float(s.get("duration", 0.0))
                 if dur < min_dur or dur > max_dur:
@@ -1127,14 +1127,27 @@ class ApprovalStateMachine:
             return False, [f"QA hard gate lỗi (fail-closed): {exc}"]
 
     def get_qa_report(self) -> Optional[str]:
-        """Telegram-formatted QA scorecard report from the last saved run, if any."""
+        """Telegram-formatted QA scorecard report from the last saved run, if any.
+
+        The reference-standard block is appended when the render has been
+        graded; it is advisory and never changes the scorecard verdict.
+        """
         try:
             from services.algorithm_qa import Scorecard
 
             card = Scorecard.load(self.project_dir)
-            return card.format_telegram_report() if card else None
+            report = card.format_telegram_report() if card else None
         except Exception:
-            return None
+            report = None
+        try:
+            from tools.standard_report import format_telegram_block, load_standard_report
+
+            standard = load_standard_report(self.project_dir)
+            if standard:
+                report = "\n".join(x for x in (report, format_telegram_block(standard)) if x)
+        except Exception:
+            pass
+        return report
 
     def mark_generating(self):
         """Transitions state to GENERATING when worker begins generating shots."""

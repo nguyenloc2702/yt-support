@@ -30,14 +30,14 @@ def _long_vi(index):
 
 
 HOOK_VI = " ".join((
-    "Năm 1602 công ty Đông Ấn Hà Lan huy động sáu phẩy năm triệu guilders "
-    "và không ai ngờ điều gì xảy ra tiếp theo sau đó?"
-).split())  # 27 words
+    "Năm 1602 công ty Đông Ấn Hà Lan huy động sáu phẩy năm triệu guilders, "
+    "rồi điều gì?"
+).split())  # 18 words — six of these land inside the 105-112 hook target
 
 CALLBACK_VI = " ".join((
     "Đây chính là câu trả lời cho nghịch lý năm 1602 khi dòng tiền guilders "
     "quay lại và thay đổi toàn bộ cục diện."
-).split())  # 24 words
+).split())  # 24 words — the factory caps the callback to the 21-word band
 
 
 _LETTERS = "bcghklmnprstvx"
@@ -393,7 +393,12 @@ def test_hook_window_and_callback_repairs_satisfy_qa(factory, monkeypatch):
         "services.script_auditor.build_semantic_dual_scripts_from_transcript",
         lambda segs, target_shots=8: (slices_vi, slices_en),
     )
-    router = Router({"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]})
+    # 14-word scenes keep the budget repair quiet but leave the hook at
+    # 6 x 14 = 84 words, under the 105-word target — the hook repair has to fire.
+    router = Router(
+        {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
+        word_plan={i: 14 for i in range(1, 9)},
+    )
     monkeypatch.setattr("pipeline.llm_client.chat_json", router)
 
     vi, en, result = factory.run(
@@ -413,7 +418,8 @@ def test_hook_window_and_callback_repairs_satisfy_qa(factory, monkeypatch):
     last_words = set(re.findall(r"\w{5,}", vi[-1]["text"].lower()))
     assert first_words & last_words or "câu trả lời" in vi[-1]["text"].lower()
 
-    assert [len(sc["text"].split()) for sc in vi[:4]] == [27, 27, 27, 27]
+    # Six 18-word hook scenes: 108 words total, every scene 4.6-6.0s in-band
+    assert [len(sc["text"].split()) for sc in vi[:6]] == [18] * 6
     assert result["post_repairs"]["hook"]["ok"] is True
     assert result["post_repairs"]["callback"]["ok"] is True
     assert router.hook_calls >= 1 and router.callback_calls >= 1
@@ -462,7 +468,7 @@ def test_duration_expansion_tops_up_short_script(factory, monkeypatch):
     slices_vi = [
         {"index": i + 1, "situation": f"s{i+1}", "text": f"Cảnh gốc {i+1} diễn biến quan trọng.",
          "prompt": "p", "duration": 5.0, "is_key_scene": True}
-        for i in range(30)
+        for i in range(40)
     ]
     slices_en = [
         {"index": sc["index"], "situation": sc["situation"], "text": f"Base scene {sc['index']}.",
@@ -471,18 +477,19 @@ def test_duration_expansion_tops_up_short_script(factory, monkeypatch):
     ]
     monkeypatch.setattr(
         "services.script_auditor.build_semantic_dual_scripts_from_transcript",
-        lambda segs, target_shots=30: (slices_vi, slices_en),
+        lambda segs, target_shots=40: (slices_vi, slices_en),
     )
+    # 21-word replies: the band top a topped-up scene may legally reach.
     router = Router(
         {"analyst": [9.0], "dramatist": [5.0], "teacher": [5.0]},
-        repair_words=24,
+        repair_words=21,
     )
     monkeypatch.setattr("pipeline.llm_client.chat_json", router)
 
     vi, en, result = factory.run(
         [{"start": 0, "end": 200, "text": TRANSCRIPT}],
-        target_shots=30,
-        target_duration=250.0,
+        target_shots=40,
+        target_duration=310.0,
     )
     expansion = result["post_repairs"]["duration_expansion"]
     assert expansion["applicable"] is True
@@ -565,9 +572,9 @@ def test_mechanical_metrics_recorded(factory, monkeypatch):
     )
     m = result["mechanical_metrics"]
     assert m["scene_count"] == 3
-    # 18-word scenes at 3.5 w/s plus the 24-word callback close on the last scene:
-    # 2 * 5.14s + 6.86s = 17.14s
-    assert m["total_duration_sec"] == 17.1
+    # 18-word scenes at 3.5 w/s plus the callback close capped to the 21-word
+    # band top: 2 * 5.14s + 6.0s = 16.29s
+    assert m["total_duration_sec"] == 16.3
     assert 0.0 <= m["short_sentence_pct"] <= 1.0
     assert m["estimated_wpm"] > 0
     assert "wpm_in_range" in m
@@ -598,9 +605,11 @@ def test_word_budget_repair_enforces_18_24_and_passes_audit(factory, monkeypatch
         [{"start": 0, "end": 20, "text": TRANSCRIPT}], target_shots=6
     )
     assert router.repair_calls > 0
-    assert all(18 <= len(sc["text"].split()) <= 28 for sc in vi)
-    assert all(len(sc["text"].split()) <= 16 for sc in en)
-    assert [len(sc["text"].split()) for sc in vi[:4]] == [27, 27, 27, 27]
+    # Enforced window from SCENE_DUR_RANGE × words/s = 13–21 words
+    assert all(sf.VI_MIN_WORDS <= len(sc["text"].split()) <= sf.VI_MAX_WORDS for sc in vi)
+    # EN ceiling is the enforced edge (en_high); the 9-word floor is prompt
+    # steering only — the factory cannot pad English lines it did not write.
+    assert all(len(sc["text"].split()) <= sf.EN_MAX_WORDS for sc in en)
 
     from services.script_auditor import ScriptAuditor
     audit = ScriptAuditor(algorithm_mode=True).audit_script(
@@ -674,7 +683,7 @@ def test_word_window_is_derived_from_the_qa_duration_band():
         math.ceil(SCENE_DUR_RANGE[0] * sa.SCENE_WORDS_PER_SECOND),
         math.floor(SCENE_DUR_RANGE[1] * sa.SCENE_WORDS_PER_SECOND),
     )
-    assert (sf.VI_MIN_WORDS, sf.VI_MAX_WORDS) == sa.GENERATED_WORD_WINDOW == (14, 28)
+    assert (sf.VI_MIN_WORDS, sf.VI_MAX_WORDS) == sa.GENERATED_WORD_WINDOW
     assert sf.WORDS_PER_SECOND == sa.SCENE_WORDS_PER_SECOND
     assert sf.EN_MAX_WORDS == sa.EN_MAX_WORDS_ALGORITHM
     assert sa.MAX_WORDS_PER_SHOT_ALGORITHM == sa.GENERATED_WORD_WINDOW[1]
@@ -750,13 +759,13 @@ def test_variant_survives_outliers_beyond_the_ratio_and_reports_target(factory, 
 
 
 def test_mean_scene_duration_outside_band_is_a_warning_not_a_veto(factory, monkeypatch):
-    # Every scene inside the 14-28 window, but 28 words each => 8.0s scenes:
-    # S10 grades that mean as a fail, yet the content is legal and S11 tolerates
-    # it. A live run lost a whole variant to 6.68s against a 6.5s ceiling, so the
-    # band is reported, never enforced here.
+    # Every scene sits exactly on the top edge of the enforced window (21 words
+    # => 6.0s): S10 grades that mean as a fail, yet the content is legal and S11
+    # tolerates it. A live run lost a whole variant to 6.68s against a 6.5s
+    # ceiling, so the band is reported, never enforced here.
     variant, router = _variant(
         factory, monkeypatch, 20,
-        word_plan={i: 28 for i in range(1, 21)}, repair_echo=True,
+        word_plan={i: sf.VI_MAX_WORDS for i in range(1, 21)}, repair_echo=True,
     )
 
     assert variant.valid is True, variant.invalid_reason
@@ -1270,7 +1279,9 @@ def test_revision_is_reverted_when_repeats_stay_and_judge_drops(monkeypatch):
     assert rev["revised_scenes"] == 12
     assert rev["repetition_hits_after"] == rev["repetition_hits_before"]
     assert rev["repeat_drop_pct"] == 0.0
-    assert vi[4]["text"].startswith("Cảnh 5: sổ sách đóng lại")
+    # Scene 10 sits beyond the six-scene hook, so the hook repair never touches
+    # it: the reverted draft text survives verbatim.
+    assert vi[9]["text"].startswith("Cảnh 10: sổ sách đóng lại")
 
 
 def test_hard_qa_regression_reverts_even_when_the_judge_liked_it(monkeypatch):
@@ -1318,7 +1329,10 @@ def test_repeat_and_number_counters_are_recorded_in_the_artifact(monkeypatch, tm
     assert rev["decision"] == "hard_qa_regressed:number_conflicts"
     assert rev["hard_qa_detail"] == ["number_conflicts"]
     # The shipped script is the reverted draft plus the hook/callback repairs.
-    assert "nhà kho dột" in metrics["repeat_phrases"]
+    # The six identical hook lines now outrank the draft's "nhà kho dột" (5 tail
+    # scenes) inside the 10-phrase registry limit, so the hook's signature
+    # 3-gram is what the shipped metrics must carry.
+    assert "ấn hà lan" in metrics["repeat_phrases"]
     assert metrics["repeat_worst_scenes"] <= 12
     assert metrics["number_conflicts"] == []
 
@@ -1357,16 +1371,23 @@ def test_run_ships_the_internal_script_when_the_editor_is_rejected(tmp_path, mon
     # one chunk asked, twice, then the whole stage gave up
     assert router.polish_calls == polish["calls"] == 2
     assert len(vi) == len(en) == 12
-    assert "dòng tiền" in vi[5]["text"]
+    # Scene 9 sits beyond the six-scene hook: the internal (unpolished) text is
+    # a revision line, which still carries the "dòng tiền" phrase.
+    assert "dòng tiền" in vi[8]["text"]
     saved = json.loads((tmp_path / "algorithm_result.json").read_text(encoding="utf-8"))
     assert saved["polish"]["decision"] == "rejected_shape"
     assert saved["mechanical_metrics"] == polish["metrics_after"]
 
 
 def test_run_ships_the_editors_script_and_rejudges_it(tmp_path, monkeypatch):
+    # 14-word scenes leave the hook under its 105-word target, so the hook
+    # repair installs six identical 18-word hook lines — the repetition the
+    # polish stage is graded on dropping.
     factory = _twelve_scene_factory(monkeypatch)
     router = Router(
-        {"analyst": [9.2, 8.9], "dramatist": [7.0], "teacher": [6.0]}, polish="clean"
+        {"analyst": [9.2, 8.9], "dramatist": [7.0], "teacher": [6.0]},
+        polish="clean",
+        word_plan={i: 14 for i in range(1, 13)},
     )
     monkeypatch.setattr("pipeline.llm_client.chat_json", router)
 
@@ -1381,11 +1402,11 @@ def test_run_ships_the_editors_script_and_rejudges_it(tmp_path, monkeypatch):
     assert polish["decision"] == "polish_within_hard_qa"
     assert polish["scenes_rewritten"] == 12
     assert polish["scenes_changed"] == 12
-    assert polish["repetition_hits_before"] == 68
-    # Only "hà lan" survives: it is the proper name the four identical hook lines
+    assert polish["repetition_hits_before"] == 60
+    # Only "hà lan" survives: it is the proper name the six identical hook lines
     # share, and the editor is not allowed to invent a different one.
-    assert polish["repetition_worst_after"] == 4
-    assert polish["repeat_drop_pct"] == 94.1
+    assert polish["repetition_worst_after"] == 6
+    assert polish["repeat_drop_pct"] == 90.0
     assert polish["offenders_after"] == polish["offenders_before"] == 0
     assert polish["number_conflicts_after"] == 0
     # 12 scenes = two chunks of eight

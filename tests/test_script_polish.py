@@ -55,16 +55,20 @@ _PAD = ["và", "trong", "khi", "đã"]
 
 def vi_line(index):
     i = (index - 1) % len(_NOUNS)
+    # 15-18 words: every line + the polish drift budget (+3) stays inside the
+    # 21-word band top, so drift tests exercise drift, not the band edge.
     return (
-        f"{_NOUNS[i]} của hãng {_VERBS[i]} trong {REPEAT} ở Delft năm 1602, "
+        f"{_NOUNS[i]} {_VERBS[i]} trong {REPEAT} ở Delft năm 1602, "
         f"{_TAILS[i]}."
     )
 
 
 def en_line(index):
+    # 14 words: one word under the EN ceiling (15), so the band-edge tests
+    # measure the polish's own additions, not the fixture's head start.
     return (
         f"Ledger {index} records the leaky warehouse at Delft in 1602 before "
-        "anyone had counted the shares the investors actually sold."
+        "anyone counted shares."
     )
 
 
@@ -251,7 +255,7 @@ def test_an_editor_that_moves_every_number_is_not_an_editor(factory, polish_call
     assert "locked_tokens" in report["rejection"]["detail"]
     # every chunk asked twice: the first answer, then the same answer again
     assert report["calls"] == 6 and report["retries"] == 3
-    assert "[1] VI 18 từ / EN 20 từ" in editor.user_prompts[0]
+    assert "[1] VI 16 từ / EN 14 từ" in editor.user_prompts[0]
     assert "LẦN TRƯỚC bản này bị LOẠI" in editor.user_prompts[1]
     assert "[1] locked_tokens" in editor.user_prompts[1]
     assert [sc["text"] for sc in vi] == before
@@ -331,7 +335,9 @@ def test_a_polish_that_walks_every_scene_to_the_band_edge_is_refused(factory, po
     assert report["accepted"] is False
     assert report["offenders_before"] == 0
     assert report["decision"] == "rejected_scene_drops"
-    assert report["scenes_skipped"] == 5
+    # Every fixture EN line is one word under the 15-word ceiling, so the +2
+    # drift pushes all nine of them over: nine skips blow the 25% drop budget.
+    assert report["scenes_skipped"] == 9
     assert "budget:en_high" in report["skipped"][0]["detail"]
     assert [sc["text"] for sc in en] == before_en
 
@@ -412,7 +418,10 @@ def test_kept_polish_never_plans_a_scene_faster_than_it_reads(factory, polish_ca
     report = factory.polish_scenes(vi, en)
 
     assert report["accepted"] is True
-    assert report["planned_duration_after"] >= report["planned_duration_before"]
+    # Six 6.0s hook scenes overshoot S16's 32s ceiling, so the hook fit trims
+    # them back toward the boundary — the plan total may shrink. What may never
+    # happen is a scene planned faster than its own words read (checks below).
+    assert report["planned_duration_after"] <= report["planned_duration_before"]
     for scene in vi:
         words = len(scene["text"].split())
         assert scene["duration"] >= min(8.0, words / 3.5) - 1e-6

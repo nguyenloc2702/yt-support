@@ -62,6 +62,8 @@ XKIRO_VOICES = {
     "deep-male",
     "expressive-male",
     "announcer",
+    "male-narrator",
+    "american-male",
 }
 
 # Explicit availability fallback: xKiro voice -> nearest edge-tts neural voice.
@@ -76,6 +78,8 @@ XKIRO_TO_EDGE = {
     "deep-male": "en-US-ChristopherNeural",
     "expressive-male": "en-US-GuyNeural",
     "announcer": "en-US-GuyNeural",
+    "male-narrator": "en-US-ChristopherNeural",
+    "american-male": "en-US-GuyNeural",
 }
 
 EDGE_TO_XKIRO = {
@@ -105,7 +109,7 @@ def is_edge_voice(voice_id: str) -> bool:
     return v.endswith("neural") and not is_xkiro_voice(v)
 
 
-XKIRO_TTS_MAX_CHARS = 4000  # gateway hard limit is 4096 per speech request
+XKIRO_TTS_MAX_CHARS = 1800  # gateway hard limit is 2000 chars per speech request
 # Skill-pack pacing. The gateway ignores a speed parameter and its VI voices
 # speak 232-300 WPM natively, so audio is fitted locally. Naturalness wins over
 # hitting the exact target: never slow a voice below 0.75x (atempo), even when
@@ -117,7 +121,7 @@ TARGET_NARRATION_WPM = 205.0
 MIN_NARRATION_WPM = 195.0
 MAX_NARRATION_WPM = 214.0
 EN_TARGET_NARRATION_WPM = 160.0
-EN_MIN_NARRATION_WPM = 145.0
+EN_MIN_NARRATION_WPM = 120.0
 EN_MAX_NARRATION_WPM = 175.0
 MIN_ATEMPO = 0.75
 # Speed-up cap for the full-narration fit. The 1.6x ceiling is for squeezing a
@@ -129,13 +133,15 @@ MIN_WORDS_FOR_RATE_FIT = 8
 # after every sentence AND every newline (measured 48-50% silence on the
 # owner's rejected audio), so narration is synthesized per sentence and joined
 # with these fixed breaths: 0.35s inside a paragraph, 0.6s at a line break.
-FULL_NARRATION_PAUSE_SEC = 0.35
-PARAGRAPH_NARRATION_PAUSE_SEC = 0.6
+FULL_NARRATION_PAUSE_SEC = 0.40
+PARAGRAPH_NARRATION_PAUSE_SEC = 0.65
 
 
 def _wpm_band(voice_id: str) -> tuple[float, float, float]:
     """Target/min/max WPM for a voice: EN voices keep a documentary band."""
     if not _is_vietnamese_voice(voice_id):
+        if voice_id in ("male-narrator",):
+            return 140.0, 125.0, 160.0
         return EN_TARGET_NARRATION_WPM, EN_MIN_NARRATION_WPM, EN_MAX_NARRATION_WPM
     return TARGET_NARRATION_WPM, MIN_NARRATION_WPM, MAX_NARRATION_WPM
 
@@ -463,6 +469,8 @@ def _edge_tts_save_natural(text: str, edge_voice: str, out_path: Path) -> None:
         _make_silence_mp3(PARAGRAPH_NARRATION_PAUSE_SEC, para_break)
         parts: list[Path] = []
         for i, (sentence, pause_after) in enumerate(units):
+            if (i + 1) % 15 == 0 or i == 0 or i == len(units) - 1:
+                print(f"[Edge TTS] Synthesizing sentence {i+1}/{len(units)}...", flush=True)
             part = parts_dir / f"line_{i:03d}.mp3"
             _edge_tts_save(sentence, edge_voice, part)
             parts.append(part)
@@ -515,8 +523,10 @@ def _synthesize_chunked_xkiro_with_fallback(text: str, voice_id: str, out_path: 
         parts: list[Path] = []
         for i, chunk in enumerate(chunks):
             part = parts_dir / f"part_{i:03d}.mp3"
+            print(f"[xKiro TTS] Synthesizing part {i+1}/{len(chunks)} ({len(chunk)} chars)...", flush=True)
             synthesize_one_xkiro(chunk, voice_id, part)
             parts.append(part)
+        print(f"[xKiro TTS] All {len(chunks)} parts synthesized. Concatenating audio...", flush=True)
         _concat_audio_parts(parts, out_path)
         _fit_narration_rate(text, out_path, voice_id)
         return voice_id
