@@ -117,7 +117,7 @@ JOB_INBOX_INTERNAL_URL=http://127.0.0.1:8787
 URL cấp cho Muse phải truy cập được từ máy Muse, ví dụ:
 
 ```text
-https://your-domain.example.com/api/claude-jobs
+https://talk.gacdero.vn/api/claude-jobs
 ```
 
 Reverse proxy phải chuyển tiếp prefix `/api/claude-jobs` tới service Uvicorn và giữ nguyên các path:
@@ -146,7 +146,7 @@ Bắt buộc:
 Thiếu token phải bị từ chối:
 
 ```bash
-curl -i https://your-domain.example.com/api/claude-jobs/jobs/pending
+curl -i https://talk.gacdero.vn/api/claude-jobs/jobs/pending
 ```
 
 Kỳ vọng: HTTP `401`.
@@ -157,7 +157,7 @@ Có token:
 curl -i \
   -H "Authorization: Bearer $CLAUDE_JOBS_TOKEN" \
   -H "Accept: application/json" \
-  "https://your-domain.example.com/api/claude-jobs/jobs/pending?limit=1"
+  "https://talk.gacdero.vn/api/claude-jobs/jobs/pending?limit=1"
 ```
 
 Kỳ vọng: HTTP `200` và response envelope hợp lệ:
@@ -260,7 +260,7 @@ Content-Type: application/json
   "finished_at": "2026-11-02T16:05:00+07:00",
   "summary": "Hoàn thành video, QC đạt.",
   "outputs": {
-    "video_url": "https://your-domain.example.com/outputs/video.mp4",
+    "video_url": "https://talk.gacdero.vn/outputs/video.mp4",
     "duration_sec": 180,
     "script": "...",
     "scenes": [],

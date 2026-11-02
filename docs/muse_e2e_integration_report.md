@@ -13,7 +13,7 @@
   Toàn bộ vòng đời từ khâu chuẩn bị kịch bản tại Local Factory $\to$ Tạo Job $\to$ Lưu trữ SQLite $\to$ Worker Muse polling theo Priority $\to$ Khóa Lease nguyên tử $\to$ Heartbeat $\to$ Trả kết quả / Báo lỗi retry $\to$ Chống trùng lặp $\to$ Local App đọc kết quả đã được tự động hóa 100% trong test suite [`tests/test_e2e_muse_integration.py`](../tests/test_e2e_muse_integration.py).
 * **Ở cấp độ End-to-End thực tế ngoài Internet (Live Production E2E):** **CHƯA THỂ TEST TOÀN PHẦN NGAY** do còn 3 thành phần phụ thuộc bên ngoài:
   1. **Render API trên VPS:** VPS chưa dựng endpoint render video thực tế (tạo file MP4 từ prompt/ảnh/âm thanh) để Muse gọi.
-  2. **Domain/Reverse Proxy HTTPS thật:** Hiện tại URL tài liệu vẫn là `your-domain.example.com`, Uvicorn đang bind nội bộ `127.0.0.1:8787`.
+  2. **Domain/Reverse Proxy HTTPS thật:** Cần khai báo Nginx location `/api/claude-jobs/` trên domain `talk.gacdero.vn` trỏ về Uvicorn nội bộ `127.0.0.1:8787`.
   3. **Local Job Synchronizer:** Đoạn code nền tải video từ `video_url` về đĩa và chuyển trạng thái local job sang `COMPLETED` sau khi kiểm tra chất lượng (ffprobe) chưa hoàn thiện.
 
 ---
