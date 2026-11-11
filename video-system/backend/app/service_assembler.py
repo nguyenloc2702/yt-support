@@ -349,6 +349,12 @@ class AssemblerService:
                     "\n".join(f"file '{p.resolve().as_posix()}'" for p in norm_clips),
                     encoding="utf-8",
                 )
+                # Timeout scale theo độ dài chương trình: item dài (20-30+ phút)
+                # không thể ép vào budget cố định 300s — đây là nguyên nhân lỗi
+                # ráp "quá thời gian chờ 300s" trên prod trước đây.
+                assemble_video_sec = max(1, int(plan["total_planned_ms"] / 1000))
+                concat_timeout = max(300, assemble_video_sec * 2)
+                mux_timeout = max(300, int(audio_dur * 3))
                 joined_video = norm_dir / "joined_video.mp4"
                 cmd_concat = [
                     "ffmpeg", "-y", "-v", "error",
@@ -357,7 +363,7 @@ class AssemblerService:
                     "-c", "copy",
                     str(joined_video),
                 ]
-                subprocess.run(cmd_concat, check=True, timeout=300)
+                subprocess.run(cmd_concat, check=True, timeout=concat_timeout)
 
                 # Optional subtitle burn-in
                 video_input_for_mux = joined_video
@@ -391,7 +397,7 @@ class AssemblerService:
                     "-t", f"{audio_dur:.3f}",
                     str(final_path),
                 ]
-                subprocess.run(cmd_mux, check=True, timeout=300)
+                subprocess.run(cmd_mux, check=True, timeout=mux_timeout)
                 final_dur = probe_media_duration(final_path)
             else:
                 # Deterministic container output when running unit tests with synthetic byte fixtures
