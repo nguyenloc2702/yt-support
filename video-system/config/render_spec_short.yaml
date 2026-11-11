@@ -1,0 +1,30 @@
+# render_spec_short.yaml — geometry/QC riêng cho Short 9:16 (Phụ lục G.3).
+# File MỚI, KHÔNG sửa render_spec.yaml của plan lõi (1280x720 vẫn nguyên).
+version: 1
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  codec: h264
+  pix_fmt: yuv420p
+  crf: 20
+  container: mp4
+audio:
+  rate: 48000
+  channels: 2
+  codec: aac
+  bitrate: 192k
+subtitle:
+  safe_margin_ratio: 0.15   # chừa UI nền tảng (top/bottom 15%)
+  font_size: 64
+  max_line_words: 6
+  highlight_color: "&H0000A5FF&"   # nhấn từ số/%/$ (ASS BGR: cam)
+  primary_color: "&H00FFFFFF"
+  outline_color: "&H00101010"
+pacing:
+  news_min_scene_sec: 1.5
+  news_max_scene_sec: 8.0
+  decode_min_scene_sec: 3.0
+  decode_max_scene_sec: 12.0
+qc:
+  duration_tolerance_sec: 0.25

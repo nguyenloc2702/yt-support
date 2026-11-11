@@ -1,0 +1,23 @@
+# audio_config.yaml — NGUỒN DUY NHẤT của loudness/nhạc. Không nơi nào khác giữ số này.
+version: 2
+tts_en:
+  default_voice: "en-US-AndrewMultilingualNeural"
+  fallback_voice: "en-US-ChristopherNeural"
+  rate: "-6%"
+  atempo: 0.96
+  words_per_sec_estimate: 2.45
+  inter_shot_pause_sec: 0.32
+  intra_sentence_pause_sec: 0.26
+master:
+  loudness_lufs: -16
+  true_peak_dbtp: -1.5
+  lra: warn_only
+bgm:
+  # 2026-11-06: yêu cầu user "nhạc nền nhẹ xuống 1 xíu" cho slate 8 bộ mới
+  # (trước: duck_db -16.5 / bed_target_lufs -34.5)
+  duck_db: -20.0
+  bed_target_lufs: -38.0
+  music_break_sec: 10.0
+  bgm_dir: "/opt/video-system/assets/music/bgm"
+sfx:
+  level_db: -15

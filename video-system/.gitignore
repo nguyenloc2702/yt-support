@@ -1,0 +1,27 @@
+# video-system — code-only vendor trong repo yt-support.
+# Runtime/media ở đây KHÔNG được commit (chạy app/test ngay trong thư mục này
+# sẽ sinh ra các thư mục dưới đây — gitignore chặn để không bẩn repo).
+
+# Virtualenv & cache
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Runtime data (DB, secrets, uploads, log)
+data/
+*.db
+*.sqlite3
+.env
+server.log
+*.log
+
+# Media lớn & sản phẩm render
+products/
+assets/music/
+assets/reference_images/
+
+# Root repo cấm *.png (runtime artifacts) — nhưng screenshots của docs/UI audit
+# là bằng chứng review, commit có chủ đích:
+!docs/screenshots/**
+

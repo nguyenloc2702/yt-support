@@ -1,0 +1,30 @@
+# news_config.yaml — hộp tin nóng cho Short Studio (Phụ lục G.10).
+# Nguồn: Google News RSS (không cần API key). Mọi số/source ở đây là NGUỒN DUY NHẤT.
+version: 1
+interval_min: 60            # chu kỳ sync (yêu cầu user: 1 tiếng/lần)
+auto_push: false            # G.11: KHÔNG tự đẩy Telegram hàng loạt — user chọn tin rồi push từng tin
+max_items_per_push: 10      # tối đa tin bắn 1 kỳ Telegram (khi auto_push bật)
+queries:                    # truy vấn Google News RSS — đúng mảng tiền bạc/kinh doanh
+  - "kinh doanh doanh nghiệp"
+  - "ngân hàng lãi suất"
+  - "lừa đảo chuyển tiền"
+  - "bất động sản thị trường"
+  - "thương mại điện tử shopee OR \"tiktok shop\""
+  - "tiêu dùng bẫy giá"
+# G.11: RSS trực tiếp của báo — link bài là LINK THẬT (không qua redirect Google),
+# nên Short lấy được ảnh gốc bài báo không cần decode. Kèm tên nguồn làm fallback.
+feeds:
+  - name: "VnExpress"
+    url: "https://vnexpress.net/rss/tin-moi-nhat.rss"
+  - name: "Tuổi Trẻ"
+    url: "https://tuoitre.vn/rss/tin-moi-nhat.rss"
+  - name: "Dân Trí"
+    url: "https://dantri.com.vn/rss/home.rss"
+exclude_keywords:           # tiêu đề chứa từ nào dưới đây → bỏ (an toàn nền tảng, G.1)
+  - "tử vong"
+  - "máu me"
+  - "hiếp dâm"
+  - "chính trị"
+telegram:
+  parse_mode: "HTML"
+  disable_web_page_preview: false

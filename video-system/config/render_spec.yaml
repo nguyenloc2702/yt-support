@@ -1,0 +1,37 @@
+# render_spec.yaml — NGUỒN DUY NHẤT của mọi con số hình học/codec/QC.
+# domain.py và qc.py ĐỌC file này lúc khởi động. KHÔNG giữ số nào trong code.
+version: 1
+video:
+  width: 1280
+  height: 720
+  fps: 24
+  codec: h264
+  pix_fmt: yuv420p
+  crf: 20
+  container: mp4
+audio:
+  sample_rate: 48000
+  channels: 2
+  codec: aac
+  bitrate: 192k
+text:
+  margin_min_px: 40
+  ocr_match: exact
+qc:
+  duration_tolerance_sec: 0.25
+  global_tolerance_sec: 1.0
+  shortfall_warn_tolerance_sec: 0.5
+limits:
+  max_shots_per_import: 500
+  max_json_body_mb: 10
+  max_audio_mb: 2048
+  max_keyframe_mb: 20
+  max_video_mb: 2048
+  batch_max_shots: 4
+  attempt_cap: 3
+storage:
+  public_base_url: "https://vidfac.gacdero.vn"
+  gdrive_remote: "gdrive:video_system_assets"
+  auto_sync_on_assemble: true
+  purge_intermediates_on_assemble: true
+
