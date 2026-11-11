@@ -23,3 +23,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["backend*"]
+
+# Neo rootdir/pytest về video-system/ — không để pytest nhặt pyproject.toml
+# của repo root (Streamlit app) khi chạy từ trong thư mục con này.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
