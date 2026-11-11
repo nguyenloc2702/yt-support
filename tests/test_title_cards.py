@@ -49,19 +49,28 @@ def test_build_card_draws_white_text_on_black(tmp_path):
     out = tmp_path / "title_card_002.mp4"
     build_card("44.000 tỷ đồng", 1.5, out)
 
-    # Sample the middle of the card: pure black would carry no bright pixels.
-    # blackframe logs per frame at info level, so the default loglevel applies.
+    # Sample the middle of the card as a PNG and count bright pixels.
+    # Đã từng assert chuỗi 'Parsed_blackframe' trong stderr của ffmpeg —
+    # format log per-frame đổi theo version (ffmpeg 7.x không in nữa) nên
+    # test chỉ pass trên máy dev có ffmpeg 8.x. Đo pixel trực tiếp là
+    # bất biến giữa 6.x / 7.x / 8.x.
+    png = tmp_path / "mid_center.png"
     res = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-ss", "0.6", "-i", str(out),
-         "-vf", "crop=960:540:480:270,blackframe=amount=98:threshold=32",
-         "-f", "null", "-"],
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-ss", "0.6", "-i", str(out),
+         "-vf", "crop=960:540:480:270", "-frames:v", "1", str(png)],
         capture_output=True, text=True, timeout=60,
     )
-    assert "Parsed_blackframe" in (res.stderr or ""), "blackframe filter output missing"
-    frame_lines = [l for l in res.stderr.splitlines() if "Parsed_blackframe" in l]
-    # At least one sampled frame of the center crop is NOT ~100% black: the
-    # white text lives there. (A pure black card would report frame:1 on all.)
-    assert any("frame:0" in line for line in frame_lines), res.stderr[-400:]
+    assert png.exists(), (res.stderr or "")[-400:]
+
+    import cv2
+
+    img = cv2.imread(str(png))
+    assert img is not None, "cannot decode the sampled card frame"
+    # The centered white line must light up the dark card: bright pixels exist
+    # in the center crop (white text ≈ brightness 255, card ≈ 0-32).
+    bright = int((img.max(axis=2) > 96).sum())
+    assert bright > 100, f"center crop has no bright text pixels ({bright})"
 
 
 def test_blackdetect_catches_the_card_as_one_span(tmp_path):
