@@ -586,8 +586,11 @@ def test_factory_creates_account_pool_by_default(test_factory: AutomatedFactory)
     assert hasattr(test_factory.account_pool, "get_available_account")
 
 
-def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory):
-    # If execute_approved_reup is called on a remake job, it must return False safely without corrupting DB
+def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory, monkeypatch):
+    # If execute_approved_reup is called on a remake job, it must return False safely without corrupting DB.
+    # Pin the Muse flag: is_muse_video_enabled() reads the ambient settings DB first and the
+    # env var only as fallback — another test writing the DB must not flip this branch.
+    monkeypatch.setattr("services.settings_service.is_muse_video_enabled", lambda: False)
     job_id = test_factory.jq.create_job(mode="remake", url="https://youtube.com/watch?v=mode2_test")
     test_factory.jq.update_job_status(job_id, "APPROVED")
 
@@ -599,6 +602,9 @@ def test_execute_approved_reup_rejects_non_reup(test_factory: AutomatedFactory):
 
 
 def test_execute_approved_mode2_submits_exact_approved_script(test_factory, monkeypatch):
+    # Pin the Muse flag on: the ambient settings DB must not decide this dispatch branch.
+    monkeypatch.setattr("services.settings_service.is_muse_video_enabled", lambda: True)
+    monkeypatch.setenv("MUSE_VIDEO_ENABLED", "true")
     job_id = test_factory.jq.create_job(
         mode="remake",
         url="https://youtube.com/watch?v=mode2_muse",
