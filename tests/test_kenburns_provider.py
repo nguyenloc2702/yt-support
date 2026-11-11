@@ -242,6 +242,14 @@ def test_pose_keyframes_become_a_multi_input_blend(kb_provider, tmp_path, monkey
     monkeypatch.setattr(
         "services.settings_service.is_gemini_image_enabled", lambda: False
     )
+    # Pin the pose count too: POSES_PER_SHOT reads an env var at import time
+    # and production runs with the default 1 — this test exercises the
+    # multi-pose blend branch, so it must pin the value instead of trusting
+    # the ambient environment.
+    POSES = 4
+    monkeypatch.setattr(
+        "services.image_kenburns_provider.POSES_PER_SHOT", POSES
+    )
 
     res = kb_provider.generate(
         prompt="Werner pointing at a keyboard",
@@ -252,9 +260,9 @@ def test_pose_keyframes_become_a_multi_input_blend(kb_provider, tmp_path, monkey
     )
 
     assert res.ok is True
-    assert len(cues) == POSES_PER_SHOT - 1
+    assert len(cues) == POSES - 1
     # Every drawing is fed to ffmpeg as its own input
-    assert captured[0].count("-loop") == POSES_PER_SHOT
+    assert captured[0].count("-loop") == POSES
     graph = captured[0][captured[0].index("-filter_complex") + 1]
     assert f"xfade=transition=fade:duration={POSE_BLEND_SECONDS:.2f}" in graph
     assert "[2:v]" in graph
