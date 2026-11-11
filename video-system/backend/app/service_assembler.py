@@ -14,9 +14,11 @@ Rules:
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,48 @@ from .service_items import ItemService
 from .service_todos import TodoService
 from .storage_gdrive import cleanup_item_intermediates, sync_item_to_gdrive
 from .store import Store, new_id, now
+
+logger = logging.getLogger(__name__)
+
+
+def _gdrive_sync_worker(
+    assembler: "AssemblerService",
+    item_id: str,
+    purge_raw_clips: bool,
+    actor: str,
+) -> None:
+    """Chạy GDrive sync ở thread nền — không bao giờ raise, chỉ ghi lại gdrive_status.
+
+    Upload VPS → Drive thực đo chỉ ~85 KiB/s (folder item 178MB cần ~35 phút),
+    nên sync tuyệt đối không được block phản hồi assemble.
+    """
+    try:
+        sync_result = sync_item_to_gdrive(
+            item_id, purge_raw_clips_after_sync=purge_raw_clips
+        )
+    except Exception as exc:  # phòng thủ cuối: sync lỗi cũng không được chết app
+        logger.warning("GDrive sync crashed for %s: %s", item_id, exc)
+        sync_result = {"status": "error", "detail": str(exc)}
+    try:
+        t_sync = now()
+        assembler.store.execute(
+            "UPDATE items SET gdrive_status=?, gdrive_remote_path=?, "
+            "gdrive_synced_at=?, purged_bytes=COALESCE(purged_bytes, 0) + ?, updated_at=? WHERE id=?",
+            (
+                sync_result.get("status"),
+                sync_result.get("remote_path"),
+                t_sync if sync_result.get("status") == "synced" else None,
+                sync_result.get("freed_bytes", 0),
+                t_sync,
+                item_id,
+            ),
+        )
+        if sync_result.get("status") == "synced":
+            assembler.items.event(item_id, None, "todo.gdrive_synced", actor, sync_result)
+        else:
+            assembler.items.event(item_id, None, "todo.gdrive_sync_failed", actor, sync_result)
+    except Exception as exc:
+        logger.warning("GDrive sync bookkeeping failed for %s: %s", item_id, exc)
 
 
 class ShortfallWarningError(Exception):
@@ -457,26 +501,18 @@ class AssemblerService:
             auto_sync = storage_cfg.get("auto_sync_on_assemble", True)
             purge_raw_clips = storage_cfg.get("purge_raw_clips_on_assemble", False)
 
-            sync_result = None
+            sync_result: dict[str, Any] = {
+                "status": "deferred",
+                "purge_raw_clips_after_sync": purge_raw_clips,
+                "detail": "GDrive sync đang chạy ở thread nền — gdrive_status sẽ cập nhật khi xong",
+            }
             if auto_sync:
-                sync_result = sync_item_to_gdrive(
-                    item_id, purge_raw_clips_after_sync=purge_raw_clips
-                )
-                t_sync = now()
-                self.store.execute(
-                    "UPDATE items SET gdrive_status=?, gdrive_remote_path=?, "
-                    "gdrive_synced_at=?, purged_bytes=COALESCE(purged_bytes, 0) + ?, updated_at=? WHERE id=?",
-                    (
-                        sync_result.get("status"),
-                        sync_result.get("remote_path"),
-                        t_sync if sync_result.get("status") == "synced" else None,
-                        sync_result.get("freed_bytes", 0),
-                        t_sync,
-                        item_id,
-                    ),
-                )
-                if sync_result.get("status") == "synced":
-                    self.items.event(item_id, None, "todo.gdrive_synced", actor, sync_result)
+                threading.Thread(
+                    target=_gdrive_sync_worker,
+                    args=(self, item_id, purge_raw_clips, actor),
+                    name=f"gdrive-sync-{item_id}",
+                    daemon=True,
+                ).start()
 
             return {
                 "item_id": item_id,

@@ -1,6 +1,7 @@
 """Google Drive (rclone) Sync & Local Intermediate File Cleanup Service."""
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import shutil
@@ -278,6 +279,23 @@ def sync_item_to_gdrive(
     remote = get_gdrive_remote()
     remote_item_path = f"{remote.rstrip('/')}/{item_id}"
 
+    # Timeout scale theo dung lượng cần copy: upload VPS → Drive thực đo
+    # ~85 KiB/s, folder item 178MB cần ~35 phút — budget cố định 180s là
+    # không bao giờ đủ với item dài (nguyên nhân "GDrive sync timed out").
+    excluded_dirs = {"_tmp_norm", "_tmp_shots"}
+    size_bytes = 0
+    for root, dirs, files in os.walk(item_dir):
+        dirs[:] = [d for d in dirs if d not in excluded_dirs]
+        for name in files:
+            if fnmatch.fnmatch(name, "*.tmp.*") or fnmatch.fnmatch(name, "*.voice.wav"):
+                continue
+            try:
+                size_bytes += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+    size_mb = max(1, size_bytes // (1024 * 1024))
+    copy_timeout = min(3600, max(180, size_mb * 12))
+
     cmd = [
         "rclone",
         "copy",
@@ -299,7 +317,7 @@ def sync_item_to_gdrive(
             cmd,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=copy_timeout,
         )
         if proc.returncode == 0:
             freed = 0
@@ -332,11 +350,11 @@ def sync_item_to_gdrive(
                 "freed_bytes": 0,
             }
     except subprocess.TimeoutExpired:
-        logger.warning("GDrive sync timed out for %s", item_id)
+        logger.warning("GDrive sync timed out for %s (budget %ss)", item_id, copy_timeout)
         return {
             "status": "error",
             "remote_path": remote_item_path,
-            "detail": "rclone copy timed out after 180s",
+            "detail": f"rclone copy timed out after {copy_timeout}s",
             "freed_bytes": 0,
         }
     except Exception as exc:
