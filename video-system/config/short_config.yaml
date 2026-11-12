@@ -5,6 +5,8 @@ modes:
     target_seconds: 32          # 25–40s
     min_words: 80
     max_words: 110
+    min_words_en: 65            # EN nói chậm hơn VI (~2.45 từ/s) → ngân sách giảm
+    max_words_en: 90
     images_per_scene: 1
     fast_mode: true             # scene thường dùng bank, gen tối đa hero_images
     hero_images: 2
@@ -12,6 +14,8 @@ modes:
     target_seconds: 48          # 40–60s
     min_words: 110
     max_words: 160
+    min_words_en: 100
+    max_words_en: 135
     images_per_scene: 1
     fast_mode: false            # gen ảnh cho mọi scene
     hero_images: 0
@@ -20,6 +24,13 @@ tts_vi:
   fallback_voice: "vi-VN-HoaiThyNeural"
   rate: "+0%"
   words_per_sec_estimate: 2.6   # tiếng Việt ~2.4–3.0 từ/s
+  inter_scene_pause_sec: 0.24
+tts_en:
+  default_voice: "en-US-AndrewMultilingualNeural"
+  fallback_voice: "en-US-ChristopherNeural"
+  rate: "+0%"                   # Andrew + rate âm bị edge-tts từ chối (test 2026-11-12);
+                                # Christopher vẫn chạy -6% nhưng giữ đồng bộ 1 rate cho mảng EN
+  words_per_sec_estimate: 2.45  # đồng bộ audio_config.yaml tts_en
   inter_scene_pause_sec: 0.24
 master:
   loudness_lufs: -16

@@ -20,11 +20,31 @@ feeds:
     url: "https://tuoitre.vn/rss/tin-moi-nhat.rss"
   - name: "Dân Trí"
     url: "https://dantri.com.vn/rss/home.rss"
+# Mảng quốc tế (lang=en) — nguồn RSS chính thống miễn phí, link bài là link thật.
+feeds_en:
+  - name: "BBC Business"
+    url: "https://feeds.bbci.co.uk/news/business/rss.xml"
+  - name: "CNBC"
+    url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"
+  - name: "Al Jazeera"
+    url: "https://www.aljazeera.com/xml/rss/all.xml"
+  - name: "The Guardian Business"
+    url: "https://www.theguardian.com/uk/business/rss"
+queries_en:                 # Google News RSS bản EN (hl=en, gl=US)
+  - "global economy news"
+  - "stock market today"
+  - "business finance news"
+  - "consumer spending trends"
 exclude_keywords:           # tiêu đề chứa từ nào dưới đây → bỏ (an toàn nền tảng, G.1)
   - "tử vong"
   - "máu me"
   - "hiếp dâm"
   - "chính trị"
+exclude_keywords_en:
+  - "politics"
+  - "election"
+  - "dead"
+  - "killed"
 telegram:
   parse_mode: "HTML"
   disable_web_page_preview: false

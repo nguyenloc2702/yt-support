@@ -208,3 +208,86 @@ Ba quyết định mới (ghi vào đây theo luật, không quyết trong chat)
 News cập nhật mỗi vài phút). Người dùng vẫn phải duyệt kịch bản trước render nên chu kỳ
 60 phút không làm mất tin. Tin lỗi fetch một query vẫn tiếp tục các query còn lại
 (không fail-cả-kỳ), lỗi ghi vào event `news.sync_failed`.
+
+## G.12 Mảng quốc tế EN + stock Pexels (bổ sung 2026-11-12)
+
+Mục tiêu: short tiếng Anh thuần quốc tế kiểu TikTok news (DailyMail-style) —
+chọn tin tay từ hộp tin, nguồn visual đầy đủ (ảnh bài → stock ảnh → stock video
+b-roll → bank → AI-gen → thẻ màu).
+
+### Ngôn ngữ (lang='en')
+- `ShortCreate.lang: vi|en` (mặc định vi); lưu cột `shorts.lang`.
+- Prompt EN: `prompts._SYSTEM_NEWS_EN/_SYSTEM_DECODE_EN` — cùng công thức hook →
+  beats → closing, văn nói tự nhiên, cấm bịa số; ngân sách từ EN riêng
+  (`modes.*.min_words_en/max_words_en` — EN nói chậm ~2.45 từ/s).
+- Voice EN: block `tts_en` trong `short_config.yaml`
+  (`en-US-AndrewMultilingualNeural` fallback Christopher); edge-tts free.
+- Image prompt scene + publish pack (Duration/Source) sinh bản EN khi lang=en.
+
+### Nguồn tin EN quốc tế (chọn tay, không auto-cron)
+- `news_config.yaml` thêm `feeds_en` (BBC Business, CNBC, Al Jazeera, Guardian)
+  + `queries_en` (Google News RSS hl=en gl=US) + `exclude_keywords_en`.
+- `news_items.lang` ('vi'|'en') — dedupe sha1(link) dùng chung cả 2 mảng;
+  `GET /api/v1/news?lang=` lọc theo ngôn ngữ.
+- UI: filter Tất cả/VI/EN + link "Xem nguồn ↗" mở bài gốc tab mới; chọn tin EN
+  tự chuyển ngôn ngữ short sang en.
+
+### Stock media (`pipeline_short/stock_media.py`)
+- **Pixabay primary** (env `VIDEO_PIXABAY_API_KEY` — key cấp ngay sau đăng ký;
+  Pexels đã tạm dừng cấp key mới từ 2026-11, connector Pexels giữ làm fallback
+  cho tài khoản có key cũ qua env `VIDEO_PEXELS_API_KEY`). Thiếu cả hai → skip
+  connector, pipeline vẫn chạy bằng nguồn khác (honest, không chết).
+- Ảnh dọc (`orientation=portrait`) + video mp4 dọc ≤1080 ngang; download cache
+  `data/shorts_bank/pexels/{photos,videos}/` theo sha1(url); attribution
+  (photographer) lưu cột `short_scenes.attribution`.
+- Scene ghi `asset_kind` ('image'|'video_clip').
+
+### Assembler video b-roll
+- Scene có `clip_path` → ffmpeg loop-fill đúng duration scene, scale/crop fill
+  9:16, chuẩn 30fps, MUTE audio clip (voice là chính); không zoompan.
+- Concat vẫn stream-copy sau chuẩn hóa codec h264 yuv420p.
+
+### Env mới
+- `VIDEO_PEXELS_API_KEY` — tùy chọn; không có vẫn produce được.
+
+## G.13 Job queue cho agent video ngoài (bổ sung 2026-11-13)
+
+Bối cảnh: video auto-assemble bằng ảnh tĩnh không đạt chất lượng (user đánh
+giá "xấu"). Chuyển kiến trúc theo pattern TODO video dài: hệ thống lo
+AUDIO + JOB, agent video ngoài (user kiếm) gen visual per scene.
+
+### Luồng trạng thái (thêm vào ShortStatus)
+`scripted --publish-job--> queued --clip đầu--> rendering --assemble--> ready`
+
+### Service (`service_shorts.py`)
+- `_ensure_voice_timeline()` — tách bước 1-2+4 của produce (TTS + scene windows
+  + karaoke ASS/SRT), dùng chung produce và publish_job.
+- `publish_job(id)` — CHỈ lang='en' + scripted; build timeline → `queued`,
+  event `short.job_ready`.
+- `get_job(id)` — package: audio/subs URLs, scenes (timing + visual_prompt +
+  stock_search_keywords), template `skill_bundle_short`, progress coverage.
+- `submit_clip(id, seq_num, file, covered_scene_indexes)` — sandbox
+  VIDEO_DATA_DIR, probe, sha256, upsert `short_clips`, đánh dấu scene
+  `agent_checked` + duration pro-rata (pattern `submit_video` todo); 1 clip có
+  thể gộp nhiều scene.
+- `assemble_job(id)` — normalize clip (trim theo scene window, pro-rata seek
+  cho clip gộp) → concat → burn karaoke + voice + BGM → QC fail-closed →
+  `ready`. Thiếu coverage → `ShortfallError` (HTTP 409 `video_duration_shortfall`).
+- Legacy `produce()` (ảnh tĩnh) giữ nguyên làm fallback.
+
+### API
+`GET /api/v1/short-jobs?status=` · `POST /api/v1/shorts/{id}/publish-job` ·
+`GET /api/v1/shorts/{id}/job` (+`/job/audio`) · `POST /api/v1/shorts/{id}/clips`
+(multipart/JSON) · `GET|DELETE /api/v1/shorts/{id}/clips/{seq}` ·
+`POST /api/v1/shorts/{id}/assemble` · `GET /api/v1/short-agent-guide`.
+Webhook mới: `short.job_ready`, `short.clip_submitted`, `short.ready`.
+
+### Template agent
+`pipeline_short/skill_bundle_short.py` — STYLE_NEWS_916 "Breaking News Alert
+9:16" (headline overlay đè trên, banner đỏ, bottom 25% để trống cho karaoke,
+punch-zoom 30-40-30, footage thật + map/satellite, cấm watermark/letterbox).
+Guide: `AGENT_SHORT_GUIDE.md`.
+
+### Store
+`short_clips` (UNIQUE short_id+seq_num, sha256, duration, covered_scene_indexes
+JSON) + `short_scenes.agent_checked/generated_duration_sec`.

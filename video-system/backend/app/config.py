@@ -14,6 +14,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = Path(os.environ.get("VIDEO_CONFIG_DIR", REPO_ROOT / "config"))
 
 
+def _load_dotenv_env() -> None:
+    """Đọc .env từ REPO_ROOT (KEY=VALUE) — KHÔNG đè env đã set ngoài.
+    Không có .env → bỏ qua (không bắt buộc)."""
+    p = REPO_ROOT / ".env"
+    if not p.exists():
+        return
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_dotenv_env()
+
+
 def _load(name: str) -> dict:
     path = CONFIG_DIR / name
     if not path.exists():

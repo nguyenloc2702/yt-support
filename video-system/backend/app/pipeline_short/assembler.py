@@ -105,7 +105,7 @@ def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
                    words: list[dict], ass_path: str, out_dir: Path) -> dict:
     """Ghép video dọc từ ảnh scene + voice + karaoke. QC fail-closed.
 
-    scenes: [{seq, text, start_sec, end_sec, image_path}]
+    scenes: [{seq, text, start_sec, end_sec, image_path, clip_path?}]
     Trả: {video_path, duration, burned, probe}
     """
     spec = RENDER_SPEC_SHORT["video"]
@@ -136,31 +136,43 @@ def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
         return {"video_path": str(final_path), "duration": round(audio_dur, 3),
                 "burned": True, "probe": None}
 
-    # 1) Render từng scene: ảnh → clip dọc (thiếu ảnh scene → nền màu đặc, honest)
+    # 1) Render từng scene: video b-roll → dùng thẳng (loop nếu ngắn hơn scene);
+    #    ảnh → zoompan dọc; thiếu cả hai → nền màu đặc, honest
     norm_clips: list[Path] = []
     for sc in scenes:
         dur = max(0.5, float(sc["end_sec"]) - float(sc["start_sec"]))
         clip = tmp / f"scene_{int(sc['seq']):03d}.mp4"
         img = sc.get("image_path")
-        vf = _kenburns_filter(f"{short_id}|scene_{int(sc['seq'])}", dur, fps)
-        if img and Path(img).exists():
-            # G.11: ảnh ngang (ảnh gốc bài báo) → blur-pad dọc trước khi zoompan
-            try:
-                img = _prepare_scene_image(Path(img), tmp, int(sc["seq"]))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("prepare scene image %s failed: %s", img, exc)
-            cmd = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", f"{dur:.3f}",
-                   "-i", str(img), "-vf", vf, "-frames:v",
-                   str(max(1, int(round(dur * fps)))), "-an",
+        clip_src = sc.get("clip_path")
+        if clip_src and Path(clip_src).exists():
+            # B-roll clip: scale/crop fill 9:16, chuẩn fps, MUTE audio (voice là chính)
+            vf_clip = (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                       f"crop={width}:{height},setsar=1,fps={fps}")
+            cmd = ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1",
+                   "-i", str(clip_src),
+                   "-vf", vf_clip, "-an", "-t", f"{dur:.3f}",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
                    "-pix_fmt", "yuv420p", str(clip)]
         else:
-            # Không có ảnh → thẻ màu đặc (đúng luật: không im lặng, ghi rõ trong meta)
-            cmd = ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
-                   "-i", f"color=c=0x1C1917:s={width}x{height}:d={dur:.3f}:r={fps}",
-                   "-frames:v", str(max(1, int(round(dur * fps)))), "-an",
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
-                   "-pix_fmt", "yuv420p", str(clip)]
+            vf = _kenburns_filter(f"{short_id}|scene_{int(sc['seq'])}", dur, fps)
+            if img and Path(img).exists():
+                # G.11: ảnh ngang (ảnh gốc bài báo) → blur-pad dọc trước khi zoompan
+                try:
+                    img = _prepare_scene_image(Path(img), tmp, int(sc["seq"]))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("prepare scene image %s failed: %s", img, exc)
+                cmd = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", f"{dur:.3f}",
+                       "-i", str(img), "-vf", vf, "-frames:v",
+                       str(max(1, int(round(dur * fps)))), "-an",
+                       "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+                       "-pix_fmt", "yuv420p", str(clip)]
+            else:
+                # Không có ảnh → thẻ màu đặc (đúng luật: không im lặng, ghi rõ trong meta)
+                cmd = ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                       "-i", f"color=c=0x1C1917:s={width}x{height}:d={dur:.3f}:r={fps}",
+                       "-frames:v", str(max(1, int(round(dur * fps)))), "-an",
+                       "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+                       "-pix_fmt", "yuv420p", str(clip)]
         subprocess.run(cmd, check=True, timeout=300)
         norm_clips.append(clip)
 

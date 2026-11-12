@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS todo_feedbacks (
 CREATE TABLE IF NOT EXISTS shorts (
   id TEXT PRIMARY KEY,
   mode TEXT NOT NULL,               -- news | decode (Phụ lục G)
+  lang TEXT DEFAULT 'vi',           -- vi | en (mảng quốc tế)
   title TEXT NOT NULL,
   status TEXT NOT NULL,
   script_json TEXT,
@@ -165,6 +166,27 @@ CREATE TABLE IF NOT EXISTS short_scenes (
   image_asset_id TEXT,
   image_prompt TEXT,
   bank_used INTEGER DEFAULT 0,
+  asset_kind TEXT DEFAULT 'image',  -- image | video_clip (b-roll Pexels)
+  attribution TEXT,                 -- credit nguồn ảnh/clip (vd photographer Pexels)
+  agent_checked INTEGER DEFAULT 0,  -- G.13: agent ngoài đã submit clip phủ scene
+  generated_duration_sec REAL DEFAULT 0.0,
+  created_at REAL, updated_at REAL,
+  UNIQUE(short_id, seq_num)
+);
+-- G.13: clip agent ngoài submit cho Short job (pattern todo_videos)
+CREATE TABLE IF NOT EXISTS short_clips (
+  id TEXT PRIMARY KEY,
+  short_id TEXT NOT NULL,
+  seq_num INTEGER NOT NULL,
+  video_asset_id TEXT,
+  filename TEXT,
+  sha256 TEXT,
+  duration_sec REAL DEFAULT 0.0,
+  width INTEGER DEFAULT 0,
+  height INTEGER DEFAULT 0,
+  fps REAL DEFAULT 0.0,
+  covered_scene_indexes TEXT,       -- JSON [1,2,...] — 1 clip phủ nhiều scene
+  note TEXT,
   created_at REAL, updated_at REAL,
   UNIQUE(short_id, seq_num)
 );
@@ -176,6 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_events_item ON events(item_id, at);
 CREATE INDEX IF NOT EXISTS idx_todo_feedbacks_item ON todo_feedbacks(item_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_shorts_status ON shorts(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_short_scenes_short ON short_scenes(short_id, seq_num);
+CREATE INDEX IF NOT EXISTS idx_short_clips_short ON short_clips(short_id, seq_num);
 CREATE TABLE IF NOT EXISTS news_items (
   id TEXT PRIMARY KEY,
   link_hash TEXT UNIQUE,          -- sha1(link) — dedupe tuyệt đối (G.10)
@@ -184,6 +207,7 @@ CREATE TABLE IF NOT EXISTS news_items (
   link TEXT NOT NULL,
   summary TEXT,
   query TEXT,
+  lang TEXT DEFAULT 'vi',         -- vi | en (mảng quốc tế)
   published_at REAL,
   fetched_at REAL,
   status TEXT DEFAULT 'new',      -- new | used | dismissed
@@ -221,6 +245,18 @@ _SHOT_MIGRATION_COLS = [
 
 _SHORTS_MIGRATION_COLS = [
     ("source_link", "TEXT"),  # G.11 — link bài báo để lấy ảnh gốc
+    ("lang", "TEXT DEFAULT 'vi'"),  # mảng quốc tế EN
+]
+
+_SHORT_SCENES_MIGRATION_COLS = [
+    ("asset_kind", "TEXT DEFAULT 'image'"),   # image | video_clip
+    ("attribution", "TEXT"),
+    ("agent_checked", "INTEGER DEFAULT 0"),   # G.13: clip agent phủ scene
+    ("generated_duration_sec", "REAL DEFAULT 0.0"),
+]
+
+_NEWS_MIGRATION_COLS = [
+    ("lang", "TEXT DEFAULT 'vi'"),  # mảng quốc tế EN
 ]
 
 
@@ -265,6 +301,18 @@ class SQLiteStore(Store):
         for col, col_def in _SHORTS_MIGRATION_COLS:
             if existing_shorts_cols and col not in existing_shorts_cols:
                 conn.execute(f"ALTER TABLE shorts ADD COLUMN {col} {col_def}")
+        existing_scene_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(short_scenes)").fetchall()
+        }
+        for col, col_def in _SHORT_SCENES_MIGRATION_COLS:
+            if existing_scene_cols and col not in existing_scene_cols:
+                conn.execute(f"ALTER TABLE short_scenes ADD COLUMN {col} {col_def}")
+        existing_news_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(news_items)").fetchall()
+        }
+        for col, col_def in _NEWS_MIGRATION_COLS:
+            if existing_news_cols and col not in existing_news_cols:
+                conn.execute(f"ALTER TABLE news_items ADD COLUMN {col} {col_def}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=30000")

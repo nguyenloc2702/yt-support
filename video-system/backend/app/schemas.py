@@ -90,6 +90,16 @@ class TodoFromYoutubeCreate(BaseModel):
     )
 
 
+class ShortClipSubmitJson(BaseModel):
+    """G.13 — agent video ngoài submit clip cho Short job (JSON mode)."""
+    seq_num: int | None = Field(default=None, ge=1, description="1-based; tự tăng nếu bỏ trống")
+    file_path: str | None = Field(default=None, description="Path trong VIDEO_DATA_DIR")
+    file_url: str | None = Field(default=None, description="URL allowlisted")
+    covered_scene_indexes: list[int] | None = Field(
+        default=None, description="Scene bị clip này phủ (gộp nhiều scene)")
+    note: str | None = Field(default=None, max_length=500)
+
+
 class TodoVideoSubmitJson(BaseModel):
     seq_num: int | None = Field(default=None, ge=1, description="1-based sequential order (1, 2, 3...)")
     file_path: str | None = Field(default=None, description="Path to video file under VIDEO_DATA_DIR")
@@ -208,6 +218,8 @@ class ShotChecklistBatchUpdate(BaseModel):
 class ShortCreate(BaseModel):
     mode: str = Field(pattern="^(news|decode)$",
                       description="news = Tin nóng 25-40s; decode = Giải mã tiền bạc 40-60s")
+    lang: str = Field(default="vi", pattern="^(vi|en)$",
+                      description="vi = tiếng Việt; en = mảng quốc tế (voice + prompt EN)")
     source_text: str = Field(min_length=1, max_length=6000,
                              description="Tin vắn dán vào hoặc chủ đề")
     source_note: str | None = Field(default=None, max_length=300,
@@ -217,7 +229,7 @@ class ShortCreate(BaseModel):
     target_seconds: float | None = Field(default=None, ge=10, le=90)
     title: str | None = Field(default=None, max_length=200)
     voice: str | None = Field(default=None, max_length=100,
-                              description="Edge-TTS voice VI override")
+                              description="Edge-TTS voice override (mặc định theo lang)")
 
 
 class ShortScriptUpdate(BaseModel):

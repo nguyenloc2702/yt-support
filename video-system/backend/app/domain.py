@@ -138,6 +138,8 @@ ITEM_TRANSITIONS: dict[ItemStatus, set[ItemStatus]] = {
 class ShortStatus(str, Enum):
     DRAFT = "draft"
     SCRIPTED = "scripted"
+    QUEUED = "queued"        # G.13: job đã phát hành cho agent video ngoài (EN)
+    RENDERING = "rendering"  # G.13: agent đang submit clip
     PRODUCING = "producing"
     READY = "ready"
     FAILED = "failed"
@@ -148,7 +150,15 @@ SHORT_TRANSITIONS: dict[ShortStatus, set[ShortStatus]] = {
     ShortStatus.DRAFT: {ShortStatus.SCRIPTED, ShortStatus.FAILED, ShortStatus.CANCELLED},
     ShortStatus.SCRIPTED: {
         ShortStatus.PRODUCING, ShortStatus.SCRIPTED,  # self-loop: sửa/duyệt lại kịch bản
+        ShortStatus.QUEUED,  # G.13: publish-job cho agent video ngoài
         ShortStatus.FAILED, ShortStatus.CANCELLED,
+    },
+    ShortStatus.QUEUED: {
+        ShortStatus.RENDERING, ShortStatus.SCRIPTED,  # self-loop: sửa kịch bản lại
+        ShortStatus.FAILED, ShortStatus.CANCELLED,
+    },
+    ShortStatus.RENDERING: {
+        ShortStatus.READY, ShortStatus.QUEUED, ShortStatus.FAILED, ShortStatus.CANCELLED,
     },
     ShortStatus.PRODUCING: {
         ShortStatus.READY, ShortStatus.SCRIPTED, ShortStatus.FAILED, ShortStatus.CANCELLED,
@@ -161,6 +171,8 @@ SHORT_TRANSITIONS: dict[ShortStatus, set[ShortStatus]] = {
 SHORT_LABELS_VI: dict[str, str] = {
     "draft": "Nháp",
     "scripted": "Đã có kịch bản",
+    "queued": "Đã phát hành job",
+    "rendering": "Agent đang render",
     "producing": "Đang tổng hợp",
     "ready": "Đã có video",
     "failed": "Hỏng",

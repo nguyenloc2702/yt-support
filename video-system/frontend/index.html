@@ -1022,52 +1022,6 @@ input:focus, select:focus, textarea:focus {
   display: none;
 }
 
-/* Full-screen Blocking Overlay — chặn mọi thao tác khi máy chủ đang xử lý nặng (ráp video) */
-.blocking-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9800;
-  background: rgba(250, 250, 249, 0.96);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  cursor: progress;
-}
-
-.blocking-overlay.hidden {
-  display: none;
-}
-
-.blocking-card {
-  width: 100%;
-  max-width: 390px;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-lg);
-  padding: 28px 24px 24px;
-  box-shadow: var(--shadow);
-  text-align: center;
-}
-
-.blocking-card .blocking-spinner {
-  width: 44px;
-  height: 44px;
-  margin: 0 auto 14px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: blocking-spin 0.9s linear infinite;
-}
-
-@keyframes blocking-spin {
-  to { transform: rotate(360deg); }
-}
-
-body.is-blocked {
-  overflow: hidden;
-}
-
 .auth-card {
   width: 100%;
   max-width: 390px;
@@ -3011,19 +2965,6 @@ summary:focus-visible {
     <div class="auth-err" id="authErr"></div>
     <button type="submit" id="authBtn" class="btn-primary" style="width:100%;padding:10px">Mở Khóa</button>
   </form>
-</div>
-
-<!-- Full-screen Blocking Overlay: chặn mọi thao tác khi máy chủ đang ráp video -->
-<div id="blockingOverlay" class="blocking-overlay hidden" role="status" aria-live="assertive">
-  <div class="blocking-card">
-    <div class="blocking-spinner" aria-hidden="true"></div>
-    <h2 id="blockingTitle" style="margin:0 0 6px;font-size:16px;font-weight:600">Đang ghép video thành phẩm…</h2>
-    <p style="margin:0;font-size:12px;color:var(--fg-muted)">
-      Máy chủ đang normalize từng shot → ghép → mux audio. Việc này có thể mất vài phút
-      với video dài — đừng tắt hoặc tải lại trang.
-    </p>
-    <p class="mono" id="blockingElapsed" style="margin:10px 0 0;font-size:13px;color:var(--fg)">00:00</p>
-  </div>
 </div>
 
 <!-- Sticky Topbar -->
@@ -6236,52 +6177,19 @@ async function deleteImage(itemId, seqNum, kind = 'keyframe') {
   }
 }
 
-// --- Full-screen blocking overlay: chặn mọi thao tác khi máy chủ xử lý nặng ---
-let _blockingTimer = null;
-
-function showBlockingOverlay(title) {
-  const ov = document.getElementById('blockingOverlay');
-  if (!ov) return;
-  const titleEl = document.getElementById('blockingTitle');
-  const el = document.getElementById('blockingElapsed');
-  if (titleEl) titleEl.textContent = title || 'Đang xử lý trên máy chủ…';
-  if (el) el.textContent = '00:00';
-  ov.classList.remove('hidden');
-  document.body.classList.add('is-blocked');
-  clearInterval(_blockingTimer);
-  const startedAt = Date.now();
-  _blockingTimer = setInterval(() => {
-    const s = Math.floor((Date.now() - startedAt) / 1000);
-    if (el) {
-      el.textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
-    }
-  }, 1000);
-}
-
-function hideBlockingOverlay() {
-  const ov = document.getElementById('blockingOverlay');
-  if (ov) ov.classList.add('hidden');
-  document.body.classList.remove('is-blocked');
-  clearInterval(_blockingTimer);
-  _blockingTimer = null;
-}
-
 async function confirmAssemble(itemId, allowShortfall, btnEl = null) {
   const prevText = btnEl ? btnEl.textContent : '';
   if (btnEl) {
     btnEl.disabled = true;
     btnEl.textContent = '⏳ Đang ghép video...';
   }
-  showBlockingOverlay('Đang ghép video thành phẩm…');
+  showToast('⏳ Đang tiến hành ghép video thành phẩm, vui lòng chờ...', 'info', 5000);
   try {
     const r = await apiFetch(`/api/v1/todos/${itemId}/confirm-assemble`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ burn_subtitles: false, allow_shortfall: !!allowShortfall }),
-      // Ghép video dài có thể vượt 5 phút (normalize từng shot → concat → mux
-      // → sync GDrive). Chờ tối đa 30 phút thay vì 300s để không tự hủy giữa
-      // chừng trong khi backend vẫn đang chạy.
-      timeoutMs: 1800000
+      timeoutMs: 300000
     });
     if (!r.ok) {
       throw new Error(await extractApiError(r, 'Không thể ráp video'));
@@ -6294,7 +6202,6 @@ async function confirmAssemble(itemId, allowShortfall, btnEl = null) {
     showToast(msg, 'error');
     alert('Không thể ráp video: ' + msg);
   } finally {
-    hideBlockingOverlay();
     if (btnEl && btnEl.isConnected) {
       btnEl.disabled = false;
       btnEl.textContent = prevText;
@@ -7052,6 +6959,8 @@ let shortsLoaded = false;
 let shortDetailsCache = {};
 let shortNewsList = [];
 let shortMode = 'news';
+let shortLang = 'vi';          // vi | en — mảng quốc tế dùng giọng + prompt EN
+let newsLangFilter = '';       // '' = tất cả, 'vi', 'en'
 const SHORT_MODE_META = {
   news: { label: 'Tin nóng', hint: '25–40s · 80–110 từ · hook giật gân → 3 beat → câu hỏi mở', target: 32 },
   decode: { label: 'Giải mã tiền bạc', hint: '40–60s · 110–160 từ · nghịch lý → cơ chế → chốt loop', target: 48 }
@@ -7146,7 +7055,8 @@ async function loadShorts(opts = {}) {
       note: document.getElementById('shortSourceNote')?.value || '',
       link: document.getElementById('shortSourceLink')?.value || '',
       target: document.getElementById('shortTargetSec')?.value || '',
-      mode: shortMode
+      mode: shortMode,
+      lang: shortLang
     };
     renderShortStudioShell();
     const ta = document.getElementById('shortSourceText');
@@ -7158,12 +7068,14 @@ async function loadShorts(opts = {}) {
     if (saved.link && link) link.value = saved.link;
     if (saved.target && target) target.value = saved.target;
     switchShortMode(saved.mode);
+    switchShortLang(saved.lang);
   }
 }
 
 async function loadNewsInbox() {
   try {
-    const r = await apiFetch('/api/v1/news?status=new&limit=30', { timeoutMs: 15000 });
+    const langQs = newsLangFilter ? `&lang=${newsLangFilter}` : '';
+    const r = await apiFetch(`/api/v1/news?status=new&limit=30${langQs}`, { timeoutMs: 15000 });
     if (!r.ok) throw new Error(await extractApiError(r, 'Không thể tải hộp tin nóng'));
     const d = await r.json();
     shortNewsList = d.news || [];
@@ -7178,17 +7090,28 @@ async function loadNewsInbox() {
 function renderNewsInboxHtml() {
   const options = shortNewsList.map((n, i) => {
     const src = n.source ? ` · ${n.source}` : '';
-    return `<option value="${esc(n.id)}">#${String(i + 1).padStart(2, '0')} ${esc(n.title.slice(0, 90))}${src}</option>`;
+    const tag = n.lang === 'en' ? ' [EN]' : '';
+    return `<option value="${esc(n.id)}">#${String(i + 1).padStart(2, '0')} ${esc(n.title.slice(0, 90))}${src}${tag}</option>`;
   }).join('');
+  const langBtn = (val, label) => `
+    <button type="button" class="btn-xs ${newsLangFilter === val ? 'btn-primary' : ''}"
+      onclick="filterNewsLang('${val}')">${label}</button>`;
+  const first = shortNewsList[0];
   return `
   <div class="news-inbox" id="shortNewsInbox">
     <div class="news-inbox-head">
       <span>Hộp tin nóng vừa về (${shortNewsList.length} tin mới)</span>
-      <button type="button" class="btn-xs" onclick="syncNewsNow(this)">Sync tin ngay</button>
+      <span style="display:flex;gap:4px;align-items:center">
+        ${langBtn('', 'Tất cả')}${langBtn('vi', 'VI')}${langBtn('en', 'EN')}
+        <button type="button" class="btn-xs" onclick="syncNewsNow(this)">Sync tin ngay</button>
+      </span>
     </div>
     ${shortNewsList.length ? `
       <div class="news-inbox-controls">
-        <select id="newsPickSelect" aria-label="Chọn tin từ hộp tin nóng">${options}</select>
+        <select id="newsPickSelect" aria-label="Chọn tin từ hộp tin nóng"
+          onchange="updateNewsSourceLink()">${options}</select>
+        <a id="newsSourceLink" class="btn-xs" href="${esc(first?.link || '#')}"
+          target="_blank" rel="noopener" title="Mở bài gốc ở tab mới">Xem nguồn ↗</a>
         <button type="button" class="btn-xs btn-primary" onclick="useNewsItem()">Dùng tin này</button>
         <button type="button" class="btn-xs" onclick="pushNewsItem(this)" title="Gửi đúng tin đã chọn qua Telegram">Gửi Telegram</button>
         <button type="button" class="btn-xs" onclick="dismissNewsItem()" title="Ẩn tin này khỏi hộp tin">Gỡ</button>
@@ -7196,11 +7119,24 @@ function renderNewsInboxHtml() {
     ` : `
       <div style="font-size:12px;color:var(--fg-muted)">
         Chưa có tin nào trong hàng đợi. Bấm "Sync tin ngay" để lấy tin nóng mới nhất
-        (Google News RSS), hoặc dán tin vắn trực tiếp vào ô bên dưới.
+        (Google News RSS VI + EN quốc tế: BBC, CNBC, Al Jazeera, Guardian),
+        hoặc dán tin vắn trực tiếp vào ô bên dưới.
         Tin chỉ được làm Short khi bạn chọn "Dùng tin này".
       </div>
     `}
   </div>`;
+}
+
+function updateNewsSourceLink() {
+  const sel = document.getElementById('newsPickSelect');
+  const item = shortNewsList.find(n => n.id === sel?.value);
+  const a = document.getElementById('newsSourceLink');
+  if (a && item?.link) a.href = item.link;
+}
+
+function filterNewsLang(lang) {
+  newsLangFilter = lang;
+  loadNewsInbox();
 }
 
 async function syncNewsNow(btnEl) {
@@ -7229,10 +7165,26 @@ function useNewsItem() {
   const note = document.getElementById('shortSourceNote');
   const link = document.getElementById('shortSourceLink');
   if (ta) ta.value = body;
-  if (note && item.source && !note.value) note.value = `Nguồn: ${item.source}`;
+  if (note && item.source && !note.value) {
+    note.value = item.lang === 'en' ? `Source: ${item.source}` : `Nguồn: ${item.source}`;
+  }
   if (link && item.link) link.value = item.link;
+  switchShortLang(item.lang === 'en' ? 'en' : 'vi');  // tin EN → tự chuyển mảng quốc tế
   if (ta) { ta.focus(); ta.scrollIntoView({ behavior: 'auto', block: 'center' }); }
   showToast('Đã điền tin vào ô nhập kịch bản (kèm link lấy ảnh gốc)', 'ok', 2600);
+}
+
+function switchShortLang(lang) {
+  shortLang = lang === 'en' ? 'en' : 'vi';
+  document.querySelectorAll('.short-lang-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-lang') === shortLang);
+  });
+  const hint = document.getElementById('shortLangHint');
+  if (hint) {
+    hint.textContent = shortLang === 'en'
+      ? 'Mảng quốc tế: voiceover tiếng Anh (Andrew), prompt EN, visual Pexels'
+      : 'Tiếng Việt: voiceover HoaiMy, prompt VI';
+  }
 }
 
 async function pushNewsItem(btnEl) {
@@ -7291,6 +7243,7 @@ async function createShortForm(ev) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         mode: shortMode,
+        lang: shortLang,
         source_text: source,
         source_note: document.getElementById('shortSourceNote')?.value.trim() || '',
         source_link: document.getElementById('shortSourceLink')?.value.trim() || '',
@@ -7355,6 +7308,17 @@ function renderShortStudioShell() {
               <span><b>${esc(m.label)}</b><small>${esc(m.hint)}</small></span>
             </button>`).join('')}
         </div>
+        <div class="short-mode-tabs" role="group" aria-label="Chọn ngôn ngữ Short" style="margin-top:8px">
+          <button type="button" class="btn short-lang-tab ${shortLang === 'vi' ? 'active' : ''}" data-lang="vi" onclick="switchShortLang('vi')">
+            <span><b>Tiếng Việt</b><small>voiceover vi-VN-HoaiMy</small></span>
+          </button>
+          <button type="button" class="btn short-lang-tab ${shortLang === 'en' ? 'active' : ''}" data-lang="en" onclick="switchShortLang('en')">
+            <span><b>English (Quốc tế)</b><small>voiceover en-US-Andrew · Pexels b-roll</small></span>
+          </button>
+        </div>
+        <div id="shortLangHint" style="font-size:11.5px;color:var(--fg-muted);margin-top:4px">
+          ${shortLang === 'en' ? 'Mảng quốc tế: voiceover tiếng Anh (Andrew), prompt EN, visual Pexels' : 'Tiếng Việt: voiceover HoaiMy, prompt VI'}
+        </div>
         ${renderNewsInboxHtml()}
         <div class="short-form-grid">
           <textarea id="shortSourceText" rows="5" placeholder="Dán nội dung bài báo/tin vắn (mode Tin nóng) hoặc chủ đề giải mã (vd: 'Càng tiết kiệm càng nghèo')..." maxlength="6000"></textarea>
@@ -7396,6 +7360,7 @@ function renderShortStudioShell() {
                 <h4 class="short-card-title" title="${esc(s.title)}">${esc(s.title)}</h4>
                 <div class="short-card-meta">
                   <span class="pill pill-accent">${esc(SHORT_MODE_NAMES[s.mode] || s.mode)}</span>
+                  ${s.lang === 'en' ? '<span class="pill pill-ghost mono">EN</span>' : ''}
                   ${s.duration_s > 0 ? `<span class="mono">${Number(s.duration_s).toFixed(1)}s</span>` : ''}
                   <span class="mono">${Number(s.word_count || 0)} từ</span>
                   ${s.video_asset_id ? '<span class="pill pill-ok">MP4 9:16</span>' : ''}
@@ -7561,6 +7526,36 @@ function renderShortDetailPage(short) {
       </div>
     </section>` : '';
 
+  // G.13 — Agent Job panel: chỉ cho short EN (job mode cho agent video ngoài)
+  const jobStatuses = ['queued', 'rendering'];
+  const agentJobHtml = (short.lang || 'vi') === 'en' &&
+      ['scripted', 'queued', 'rendering'].includes(short.status) ? `
+    <section class="panel" id="shortAgentJobPanel">
+      <div class="panel-header">
+        <div>
+          <h3 class="panel-title">Agent Job — video ngoài gen 9:16</h3>
+          <div class="panel-subtitle">Phát hành job → agent tải package (audio + timing + template Breaking News 9:16) → submit clip per scene → hệ thống assemble (karaoke + BGM + QC).</div>
+        </div>
+        <div class="todo-actions">
+          ${short.status === 'scripted' ? `<button type="button" class="btn-primary btn-sm" onclick="publishShortJob('${esc(id)}', this)">Phát hành job</button>` : ''}
+          ${jobStatuses.includes(short.status) ? `<button type="button" class="btn-primary btn-sm" onclick="assembleShortJob('${esc(id)}', this)">Assemble final</button>` : ''}
+        </div>
+      </div>
+      ${jobStatuses.includes(short.status) ? `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <span class="pill pill-ghost mono">Job package</span>
+          <input type="text" readonly value="/api/v1/shorts/${esc(id)}/job" class="mono" style="flex:1;min-width:220px;font-size:11.5px"/>
+          <button type="button" class="btn-xs" onclick="copyShortJobUrl(this)">Copy URL</button>
+          <a class="btn-xs" href="/api/v1/shorts/${esc(id)}/job" target="_blank" rel="noopener">Mở JSON</a>
+        </div>
+        <div style="font-size:11.5px;color:var(--fg-muted)">
+          Agent poll: <span class="mono">GET /api/v1/short-jobs?status=queued</span>
+          · guide: <a href="/api/v1/short-agent-guide" target="_blank" rel="noopener">AGENT_SHORT_GUIDE.md</a>
+          · submit: <span class="mono">POST /api/v1/shorts/${esc(id)}/clips</span> (multipart file + seq_num)
+        </div>
+      ` : ''}
+    </section>` : '';
+
   const phoneHtml = `
     <section class="panel">
       <div class="panel-header">
@@ -7629,9 +7624,57 @@ function renderShortDetailPage(short) {
     </nav>
     ${publishHtml}
     <div class="shorts-layout">
-      <div>${scriptEdHtml}</div>
+      <div>${scriptEdHtml}${agentJobHtml}</div>
       <div class="phone-side">${phoneHtml}</div>
     </div>`;
+}
+
+async function publishShortJob(shortId, btnEl) {
+  const prev = btnEl?.textContent || '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Đang phát hành...'; }
+  try {
+    const r = await apiFetch(`/api/v1/shorts/${encodeURIComponent(shortId)}/publish-job`, { method: 'POST' });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Lỗi phát hành job'));
+    const job = await r.json();
+    shortDetailsCache[shortId] = { ...shortDetailsCache[shortId], status: job.status, status_label: 'Đã phát hành job' };
+    shortsLoaded = false;
+    openShortDetailPage(shortId);
+    showToast(`Job đã phát hành — ${job.scenes?.length || 0} scene, agent có thể poll ngay`, 'ok', 3500);
+  } catch (err) {
+    showToast(err.message || 'Lỗi phát hành job', 'error');
+  } finally {
+    if (btnEl && btnEl.isConnected) { btnEl.disabled = false; btnEl.textContent = prev || 'Phát hành job'; }
+  }
+}
+
+async function assembleShortJob(shortId, btnEl) {
+  const prev = btnEl?.textContent || '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Đang ghép...'; }
+  try {
+    const r = await apiFetch(`/api/v1/shorts/${encodeURIComponent(shortId)}/assemble`, { method: 'POST', timeoutMs: 120000 });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Lỗi assemble'));
+    openShortDetailPage(shortId);
+    showToast('Assemble xong — MP4 9:16 sẵn sàng', 'ok', 3000);
+  } catch (err) {
+    showToast(err.message || 'Lỗi assemble job', 'error');
+  } finally {
+    if (btnEl && btnEl.isConnected) { btnEl.disabled = false; btnEl.textContent = prev || 'Assemble final'; }
+  }
+}
+
+function copyShortJobUrl(btnEl) {
+  const input = btnEl?.parentElement?.querySelector('input');
+  const val = input?.value || '';
+  if (!val) return;
+  const done = () => showToast('Đã copy job URL', 'ok', 1800);
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(location.origin + val).then(done,
+      () => showToast('Không copy được', 'error'));
+  } else {
+    input.select();
+    document.execCommand('copy');
+    done();
+  }
 }
 
 function countWords(text) {

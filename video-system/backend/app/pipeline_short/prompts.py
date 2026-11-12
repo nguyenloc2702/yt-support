@@ -12,8 +12,10 @@ import re
 from ..config import SHORT_CONFIG
 
 MODES = ("news", "decode")
+LANGS = ("vi", "en")
 
 _MODE_NAME_VI = {"news": "Tin nóng", "decode": "Giải mã tiền bạc"}
+_MODE_NAME_EN = {"news": "Breaking News", "decode": "Money Decode"}
 
 # Chủ đề né cho mảng Tin nóng (bắt buộc theo G.1 — an toàn nền tảng)
 _BANNED_TOPIC_NOTE = (
@@ -39,6 +41,46 @@ QUY TẮC:
 Trả JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
 "hashtags": {{"tiktok": [...tối đa 6...], "facebook": [...tối đa 6...], "youtube": [...tối đa 5...]}},
 "description": "1-2 câu mô tả đăng bài", "source_note": "Nguồn: <tên nguồn tin/nguồn trong tin>"}}"""
+
+# Bản EN cho mảng quốc tế (lang="en") — cùng công thức, giọng TikTok news Anh/Mỹ.
+_BANNED_TOPIC_NOTE_EN = (
+    "Do NOT pick or invent content about: politics/diplomacy, health or human body, "
+    "graphic accidents, ongoing natural disasters with casualties, or unverified claims "
+    "about specific individuals. If the source story falls into these groups, refuse "
+    'via the "rejected" field.'
+)
+
+_SYSTEM_NEWS_EN = """You are an editor for vertical short-form news videos (TikTok/Reels/Shorts) on an international money & business channel.
+
+TASK: from the short news brief the user pastes in, write a 25-40 second script following this formula:
+1. hook (0-3s): the most shocking opener — lead with the damage figure / staggering number, or a question that hits curiosity hard. NEVER open with "According to reports...".
+2. beats (3 beats): the core developments, short punchy sentences, zero filler.
+3. closing: one open two-sided question to trigger comments (e.g. "So — genius move or self-destruction? You decide.").
+
+RULES:
+- Language: natural conversational English, spoken not written.
+- Keep the original numbers EXACTLY as in the brief; NEVER invent figures. Numbers must appear verbatim.
+- {banned_topics}
+- If the story is valid, do NOT fill the "rejected" field.
+
+Return JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
+"hashtags": {{"tiktok": [...max 6...], "facebook": [...max 6...], "youtube": [...max 5...]}},
+"description": "1-2 sentence post description", "source_note": "Source: <source name from the brief>"}}"""
+
+_SYSTEM_DECODE_EN = """You are a personal-finance analyst writing a 40-60 second vertical video script in English for a "Money Decode" channel.
+
+TASK: from the user's topic, write a script following this formula:
+1. hook: open with a counterintuitive claim or a number that stops the scroll (e.g. "The more you save, the poorer you get — here's why.").
+2. beats (2-4 beats): explain the hidden mechanism with everyday examples (coffee, groceries, your phone...). One idea per beat, short, rhythmic.
+3. closing: a surprise punchline that loops BACK to the hook, making the viewer want to rewatch.
+
+RULES:
+- Natural spoken English. Example numbers must be plausible; NEVER invent crime statistics.
+- {banned_topics}
+
+Return JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
+"hashtags": {{"tiktok": [...], "facebook": [...], "youtube": [...]}},
+"description": "...", "source_note": ""}}"""
 
 _SYSTEM_DECODE = """Bạn là nhà phân tích tài chính cá nhân viết kịch bản video dọc 40-60 giây tiếng Việt cho kênh "Giải mã tiền bạc".
 
@@ -78,17 +120,34 @@ _JSON_SCHEMA = {
 }
 
 
-def system_prompt(mode: str) -> str:
+def system_prompt(mode: str, lang: str = "vi") -> str:
     _check_mode(mode)
+    _check_lang(lang)
+    if lang == "en":
+        tpl = _SYSTEM_NEWS_EN if mode == "news" else _SYSTEM_DECODE_EN
+        return tpl.replace("{banned_topics}", _BANNED_TOPIC_NOTE_EN)
     tpl = _SYSTEM_NEWS if mode == "news" else _SYSTEM_DECODE
     return tpl.replace("{banned_topics}", _BANNED_TOPIC_NOTE)
 
 
 def user_prompt(mode: str, source_text: str, target_seconds: float | None,
-                source_note: str | None) -> str:
+                source_note: str | None, lang: str = "vi") -> str:
+    _check_lang(lang)
     cfg = SHORT_CONFIG["modes"][mode]
-    lo, hi = cfg["min_words"], cfg["max_words"]
+    if lang == "en":
+        lo, hi = _budget_en(mode)
+    else:
+        lo, hi = cfg["min_words"], cfg["max_words"]
     target = target_seconds or cfg["target_seconds"]
+    if lang == "en":
+        name = _MODE_NAME_EN[mode]
+        note = f"\nSOURCE (shown on video): {source_note.strip()}" if source_note else ""
+        return (
+            f"TOPIC/NEWS BRIEF (mode {name}, target ~{int(target)}s, "
+            f"budget {lo}-{hi} words total):\n"
+            f"\"\"\"\n{source_text.strip()}\n\"\"\"{note}\n"
+            f"Write the JSON script per the system requirements."
+        )
     note = f"\nNGUỒN TIN (ghi trên video): {source_note.strip()}" if source_note else ""
     return (
         f"CHỦ ĐỀ/TIN GỐC (mode {_MODE_NAME_VI[mode]}, mục tiêu ~{int(target)}s, "
@@ -114,9 +173,11 @@ def count_words(script: dict) -> int:
     return sum(len(t.split()) for t in narration_texts(script))
 
 
-def validate_script(mode: str, script: dict, source_note_fallback: str = "") -> dict:
+def validate_script(mode: str, script: dict, source_note_fallback: str = "",
+                    lang: str = "vi") -> dict:
     """Validate tiếng người (fail-closed). Trả script đã chuẩn hóa + word_count."""
     _check_mode(mode)
+    _check_lang(lang)
     if script.get("rejected"):
         raise ValueError(f"Kịch bản bị từ chối vì chủ đề nhạy cảm: {script['rejected']}")
     for field in ("title", "hook", "closing"):
@@ -128,8 +189,13 @@ def validate_script(mode: str, script: dict, source_note_fallback: str = "") -> 
     if len(beats) > 4:
         beats = beats[:4]
 
-    cfg = SHORT_CONFIG["modes"][mode]
-    lo, hi = int(cfg["min_words"]), int(cfg["max_words"])
+    if lang == "en":
+        lo, hi = _budget_en(mode)
+        name = _MODE_NAME_EN[mode]
+    else:
+        cfg = SHORT_CONFIG["modes"][mode]
+        lo, hi = int(cfg["min_words"]), int(cfg["max_words"])
+        name = _MODE_NAME_VI[mode]
     clean = {
         "title": str(script["title"]).strip()[:200],
         "hook": str(script["hook"]).strip(),
@@ -142,10 +208,11 @@ def validate_script(mode: str, script: dict, source_note_fallback: str = "") -> 
     wc = count_words(clean)
     if not (lo <= wc <= hi):
         raise ValueError(
-            f"Kịch bản {wc} từ, lệch ngân sách {lo}-{hi} từ cho mode {_MODE_NAME_VI[mode]}. "
+            f"Kịch bản {wc} từ, lệch ngân sách {lo}-{hi} từ cho mode {name}. "
             f"Bấm 'Đổi kịch bản' để gen lại."
         )
     clean["word_count"] = wc
+    clean["lang"] = lang
     return clean
 
 
@@ -164,3 +231,17 @@ def _clean_hashtags(tags: dict) -> dict:
 def _check_mode(mode: str) -> None:
     if mode not in MODES:
         raise ValueError(f"mode không hợp lệ: {mode} (chấp nhận: {', '.join(MODES)})")
+
+
+def _check_lang(lang: str) -> None:
+    if lang not in LANGS:
+        raise ValueError(f"lang không hợp lệ: {lang} (chấp nhận: {', '.join(LANGS)})")
+
+
+def _budget_en(mode: str) -> tuple[int, int]:
+    """Ngân sách từ cho kịch bản EN — nói chậm hơn VI (~2.45 từ/s) nên giảm ~20%.
+    Thiếu key trong config → fallback ngân sách VI (honest, không tự đoán)."""
+    cfg = SHORT_CONFIG["modes"][mode]
+    lo = cfg.get("min_words_en") or int(cfg["min_words"])
+    hi = cfg.get("max_words_en") or int(cfg["max_words"])
+    return int(lo), int(hi)

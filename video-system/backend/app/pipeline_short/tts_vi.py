@@ -1,7 +1,9 @@
-"""TTS tiếng Việt với WordBoundary cho karaoke (Phụ lục G.5).
+"""TTS cho Short (VI/EN theo `tts_vi`/`tts_en` config) với karaoke (G.5/G.12).
 
 Online: edge-tts stream (audio mp3 + sự kiện WordBoundary offset 100ns) → mp3
 → ffmpeg chuyển WAV 24kHz mono → nối PCM + pause → timeline từ tuyệt đối.
+Lỗi transient edge-tts → retry `_EDGE_RETRIES` lần/cue; 1 cue vẫn fail chỉ cue
+đó fallback offline, các cue sau thử lại bình thường.
 Offline (`VIDEO_OFFLINE_TTS=1` hoặc thiếu ffmpeg/edge-tts): WAV tổng hợp
 deterministic + timeline từ phân bổ đều (pattern `_write_synthetic_speech_wav`
 của pipeline_en) — test không cần mạng.
@@ -16,6 +18,7 @@ import os
 import shutil
 import struct
 import subprocess
+import time
 import wave
 from pathlib import Path
 
@@ -24,6 +27,8 @@ from ..config import SHORT_CONFIG, data_dir
 logger = logging.getLogger("video_system.pipeline_short.tts_vi")
 
 _WAV_RATE = 24000
+_EDGE_RETRIES = 3          # edge-tts lỗi transient → retry trước khi fallback
+_sleep = time.sleep        # tách ra để test monkeypatch không chờ thật
 
 
 def _offline() -> bool:
@@ -116,11 +121,13 @@ async def _edge_stream_cue(text: str, voice: str, rate: str, mp3_path: Path) -> 
 
 
 def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
-                           voice: str | None = None) -> dict:
-    """Tổng hợp toàn bộ dãy thoại → 1 audio + word timeline tuyệt đối."""
+                           voice: str | None = None, lang: str = "vi") -> dict:
+    """Tổng hợp toàn bộ dãy thoại → 1 audio + word timeline tuyệt đối.
+    lang='en' dùng block tts_en (mảng quốc tế); voice override đè config."""
     if not texts:
         raise ValueError("Danh sách thoại rỗng.")
-    cfg = SHORT_CONFIG["tts_vi"]
+    cfg_key = "tts_en" if lang == "en" else "tts_vi"
+    cfg = SHORT_CONFIG[cfg_key]
     chosen_voice = voice or cfg["default_voice"]
     rate = cfg["rate"]
     pause = float(cfg.get("inter_scene_pause_sec", 0.24))
@@ -138,18 +145,27 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
     for idx, text in enumerate(texts):
         cue_wav = work / f"cue_{idx:02d}.wav"
         cue_words: list[dict] = []
+        got_audio = False
         if not offline:
-            try:
-                import asyncio
-                mp3 = work / f"cue_{idx:02d}.tmp.mp3"
-                cue_words = asyncio.run(_edge_stream_cue(text, chosen_voice, rate, mp3))
-                _mp3_to_wav(mp3, cue_wav)
-                mp3.unlink(missing_ok=True)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("edge-tts cue %d thất bại (%s) → fallback offline", idx, exc)
-                cue_words = []
-                offline = True
-        if offline:
+            # Retry 3 lần: edge-tts thỉnh thoảng lỗi transient ("No audio was
+            # received" — throttle dịch vụ). 1 cue fail KHÔNG tắt các cue sau.
+            import asyncio
+            for attempt in range(_EDGE_RETRIES):
+                try:
+                    mp3 = work / f"cue_{idx:02d}.tmp.mp3"
+                    cue_words = asyncio.run(_edge_stream_cue(text, chosen_voice, rate, mp3))
+                    _mp3_to_wav(mp3, cue_wav)
+                    mp3.unlink(missing_ok=True)
+                    got_audio = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("edge-tts cue %d lần %d/%d thất bại (%s)",
+                                   idx, attempt + 1, _EDGE_RETRIES, exc)
+                    cue_words = []
+                    _sleep(min(2.0, 0.5 * (attempt + 1)))
+        if not got_audio:
+            # Chỉ cue NÀY fallback offline (tone giả + word estimate);
+            # các cue tiếp theo vẫn thử edge-tts bình thường.
             est = max(1.2, round(len(text.split()) / wps, 2))
             _write_synthetic_speech_wav(cue_wav, est)
             cue_words = []

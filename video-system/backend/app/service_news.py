@@ -82,9 +82,10 @@ def _parse_pubdate(raw: str) -> float | None:
         return None
 
 
-def _title_allowed(title: str) -> bool:
+def _title_allowed(title: str, lang: str = "vi") -> bool:
     low = title.lower()
-    for kw in NEWS_CONFIG.get("exclude_keywords") or []:
+    key = "exclude_keywords_en" if lang == "en" else "exclude_keywords"
+    for kw in NEWS_CONFIG.get(key) or []:
         if str(kw).lower() in low:
             return False
     return True
@@ -95,7 +96,8 @@ def _store_items(store: Store, items: list[dict]) -> list[dict]:
     new_rows: list[dict] = []
     t = now()
     for it in items:
-        if not _title_allowed(it["title"]):
+        lang = it.get("lang") or "vi"
+        if not _title_allowed(it["title"], lang):
             continue
         link_hash = hashlib.sha1(it["link"].encode("utf-8")).hexdigest()
         exists = store.query_one("SELECT id FROM news_items WHERE link_hash=?",
@@ -105,10 +107,10 @@ def _store_items(store: Store, items: list[dict]) -> list[dict]:
         row_id = new_id("nws")
         store.execute(
             "INSERT OR IGNORE INTO news_items (id, link_hash, source, title, link, "
-            "summary, query, published_at, fetched_at, status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,'new')",
+            "summary, query, lang, published_at, fetched_at, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,'new')",
             (row_id, link_hash, it.get("source") or "", it["title"], it["link"],
-             it.get("summary") or "", it.get("query") or "",
+             it.get("summary") or "", it.get("query") or "", lang,
              it.get("published_at"), t),
         )
         if store.query_one("SELECT id FROM news_items WHERE link_hash=?", (link_hash,)):
@@ -184,12 +186,15 @@ def push_selected(store: Store, news_id: str) -> dict:
 
 
 def run_once(store: Store) -> dict:
-    """1 kỳ sync: fetch feeds trực tiếp + query Google News → dedupe → push."""
-    base = "https://news.google.com/rss/search?q={q}&hl=vi&gl=VN&ceid=VN:vi"
+    """1 kỳ sync: fetch feeds trực tiếp + query Google News (VI + EN quốc tế)
+    → dedupe → push. 1 nguồn lỗi không chặn các nguồn còn lại."""
+    base_vi = "https://news.google.com/rss/search?q={q}&hl=vi&gl=VN&ceid=VN:vi"
+    base_en = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
     all_items: list[dict] = []
     failed: list[str] = []
     # G.11: RSS trực tiếp của báo — link bài là link thật (lấy được ảnh gốc)
-    for feed in NEWS_CONFIG.get("feeds") or []:
+    for feed, lang in ([(f, "vi") for f in NEWS_CONFIG.get("feeds") or []]
+                       + [(f, "en") for f in NEWS_CONFIG.get("feeds_en") or []]):
         name, url = str(feed.get("name") or "rss"), str(feed.get("url") or "")
         if not url:
             continue
@@ -198,14 +203,20 @@ def run_once(store: Store) -> dict:
             for it in items:
                 if not it.get("source"):
                     it["source"] = name
+                it["lang"] = lang
             all_items.extend(items)
         except Exception as exc:  # noqa: BLE001
             logger.warning("feed '%s' failed: %s", name, exc)
             failed.append(name)
-    for q in NEWS_CONFIG.get("queries") or []:
+    for q, lang in ([(q, "vi") for q in NEWS_CONFIG.get("queries") or []]
+                    + [(q, "en") for q in NEWS_CONFIG.get("queries_en") or []]):
         try:
+            base = base_en if lang == "en" else base_vi
             xml_text = _fetch_rss(base.format(q=urllib.parse.quote_plus(q)))
-            all_items.extend(parse_rss(xml_text, q))
+            items = parse_rss(xml_text, q)
+            for it in items:
+                it["lang"] = lang
+            all_items.extend(items)
         except Exception as exc:  # noqa: BLE001
             logger.warning("RSS query '%s' failed: %s", q, exc)
             failed.append(q)
@@ -225,15 +236,21 @@ def run_once(store: Store) -> dict:
     return result
 
 
-def list_news(store: Store, status: str | None = None, limit: int = 50) -> list[dict]:
+def list_news(store: Store, status: str | None = None, limit: int = 50,
+              lang: str | None = None) -> list[dict]:
     sql = "SELECT * FROM news_items"
-    params: tuple = ()
+    conds, params = [], []
     if status:
-        sql += " WHERE status=?"
-        params = (status,)
+        conds.append("status=?")
+        params.append(status)
+    if lang:
+        conds.append("lang=?")
+        params.append(lang)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY fetched_at DESC LIMIT ?"
-    params = params + (max(1, min(int(limit), 200)),)
-    return store.query(sql, params)
+    params.append(max(1, min(int(limit), 200)))
+    return store.query(sql, tuple(params))
 
 
 def dismiss_news(store: Store, news_id: str) -> dict | None:

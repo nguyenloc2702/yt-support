@@ -17,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import domain
 from .auth import SESSION_COOKIE, SESSION_TTL_SEC, Auth, webauth
-from .config import db_path, data_dir, RENDER_SPEC, AUDIO_CONFIG
+from .config import db_path, data_dir, RENDER_SPEC, AUDIO_CONFIG, REPO_ROOT
 from .providers import AdapterNotConfigured, registry
 from .schemas import (AudioRegenerateRequest, BatchCreate, CharacterSheetCreate,
                       ConfirmAssembleRequest, FeedbackBatchCreate, FeedbackItemCreate,
@@ -27,7 +27,7 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, CharacterSheetCreate,
                       ShotCheckUpdate, ShotImport, SyncGdriveRequest,
                       TodoCollectReferencesRequest, TodoFromScriptCreate,
                       TodoFromYoutubeCreate, TodoImageSubmitJson,
-                      TodoImportPackageCreate, TodoVideoSubmitJson,
+                      ShortClipSubmitJson, TodoImportPackageCreate, TodoVideoSubmitJson,
                       WebLoginRequest, WebhookRegister)
 from .service_assembler import AssemblerService, ShortfallWarningError
 from .service_news import (dismiss_news, list_news, push_selected as push_selected_news,
@@ -38,7 +38,7 @@ from .service_batches import BatchService
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
 from .service_shots import ShotService
-from .service_shorts import ShortService
+from .service_shorts import ShortService, ShortfallError
 from .service_todos import TodoService
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
@@ -365,7 +365,8 @@ def register_webhook(body: WebhookRegister, request: Request = None):
 _orig_event = items.event
 _WF_EVENTS = {"item.analyzed", "item.awaiting_review", "shot.held",
               "shot.appended", "item.ready", "item.failed",
-              "item.todo", "item.completed"}
+              "item.todo", "item.completed",
+              "short.job_ready", "short.clip_submitted", "short.ready"}
 
 def _map_webhook_type(type_: str, payload: dict) -> str | None:
     if type_ in _WF_EVENTS:
@@ -1216,6 +1217,7 @@ def create_short(body: ShortCreate, request: Request = None):
             source_note=body.source_note or "",
             source_link=body.source_link or "",
             target_seconds=body.target_seconds, title=body.title,
+            lang=body.lang,
         )
     except AdapterNotConfigured as e:
         raise HTTPException(503, f"Chưa cấu hình adapter LLM: {e}")
@@ -1370,6 +1372,152 @@ def get_short_publish(short_id: str, download: bool = False, request: Request = 
                         content_disposition_type="attachment" if download else "inline")
 
 
+# -- G.13: Job queue cho agent video ngoài (short EN) ---------------------------
+
+@app.get("/api/v1/short-jobs")
+def list_short_jobs(status: str | None = None, limit: int = 50, request: Request = None):
+    """Agent poll job: chỉ trả short EN ở queued/rendering (hoặc status chỉ định)."""
+    auth.require(request, "read")
+    if status and status not in {"queued", "rendering"}:
+        raise HTTPException(422, "status chỉ nhận: queued | rendering")
+    rows = shorts.list(status=status, q=None)
+    jobs = [r for r in rows if (r.get("lang") or "vi") == "en"
+            and r["status"] in {"queued", "rendering"}]
+    return {"jobs": jobs[:max(1, min(int(limit), 200))]}
+
+
+@app.post("/api/v1/shorts/{short_id}/publish-job")
+def publish_short_job(short_id: str, request: Request = None):
+    auth.require(request, "ingest")
+    try:
+        return shorts.publish_job(short_id)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except domain.TransitionError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/v1/shorts/{short_id}/job")
+def get_short_job(short_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return shorts.get_job(short_id)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+
+
+@app.api_route("/api/v1/shorts/{short_id}/job/audio", methods=["GET", "HEAD"])
+def get_short_job_audio(short_id: str, download: bool = False, request: Request = None):
+    auth.require(request, "read")
+    try:
+        p = shorts.audio_path(short_id)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    return FileResponse(p, media_type="audio/wav",
+                        filename=f"{short_id}_voice_en.wav",
+                        content_disposition_type="attachment" if download else "inline")
+
+
+@app.post("/api/v1/shorts/{short_id}/clips")
+async def submit_short_clip(short_id: str, request: Request):
+    """Agent submit clip: multipart `file` hoặc JSON `file_path`/`file_url`.
+
+    `covered_scene_indexes` (tùy chọn): 1 clip gộp nhiều scene.
+    """
+    auth.require(request, "ingest")
+    ctype = (request.headers.get("content-type") or "").lower()
+    try:
+        if "multipart/form-data" in ctype:
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None or not hasattr(upload, "read"):
+                raise HTTPException(422, "multipart form must include 'file'")
+            raw_bytes = await upload.read()
+            seq_raw = form.get("seq_num")
+            seq_num = int(seq_raw) if seq_raw not in (None, "") else None
+            cov_raw = form.get("covered_scene_indexes")
+            covered: list[int] | None = None
+            if cov_raw:
+                cov_str = str(cov_raw).strip()
+                if cov_str.startswith("["):
+                    covered = [int(x) for x in json.loads(cov_str)]
+                else:
+                    covered = [int(x.strip()) for x in cov_str.split(",") if x.strip()]
+            note = str(form.get("note") or "") or None
+            res = await run_in_threadpool(
+                shorts.submit_clip, short_id, seq_num=seq_num,
+                raw_bytes=raw_bytes,
+                filename=getattr(upload, "filename", "clip.mp4"),
+                covered_scene_indexes=covered, note=note)
+        else:
+            payload = await request.json()
+            body = ShortClipSubmitJson(**payload)
+            res = await run_in_threadpool(
+                shorts.submit_clip, short_id, seq_num=body.seq_num,
+                file_path=Path(body.file_path) if body.file_path else None,
+                file_url=body.file_url,
+                covered_scene_indexes=body.covered_scene_indexes, note=body.note)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return await run_in_threadpool(_idempotent, request, res, 201)
+
+
+@app.api_route("/api/v1/shorts/{short_id}/clips/{seq_num}/file", methods=["GET", "HEAD"])
+def get_short_clip_file(short_id: str, seq_num: int, download: bool = False,
+                        request: Request = None):
+    auth.require(request, "read")
+    try:
+        p = shorts.clip_file_path(short_id, int(seq_num))
+    except KeyError:
+        raise HTTPException(404, f"clip #{seq_num} not found")
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    return FileResponse(p, media_type="video/mp4",
+                        filename=f"seq_{seq_num:04d}.mp4",
+                        content_disposition_type="attachment" if download else "inline")
+
+
+@app.delete("/api/v1/shorts/{short_id}/clips/{seq_num}")
+def delete_short_clip(short_id: str, seq_num: int, request: Request = None):
+    auth.require(request, "ingest")
+    try:
+        shorts.delete_clip(short_id, int(seq_num))
+    except KeyError:
+        raise HTTPException(404, f"clip #{seq_num} not found")
+    return {"deleted": True, "seq_num": seq_num}
+
+
+@app.post("/api/v1/shorts/{short_id}/assemble")
+def assemble_short_job(short_id: str, request: Request = None):
+    auth.require(request, "ingest")
+    try:
+        return shorts.assemble_job(short_id)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ShortfallError as e:
+        raise HTTPException(409, {"detail": str(e), "progress": e.progress,
+                                  "code": "video_duration_shortfall"})
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:  # noqa: BLE001 — ffmpeg/provider lỗi tiếng người
+        raise HTTPException(502, f"Assemble Short job thất bại: {e}")
+
+
+@app.api_route("/api/v1/short-agent-guide", methods=["GET", "HEAD"])
+def short_agent_guide(request: Request = None):
+    auth.require(request, "read")
+    guide = REPO_ROOT / "AGENT_SHORT_GUIDE.md"
+    if not guide.exists():
+        raise HTTPException(404, "AGENT_SHORT_GUIDE.md chưa có trong repo")
+    return FileResponse(guide, media_type="text/markdown; charset=utf-8")
+
+
 # -- Hộp tin nóng (Phụ lục G.10) ------------------------------------------------
 
 @app.post("/api/v1/news/sync")
@@ -1380,11 +1528,14 @@ def news_sync(request: Request = None):
 
 
 @app.get("/api/v1/news")
-def news_list(status: str | None = None, limit: int = 50, request: Request = None):
+def news_list(status: str | None = None, lang: str | None = None, limit: int = 50,
+              request: Request = None):
     auth.require(request, "read")
     if status and status not in {"new", "used", "dismissed"}:
         raise HTTPException(422, "status chỉ nhận: new | used | dismissed")
-    return {"news": list_news(store, status=status, limit=limit)}
+    if lang and lang not in {"vi", "en"}:
+        raise HTTPException(422, "lang chỉ nhận: vi | en")
+    return {"news": list_news(store, status=status, limit=limit, lang=lang)}
 
 
 @app.post("/api/v1/news/{news_id}/dismiss")
