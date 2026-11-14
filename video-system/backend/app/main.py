@@ -980,6 +980,8 @@ def confirm_assemble_todo(
             item_id,
             burn_subtitles=req.burn_subtitles,
             allow_shortfall=req.allow_shortfall,
+            watermark_enabled=req.watermark_enabled,
+            watermark_text=req.watermark_text,
         )
     except KeyError:
         raise HTTPException(404, "todo item not found")

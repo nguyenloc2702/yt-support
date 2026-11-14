@@ -105,7 +105,7 @@ async def _edge_stream_cue(text: str, voice: str, rate: str, mp3_path: Path) -> 
     """Synthesize 1 cue, thu WordBoundary. Trả words offset giây theo đầu cue."""
     import edge_tts
 
-    comm = edge_tts.Communicate(text, voice=voice, rate=rate)
+    comm = edge_tts.Communicate(text, voice=voice, rate=rate, boundary="WordBoundary")
     words: list[dict] = []
     with open(mp3_path, "wb") as af:
         async for chunk in comm.stream():
@@ -120,6 +120,84 @@ async def _edge_stream_cue(text: str, voice: str, rate: str, mp3_path: Path) -> 
     return words
 
 
+_DEFAULT_EDGE_STREAM_CUE = _edge_stream_cue
+
+
+def _trim_pcm_silence(in_wav: Path, out_wav: Path, thresh: int = 380,
+                      pad_lead_s: float = 0.03, pad_tail_s: float = 0.05) -> tuple[float, float, float]:
+    """Cắt khoảng lặng đầu/cuối WAV 16-bit mono để nhịp nói dứt khoát."""
+    with wave.open(str(in_wav), "rb") as w:
+        rate = w.getframerate()
+        raw = w.readframes(w.getnframes())
+    n = len(raw) // 2
+    if n == 0:
+        shutil.copy2(in_wav, out_wav)
+        return 0.0, 0.0, 0.0
+    samples = struct.unpack(f"<{n}h", raw)
+    orig_dur = n / float(rate)
+    first = next((i for i, s in enumerate(samples) if abs(s) > thresh), 0)
+    last = next((i for i in range(n - 1, -1, -1) if abs(samples[i]) > thresh), n - 1)
+    start_idx = max(0, first - int(pad_lead_s * rate))
+    end_idx = min(n, last + int(pad_tail_s * rate))
+    if end_idx <= start_idx:
+        start_idx, end_idx = 0, n
+    with wave.open(str(out_wav), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(raw[start_idx * 2 : end_idx * 2])
+    return orig_dur, start_idx / float(rate), (end_idx - start_idx) / float(rate)
+
+
+def _norm_tok(s: str) -> str:
+    import re
+    return re.sub(r"[^0-9A-Za-zÀ-ỹ]", "", s.lower())
+
+
+def _assign_cues_from_words(texts: list[str], words: list[dict], total_dur: float) -> list[dict]:
+    """Chia word timeline 1-call về từng cue theo token alignment."""
+    import re
+    if not words:
+        per = total_dur / max(1, len(texts))
+        return [{"text": t, "start": round(i * per, 3), "end": round((i + 1) * per, 3)}
+                for i, t in enumerate(texts)]
+    cue_toks = [[_norm_tok(x) for x in re.findall(r"[0-9A-Za-zÀ-ỹ]+", c) if _norm_tok(x)]
+                for c in texts]
+    total_exp = sum(len(t) for t in cue_toks) or 1
+    cue_end_idx: list[int] = []
+    search_start = 0
+    cum_exp = 0
+    for toks in cue_toks[:-1]:
+        cum_exp += len(toks)
+        est = min(len(words) - 2, max(search_start, int(round(len(words) * (cum_exp / total_exp))) - 1))
+        last_tok = toks[-1] if toks else ""
+        chosen = est
+        if last_tok:
+            lo = max(search_start, est - 6)
+            hi = min(len(words) - 2, est + 6)
+            best_dist = 999
+            for k in range(lo, hi + 1):
+                if _norm_tok(words[k]["text"]) == last_tok and abs(k - est) < best_dist:
+                    best_dist = abs(k - est)
+                    chosen = k
+        cue_end_idx.append(chosen)
+        search_start = chosen + 1
+    cue_end_idx.append(len(words) - 1)
+
+    spans: list[dict] = []
+    span_start = 0.0
+    for ci, text in enumerate(texts):
+        end_wi = cue_end_idx[ci]
+        if ci < len(texts) - 1 and end_wi + 1 < len(words):
+            span_end = round((words[end_wi]["end"] + words[end_wi + 1]["start"]) / 2.0, 3)
+        else:
+            span_end = round(total_dur, 3)
+        spans.append({"text": text, "start": round(span_start, 3),
+                      "end": max(round(span_start + 0.5, 3), span_end)})
+        span_start = spans[-1]["end"]
+    return spans
+
+
 def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
                            voice: str | None = None, lang: str = "vi") -> dict:
     """Tổng hợp toàn bộ dãy thoại → 1 audio + word timeline tuyệt đối.
@@ -129,18 +207,60 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
     cfg_key = "tts_en" if lang == "en" else "tts_vi"
     cfg = SHORT_CONFIG[cfg_key]
     chosen_voice = voice or cfg["default_voice"]
+    fallback_voice = cfg.get("fallback_voice") or chosen_voice
     rate = cfg["rate"]
-    pause = float(cfg.get("inter_scene_pause_sec", 0.24))
+    pause = float(cfg.get("inter_scene_pause_sec", 0.14))
     wps = float(cfg.get("words_per_sec_estimate", 2.6))
 
     work = out_dir / "audio"
     work.mkdir(parents=True, exist_ok=True)
+    final_wav = work / f"voice_{short_id}.wav"
+    offline = _offline() or not _has_ffmpeg()
+
+    # Đường nhanh ổn định (production): gọi 1 lần duy nhất cho toàn bộ kịch bản
+    # để tránh rate-limit Microsoft + giữ nhịp đọc tự nhiên. Bỏ qua nếu test
+    # monkeypatch `_edge_stream_cue`.
+    if not offline and len(texts) > 1 and _edge_stream_cue is _DEFAULT_EDGE_STREAM_CUE:
+        import asyncio
+        full_text = " ".join(t.strip() for t in texts if t.strip())
+        full_mp3 = work / "full_tts.tmp.mp3"
+        full_raw = work / "full_raw.tmp.wav"
+        for try_voice in (chosen_voice, fallback_voice):
+            try:
+                raw_words = asyncio.run(_edge_stream_cue(full_text, try_voice, rate, full_mp3))
+                if full_mp3.exists() and full_mp3.stat().st_size > 2000:
+                    _mp3_to_wav(full_mp3, full_raw)
+                    full_mp3.unlink(missing_ok=True)
+                    orig_dur, trim_s, trimmed_dur = _trim_pcm_silence(full_raw, final_wav)
+                    full_raw.unlink(missing_ok=True)
+                    if not raw_words:
+                        words_out = _cue_words_offline(full_text, 0.0, trimmed_dur)
+                    else:
+                        words_out = []
+                        for w in raw_words:
+                            ws = max(0.0, round(w["start"] - trim_s, 3))
+                            we = min(trimmed_dur, max(ws + 0.05, round(w["end"] - trim_s, 3)))
+                            words_out.append({"text": w["text"], "start": ws, "end": we})
+                    cue_spans = _assign_cues_from_words(texts, words_out, trimmed_dur)
+                    return {
+                        "audio_path": str(final_wav),
+                        "duration": round(trimmed_dur, 3),
+                        "words": words_out,
+                        "cue_spans": cue_spans,
+                        "voice": try_voice,
+                        "offline": False,
+                        "object_key": f"shorts/{short_id}/audio/voice_{short_id}.wav",
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("single-call edge-tts (%s) thất bại, fallback per-cue: %s",
+                               try_voice, exc)
+                full_mp3.unlink(missing_ok=True)
+                full_raw.unlink(missing_ok=True)
 
     words: list[dict] = []
     cue_spans: list[dict] = []
     cue_paths: list[Path] = []
     cue_start = 0.0
-    offline = _offline() or not _has_ffmpeg()
 
     for idx, text in enumerate(texts):
         cue_wav = work / f"cue_{idx:02d}.wav"

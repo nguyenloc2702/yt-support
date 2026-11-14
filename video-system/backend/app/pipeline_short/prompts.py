@@ -25,22 +25,24 @@ _BANNED_TOPIC_NOTE = (
     "từ chối bằng trường \"rejected\"."
 )
 
-_SYSTEM_NEWS = """Bạn là biên tập viên video tin nhanh dạng dọc (TikTok/Reels/Shorts) cho một kênh tiền bạc & kinh doanh tiếng Việt.
+_SYSTEM_NEWS = """Bạn là biên tập viên video tin nhanh quốc tế dạng dọc (TikTok/Reels/Shorts) cho kênh tiền bạc & kinh doanh thế giới tiếng Việt (phong cách TK News / Global Explainer).
 
-NHIỆM VỤ: từ tin vắn người dùng dán vào, viết kịch bản_short 25-40 giây theo công thức:
-1. hook (0-3s): câu mở giật gân nhất — dẫn số liệu thiệt hại/con số gây sốc hoặc câu hỏi đánh thẳng tò mò. KHÔNG mở đầu kiểu "Theo thông tin..."
-2. beats (3 beat): diễn biến cốt lõi, câu ngắn dồn dập, cắt hết râu ria.
+NHIỆM VỤ: từ tin vắn quốc tế người dùng dán vào, viết kịch bản short 25-40 giây bằng tiếng Việt theo công thức:
+1. hook (0-3s): câu mở giật gân nhất — dẫn số liệu thiệt hại/biến động toàn cầu hoặc câu hỏi đánh thẳng tò mò. KHÔNG mở đầu kiểu "Theo thông tin..."
+2. beats (3 beat): diễn biến cốt lõi (ai, ở đâu, cơ chế tác động, con số thực tế), câu ngắn dồn dập, cắt hết râu ria.
 3. closing: 1 câu hỏi mở hai chiều để kích bình luận (vd: "Theo bạn đây là bước đi thiên tài hay tự hủy?").
 
 QUY TẮC:
-- Ngôn ngữ: tiếng Việt tự nhiên, nói được (không văn viết khô).
+- Ngôn ngữ: tiếng Việt tự nhiên, nói được (không văn viết khô); giữ nguyên tên địa danh/tập đoàn/đơn vị tiền tệ quốc tế rõ ràng.
 - Giữ đúng số liệu gốc trong tin; KHÔNG bịa số. Con số phải xuất hiện nguyên văn.
 - {banned_topics}
 - Nếu tin hợp lệ, KHÔNG điền trường "rejected".
+- Kèm `search_keywords_en`: mảng gồm 5 cụm từ tiếng Anh ngắn (2-3 từ mỗi cụm, mô tả vật thể/bối cảnh thật để tìm video b-roll quốc tế tương ứng cho [hook, beat1, beat2, beat3, closing]).
 
 Trả JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
+"search_keywords_en": ["cargo ship ocean", "shipping port cranes", "..."],
 "hashtags": {{"tiktok": [...tối đa 6...], "facebook": [...tối đa 6...], "youtube": [...tối đa 5...]}},
-"description": "1-2 câu mô tả đăng bài", "source_note": "Nguồn: <tên nguồn tin/nguồn trong tin>"}}"""
+"description": "1-2 câu mô tả đăng bài", "source_note": "Nguồn: <tên nguồn tin quốc tế>"}}"""
 
 # Bản EN cho mảng quốc tế (lang="en") — cùng công thức, giọng TikTok news Anh/Mỹ.
 _BANNED_TOPIC_NOTE_EN = (
@@ -104,6 +106,7 @@ _JSON_SCHEMA = {
         "hook": {"type": "string"},
         "beats": {"type": "array", "items": {"type": "string"}},
         "closing": {"type": "string"},
+        "search_keywords_en": {"type": "array", "items": {"type": "string"}},
         "hashtags": {
             "type": "object",
             "properties": {
@@ -201,6 +204,7 @@ def validate_script(mode: str, script: dict, source_note_fallback: str = "",
         "hook": str(script["hook"]).strip(),
         "beats": beats,
         "closing": str(script["closing"]).strip(),
+        "search_keywords_en": [str(k).strip() for k in (script.get("search_keywords_en") or []) if str(k).strip()],
         "hashtags": _clean_hashtags(script.get("hashtags") or {}),
         "description": str(script.get("description") or "").strip(),
         "source_note": str(script.get("source_note") or "").strip() or source_note_fallback,

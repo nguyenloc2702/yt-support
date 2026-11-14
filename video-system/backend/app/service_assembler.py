@@ -75,6 +75,54 @@ def _gdrive_sync_worker(
         logger.warning("GDrive sync bookkeeping failed for %s: %s", item_id, exc)
 
 
+def _render_watermark_png(
+    text: str,
+    out_png: Path,
+    opacity: float = 0.22,
+    font_size: int = 36,
+) -> bool:
+    """Render 1 file PNG chữ ký mờ (RGBA) tương thích cả Linux VPS và Windows."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+
+    font = None
+    for fp in (
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        if Path(fp).exists():
+            try:
+                font = ImageFont.truetype(fp, font_size)
+                break
+            except Exception:
+                font = None
+    if font is None:
+        font = ImageFont.load_default()
+
+    dummy = Image.new("RGBA", (10, 10))
+    d0 = ImageDraw.Draw(dummy)
+    tb = d0.textbbox((0, 0), text, font=font)
+    pad = 10
+    w = max(32, (tb[2] - tb[0]) + pad * 2)
+    h = max(24, (tb[3] - tb[1]) + pad * 2)
+
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    alpha_fg = max(16, min(255, int(round(255 * opacity))))
+    alpha_bg = max(10, int(round(alpha_fg * 0.65)))
+    tx, ty = pad - tb[0], pad - tb[1]
+    for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2), (2, 2)):
+        d.text((tx + dx, ty + dy), text, font=font, fill=(0, 0, 0, alpha_bg))
+    d.text((tx, ty), text, font=font, fill=(255, 255, 255, alpha_fg))
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_png)
+    return True
+
+
 class ShortfallWarningError(Exception):
     """Raised when total uploaded/planned video duration is shorter than EN Audio and allow_shortfall=False."""
 
@@ -245,6 +293,8 @@ class AssemblerService:
         burn_subtitles: bool = False,
         allow_shortfall: bool = False,
         actor: str = "user",
+        watermark_enabled: bool = True,
+        watermark_text: str | None = None,
     ) -> dict[str, Any]:
         """Confirm and assemble planned script video layers with the standardized EN Audio."""
         item = self.items.get(item_id)
@@ -316,6 +366,12 @@ class AssemblerService:
             fps = int(v_spec["fps"])
             crf_str = str(v_spec.get("crf", 20))
 
+            wm_cfg = RENDER_SPEC.get("watermark") or {}
+            wm_text = (watermark_text if watermark_text is not None else str(wm_cfg.get("text") or "@StickSto")).strip()
+            wm_active = bool(watermark_enabled and wm_text)
+            wm_opacity = float(wm_cfg.get("opacity", 0.22))
+            wm_font_size = int(wm_cfg.get("font_size", 36))
+
             active_videos = [lyr["video"] for lyr in plan_layers]
             use_real_ffmpeg = (
                 shutil.which("ffmpeg") is not None
@@ -324,6 +380,7 @@ class AssemblerService:
             )
 
             subtitles_actually_burned = bool(burn_subtitles and not use_real_ffmpeg)
+            watermark_actually_burned = bool(wm_active and not use_real_ffmpeg)
 
             if use_real_ffmpeg:
                 norm_clips: list[Path] = [norm_dir / f"norm_{idx:04d}.mp4" for idx in range(len(plan_layers))]
@@ -409,47 +466,108 @@ class AssemblerService:
                 ]
                 subprocess.run(cmd_concat, check=True, timeout=concat_timeout)
 
-                # Optional subtitle burn-in
-                video_input_for_mux = joined_video
+                # Optional subtitle burn-in + moving anti-theft watermark + final mux
+                wm_png = norm_dir / "watermark.png"
+                wm_ready = bool(wm_active and _render_watermark_png(wm_text, wm_png, opacity=wm_opacity, font_size=wm_font_size))
+
+                ass_filter = ""
                 if burn_subtitles:
                     ass_path = self.todos.resolve_subtitle_path(item_id, fmt="ass")
-                    burned_video = norm_dir / "burned_video.mp4"
-                    # Escape Windows path for FFmpeg subtitles filter
                     ass_escaped = ass_path.resolve().as_posix().replace(":", r"\:")
-                    cmd_burn = [
+                    ass_filter = f"ass='{ass_escaped}'"
+
+                if wm_ready or ass_filter:
+                    if wm_ready and ass_filter:
+                        fc = (
+                            f"[0:v]{ass_filter}[sub];"
+                            "[sub][1:v]overlay=x='(W-w)/2+(W-w)*0.32*sin(t*0.23)':"
+                            "y='(H-h)/2+(H-h)*0.28*cos(t*0.17)':format=auto[vout]"
+                        )
+                        cmd_mux = [
+                            "ffmpeg", "-y", "-v", "error",
+                            "-i", str(joined_video),
+                            "-i", str(wm_png),
+                            "-i", str(audio_path),
+                            "-filter_complex", fc,
+                            "-map", "[vout]", "-map", "2:a:0",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_str,
+                            "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", "-b:a", "192k",
+                            "-movflags", "+faststart",
+                            "-t", f"{audio_dur:.3f}",
+                            str(final_path),
+                        ]
+                        res_mux = subprocess.run(cmd_mux, capture_output=True, text=True, timeout=max(600, mux_timeout))
+                        if res_mux.returncode == 0 and final_path.exists():
+                            subtitles_actually_burned = True
+                            watermark_actually_burned = True
+                        else:
+                            # Fallback: bỏ ASS nếu lỗi filter phụ đề, giữ nguyên watermark
+                            wm_only_fc = (
+                                "[0:v][1:v]overlay=x='(W-w)/2+(W-w)*0.32*sin(t*0.23)':"
+                                "y='(H-h)/2+(H-h)*0.28*cos(t*0.17)':format=auto[vout]"
+                            )
+                            subprocess.run([
+                                "ffmpeg", "-y", "-v", "error",
+                                "-i", str(joined_video), "-i", str(wm_png), "-i", str(audio_path),
+                                "-filter_complex", wm_only_fc,
+                                "-map", "[vout]", "-map", "2:a:0",
+                                "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_str,
+                                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                                "-movflags", "+faststart", "-t", f"{audio_dur:.3f}", str(final_path),
+                            ], check=True, timeout=max(600, mux_timeout))
+                            watermark_actually_burned = True
+                    elif wm_ready:
+                        wm_fc = (
+                            "[0:v][1:v]overlay=x='(W-w)/2+(W-w)*0.32*sin(t*0.23)':"
+                            "y='(H-h)/2+(H-h)*0.28*cos(t*0.17)':format=auto[vout]"
+                        )
+                        subprocess.run([
+                            "ffmpeg", "-y", "-v", "error",
+                            "-i", str(joined_video), "-i", str(wm_png), "-i", str(audio_path),
+                            "-filter_complex", wm_fc,
+                            "-map", "[vout]", "-map", "2:a:0",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_str,
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                            "-movflags", "+faststart", "-t", f"{audio_dur:.3f}", str(final_path),
+                        ], check=True, timeout=max(600, mux_timeout))
+                        watermark_actually_burned = True
+                    else:
+                        subprocess.run([
+                            "ffmpeg", "-y", "-v", "error",
+                            "-i", str(joined_video), "-i", str(audio_path),
+                            "-vf", ass_filter,
+                            "-map", "0:v:0", "-map", "1:a:0",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_str,
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                            "-movflags", "+faststart", "-t", f"{audio_dur:.3f}", str(final_path),
+                        ], check=True, timeout=max(600, mux_timeout))
+                        subtitles_actually_burned = True
+                else:
+                    # Final mux: script-timed video stream + standardized EN audio
+                    cmd_mux = [
                         "ffmpeg", "-y", "-v", "error",
                         "-i", str(joined_video),
-                        "-vf", f"ass='{ass_escaped}'",
-                        "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_str,
-                        str(burned_video),
+                        "-i", str(audio_path),
+                        "-map", "0:v:0",
+                        "-map", "1:a:0",
+                        "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-movflags", "+faststart",
+                        "-t", f"{audio_dur:.3f}",
+                        str(final_path),
                     ]
-                    res_burn = subprocess.run(cmd_burn, capture_output=True, text=True, timeout=600)
-                    if res_burn.returncode == 0 and burned_video.exists():
-                        video_input_for_mux = burned_video
-                        subtitles_actually_burned = True
-
-                # Final mux: script-timed video stream + standardized EN audio
-                cmd_mux = [
-                    "ffmpeg", "-y", "-v", "error",
-                    "-i", str(video_input_for_mux),
-                    "-i", str(audio_path),
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
-                    "-c:v", "copy",
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-movflags", "+faststart",
-                    "-t", f"{audio_dur:.3f}",
-                    str(final_path),
-                ]
-                subprocess.run(cmd_mux, check=True, timeout=mux_timeout)
+                    subprocess.run(cmd_mux, check=True, timeout=mux_timeout)
                 final_dur = probe_media_duration(final_path)
             else:
                 # Deterministic container output when running unit tests with synthetic byte fixtures
                 final_dur = round(plan["total_planned_ms"] / 1000.0, 3) if allow_shortfall else min(audio_dur, round(plan["covered_planned_ms"] / 1000.0, 3))
+                wm_tag = wm_text if watermark_actually_burned else "off"
                 header = (
                     f"FINAL_MP4_CONTAINER|item={item_id}|clips={len(plan_layers)}|"
                     f"dur={final_dur:.3f}|planned_ms={plan['total_planned_ms']}|"
-                    f"trimmed_ms={plan['total_trimmed_ms']}|burn_subs={burn_subtitles}\n"
+                    f"trimmed_ms={plan['total_trimmed_ms']}|burn_subs={burn_subtitles}|"
+                    f"watermark={wm_tag}\n"
                 ).encode("utf-8")
                 final_path.write_bytes(header + b"MP4_STREAM_DATA" * 200)
 
@@ -491,6 +609,8 @@ class AssemblerService:
                     "shortfall_sec": shortfall_sec,
                     "allow_shortfall": allow_shortfall,
                     "burn_subtitles": burn_subtitles,
+                    "watermark_enabled": watermark_actually_burned,
+                    "watermark_text": wm_text if watermark_actually_burned else "",
                     "final_sha256": final_sha,
                 },
             )
@@ -527,6 +647,8 @@ class AssemblerService:
                 "videos_concatenated": len(plan_layers),
                 "videos_assembled": [int(lyr["seq_num"]) for lyr in plan_layers],
                 "shortfall_warning": progress["shortfall_warning"],
+                "watermark_enabled": watermark_actually_burned,
+                "watermark_text": wm_text if watermark_actually_burned else "",
                 "storage_sync": sync_result,
             }
 

@@ -76,33 +76,63 @@ def _kenburns_filter(seed_key: str, duration_sec: float, fps: int) -> str:
     )
 
 
-def _mix_bgm_bed(voice_wav: Path, out_wav: Path, duration: float, seed: str) -> bool:
-    """Trộn 1 track BGM loop dưới giọng đọc (duck đơn giản). Trả False nếu thiếu BGM."""
-    repo_root = Path(__file__).resolve().parents[3]
+def _pick_bgm_track(bgm_dir: Path, seed: str, mood: str = "ominous") -> Path | None:
+    if not bgm_dir.exists():
+        return None
+    all_tracks = sorted(bgm_dir.glob("*.mp3"))
+    if not all_tracks:
+        return None
+    prefixes = ("energetic__", "ominous__") if mood == "energetic" else ("ominous__", "mysterious__", "tense__")
+    mood_tracks = [t for t in all_tracks if t.name.startswith(prefixes)]
+    pool = mood_tracks or all_tracks
+    return pool[zlib.crc32(seed.encode("utf-8")) % len(pool)]
+
+
+def _mix_bgm_bed(voice_wav: Path, out_wav: Path, duration: float, seed: str,
+                 mood: str = "ominous", whoosh_times: list[float] | None = None) -> bool:
+    """Trộn BGM theo mood + Impact/Whoosh SFX dưới giọng đọc. Trả False nếu thiếu BGM."""
+    repo_root = Path(__file__).resolve().parents[4]
     bgm_dir = repo_root / "assets" / "music" / "bgm"
-    tracks = sorted(bgm_dir.glob("*.mp3")) if bgm_dir.exists() else []
-    if not tracks:
+    track = _pick_bgm_track(bgm_dir, seed, mood=mood)
+    if not track:
         shutil.copy2(voice_wav, out_wav)
         return False
-    track = tracks[zlib.crc32(seed.encode("utf-8")) % len(tracks)]
     duck_db = -20.0
-    cmd = [
-        "ffmpeg", "-y", "-v", "error",
-        "-i", str(voice_wav),
-        "-stream_loop", "-1", "-i", str(track),
-        "-filter_complex",
-        f"[1:a]volume={duck_db}dB[bgm];[0:a][bgm]amix=inputs=2:duration=first:"
-        "dropout_transition=2:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11[aout]",
-        "-map", "[aout]", "-ar", "48000", "-ac", "2",
-        "-t", f"{duration:.3f}",
-        str(out_wav),
+    from . import overlay_renderer
+    tmp_sfx = out_wav.parent / "_sfx"
+    tmp_sfx.mkdir(parents=True, exist_ok=True)
+    impact_wav, whoosh_wav = overlay_renderer.synth_sfx_pair(tmp_sfx)
+
+    inputs = ["-i", str(voice_wav), "-stream_loop", "-1", "-i", str(track), "-i", str(impact_wav)]
+    fc = [
+        "[0:a]aresample=48000,volume=1.0[v]",
+        f"[1:a]aresample=48000,volume={duck_db}dB,afade=t=in:st=0:d=0.4,"
+        f"afade=t=out:st={max(0.1, duration - 0.6):.2f}:d=0.6[bgm]",
+        "[2:a]aresample=48000,volume=-11dB[imp]",
     ]
+    mix_labels = ["[v]", "[bgm]", "[imp]"]
+    idx = 3
+    for wt in (whoosh_times or [])[:3]:
+        if 0.4 < wt < duration - 0.4:
+            ms = int(round(wt * 1000))
+            inputs += ["-i", str(whoosh_wav)]
+            fc.append(f"[{idx}:a]aresample=48000,adelay={ms}|{ms},volume=-13dB[w{idx}]")
+            mix_labels.append(f"[w{idx}]")
+            idx += 1
+    fc.append(
+        f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=first:"
+        "dropout_transition=2:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+    )
+    cmd = ["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(fc),
+           "-map", "[aout]", "-ar", "48000", "-ac", "2", "-t", f"{duration:.3f}", str(out_wav)]
     subprocess.run(cmd, check=True, timeout=180)
+    shutil.rmtree(tmp_sfx, ignore_errors=True)
     return True
 
 
 def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
-                   words: list[dict], ass_path: str, out_dir: Path) -> dict:
+                   words: list[dict], ass_path: str, out_dir: Path,
+                   overlay_spec: dict | None = None) -> dict:
     """Ghép video dọc từ ảnh scene + voice + karaoke. QC fail-closed.
 
     scenes: [{seq, text, start_sec, end_sec, image_path, clip_path?}]
@@ -185,25 +215,48 @@ def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
                     "-i", str(concat_list), "-c", "copy", str(joined)],
                    check=True, timeout=300)
 
-    # 3) Mix voice + BGM (nếu có asset)
+    # 3) Mix voice + BGM theo mood + Impact/Whoosh SFX
     mixed = tmp / "mixed.wav"
-    bgm_used = _mix_bgm_bed(voice_wav, mixed, audio_dur, short_id)
+    spec_ov = overlay_spec or {}
+    mood = str(spec_ov.get("mood") or ("energetic" if spec_ov.get("preset") == "split_news_60" else "ominous"))
+    whoosh_times = list(spec_ov.get("whoosh_times") or [])
+    if not whoosh_times and len(scenes) >= 2:
+        whoosh_times = [float(scenes[0]["end_sec"]), max(0.4, float(scenes[-1]["start_sec"]) - 0.1)]
+    bgm_used = _mix_bgm_bed(voice_wav, mixed, audio_dur, short_id, mood=mood, whoosh_times=whoosh_times)
 
-    # 4) Burn karaoke ASS + mux audio
-    ass_escaped = Path(ass_path).resolve().as_posix().replace(":", r"\:")
-    cmd_final = [
-        "ffmpeg", "-y", "-v", "error",
-        "-i", str(joined), "-i", str(mixed),
-        "-vf", f"ass='{ass_escaped}'",
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-ar", str(RENDER_SPEC_SHORT["audio"]["rate"]),
-        "-movflags", "+faststart",
-        "-t", f"{audio_dur:.3f}",
-        str(final_path),
-    ]
-    subprocess.run(cmd_final, check=True, timeout=600)
+    # 4) Burn TikTok Overlay (Pillow RGBA safe-zone) hoặc fallback ASS + mux audio
+    used_overlay = False
+    if spec_ov:
+        from . import overlay_renderer
+        try:
+            used_overlay = overlay_renderer.render_overlay_and_mux(
+                joined, mixed, audio_dur, words, final_path, tmp,
+                preset=str(spec_ov.get("preset") or "viral_redpill"),
+                hook_headline=str(spec_ov.get("hook_headline") or ""),
+                source_note=str(spec_ov.get("source_note") or ""),
+                hook_end_sec=float(spec_ov.get("hook_end_sec") or 2.6),
+                crf=crf,
+                audio_rate=int(RENDER_SPEC_SHORT["audio"]["rate"]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("overlay_renderer fallback sang ASS (%s): %s", short_id, exc)
+            used_overlay = False
+
+    if not used_overlay:
+        ass_escaped = Path(ass_path).resolve().as_posix().replace(":", r"\:")
+        cmd_final = [
+            "ffmpeg", "-y", "-v", "error",
+            "-i", str(joined), "-i", str(mixed),
+            "-vf", f"ass='{ass_escaped}'",
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", str(RENDER_SPEC_SHORT["audio"]["rate"]),
+            "-movflags", "+faststart",
+            "-t", f"{audio_dur:.3f}",
+            str(final_path),
+        ]
+        subprocess.run(cmd_final, check=True, timeout=600)
 
     # 5) QC fail-closed
     probe = _probe_video(final_path)

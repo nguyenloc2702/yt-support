@@ -291,3 +291,13 @@ Guide: `AGENT_SHORT_GUIDE.md`.
 ### Store
 `short_clips` (UNIQUE short_id+seq_num, sha256, duration, covered_scene_indexes
 JSON) + `short_scenes.agent_checked/generated_duration_sec`.
+
+## G.14 Nâng cấp Global Explainer Hybrid & Song song VI/EN (2026-11-14)
+
+- **Nguồn tin 100% quốc tế (`config/news_config.yaml`)**: gỡ bỏ hoàn toàn RSS và query tin nội địa Việt Nam (`VnExpress`, `Tuổi Trẻ`, `Dân Trí`); chỉ giữ `feeds_en` & `queries_en` quốc tế (`BBC Business`, `CNBC`, `Al Jazeera`, `The Guardian Business`, Google News Global). Từ 1 tin quốc tế cho phép tạo song song cả Short `lang='vi'` và `lang='en'`.
+- **Mở khóa Job Mode (`G.13`) cho cả VI và EN**: `publish_job()` hỗ trợ cả `lang='vi'` và `lang='en'`. `skill_bundle_short.py` bổ sung khối `STYLE_GLOBAL_HYBRID_916` và hàm `build_detailed_shot_prompt()` sinh prompt dài chi tiết theo từng shot (3D Tactical Map / Cinematic Dark News, bố cục 3 lớp, chuyển động 30-40-30, safe-zone 25% đáy & 130px lề phải) kèm danh sách `sub_shots` 2.5–3.5s/shot.
+- **Audio-First & Overlay Engine (`pipeline_short/`)**:
+  - `tts_vi.py`: truyền tường minh `boundary="WordBoundary"` cho `edge-tts >= 7.3`, ưu tiên 1-call synthesis + cắt khoảng lặng thừa để tránh rate-limit; `short_config.yaml` dùng voice ổn định (`vi-VN-HoaiMyNeural` `+10%`, `en-US-GuyNeural` `+6%` / `en-US-ChristopherNeural`).
+  - `assembler.py`: sửa `parents[4]` trỏ đúng `assets/music/bgm/` ở root repo, lọc BGM theo mood kịch bản + trộn Impact/Whoosh SFX.
+  - `overlay_renderer.py`: render Pillow RGBA overlay chuẩn TikTok (`viral_redpill` cho VI, `split_news_60` cho EN) với Hook Card 0–2.6s / Split-Screen 50/50, Red/Gold Pill karaoke trong safe-zone, `source_note` góc trên trái, và DataCard động cho beat số liệu.
+  - `service_shorts.py`: `update_script()` truyền đủ `lang=lang`; stock ưu tiên **Video b-roll trước → Ảnh** và khử trùng URL giữa các scene bằng `search_keywords_en`.

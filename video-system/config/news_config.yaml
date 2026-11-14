@@ -4,23 +4,9 @@ version: 1
 interval_min: 60            # chu kỳ sync (yêu cầu user: 1 tiếng/lần)
 auto_push: false            # G.11: KHÔNG tự đẩy Telegram hàng loạt — user chọn tin rồi push từng tin
 max_items_per_push: 10      # tối đa tin bắn 1 kỳ Telegram (khi auto_push bật)
-queries:                    # truy vấn Google News RSS — đúng mảng tiền bạc/kinh doanh
-  - "kinh doanh doanh nghiệp"
-  - "ngân hàng lãi suất"
-  - "lừa đảo chuyển tiền"
-  - "bất động sản thị trường"
-  - "thương mại điện tử shopee OR \"tiktok shop\""
-  - "tiêu dùng bẫy giá"
-# G.11: RSS trực tiếp của báo — link bài là LINK THẬT (không qua redirect Google),
-# nên Short lấy được ảnh gốc bài báo không cần decode. Kèm tên nguồn làm fallback.
-feeds:
-  - name: "VnExpress"
-    url: "https://vnexpress.net/rss/tin-moi-nhat.rss"
-  - name: "Tuổi Trẻ"
-    url: "https://tuoitre.vn/rss/tin-moi-nhat.rss"
-  - name: "Dân Trí"
-    url: "https://dantri.com.vn/rss/home.rss"
-# Mảng quốc tế (lang=en) — nguồn RSS chính thống miễn phí, link bài là link thật.
+queries: []                 # Đã tắt nguồn tin nội địa VN (2026-11-14) — dùng 100% tin quốc tế
+feeds: []                   # Mọi short VI & EN đều lấy từ feeds_en + queries_en bên dưới
+# Mảng quốc tế (100% nguồn RSS chính thống nước ngoài, link bài là link thật).
 feeds_en:
   - name: "BBC Business"
     url: "https://feeds.bbci.co.uk/news/business/rss.xml"
@@ -30,11 +16,14 @@ feeds_en:
     url: "https://www.aljazeera.com/xml/rss/all.xml"
   - name: "The Guardian Business"
     url: "https://www.theguardian.com/uk/business/rss"
+  - name: "NPR Business"
+    url: "https://feeds.npr.org/1006/rss.xml"
 queries_en:                 # Google News RSS bản EN (hl=en, gl=US)
   - "global economy news"
   - "stock market today"
   - "business finance news"
-  - "consumer spending trends"
+  - "global shipping trade news"
+  - "tech company business news"
 exclude_keywords:           # tiêu đề chứa từ nào dưới đây → bỏ (an toàn nền tảng, G.1)
   - "tử vong"
   - "máu me"

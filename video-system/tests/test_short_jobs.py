@@ -73,16 +73,23 @@ def test_publish_job_en_and_package(client, ingest, short_adapters, job_env):
     assert any(j["id"] == sid for j in r2.json()["jobs"])
 
 
-def test_publish_job_rejects_vi(client, ingest, short_adapters, job_env):
-    # short_adapters mặc định trả script VI (conftest.default_short_script)
+def test_publish_job_vi_and_detailed_prompts(client, ingest, short_adapters, job_env):
+    # G.14: publish-job mở khóa cho cả VI và EN, sinh prompt dài chi tiết + sub_shots
     r = client.post("/api/v1/shorts", headers=ingest, json={
         "mode": "news", "lang": "vi",
-        "source_text": "Tin vắn thử nghiệm cho mảng VI.",
+        "source_text": "Tin quốc tế thử nghiệm cho mảng VI.",
     })
     assert r.status_code == 201
     r2 = client.post(f"/api/v1/shorts/{r.json()['id']}/publish-job", headers=ingest)
-    assert r2.status_code == 422
-    assert "EN" in r2.json()["detail"]
+    assert r2.status_code == 200, r2.text
+    job = r2.json()
+    assert job["status"] == "queued"
+    assert job["lang"] == "vi"
+    assert "GLOBAL EXPLAINER HYBRID 9:16" in job["template"]["style_lock"]
+    s0 = job["scenes"][0]
+    assert "SAFE-ZONE:" in s0["visual_prompt"]
+    assert "3-LAYER COMPOSITION" in s0["visual_prompt"]
+    assert isinstance(s0.get("sub_shots"), list) and len(s0["sub_shots"]) >= 1
 
 
 def test_submit_clip_marks_scenes_and_progress(client, ingest, short_adapters, job_env,

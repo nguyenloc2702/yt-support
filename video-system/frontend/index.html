@@ -5351,6 +5351,10 @@ function renderTodoCard(summaryItem) {
         </div>
       </div>
       <div class="todo-actions">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none" title="Gắn chữ ký mờ @StickSto chuyển động chống re-up vào video thành phẩm">
+          <input type="checkbox" id="wmToggle-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
+          <span>🛡️ Chữ ký mờ @StickSto</span>
+        </label>
         <button type="button" class="btn-sm" onclick="refreshSingleItem('${esc(itemId)}', true, this)">🔄 Đồng bộ Shot</button>
         <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', false, this)" ${!vp.is_duration_sufficient ? 'disabled title="Cần đủ thời lượng video trước khi ráp"' : ''}>
           🎬 Ráp Thành Phẩm
@@ -5413,7 +5417,11 @@ function renderFinalVideoTabSection(item, cl, vp) {
           <h3 style="margin:6px 0 2px;font-size:15px">Xem Trực Tiếp Video Thành Phẩm Trên Màn Hình (final_en.mp4)</h3>
           <div style="font-size:12px;color:var(--fg-muted)">Tải theo yêu cầu (preload="none") — bấm Play hoặc mở chế độ Cinema toàn màn hình.</div>
         </div>
-        <div class="final-video-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+        <div class="final-video-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none">
+            <input type="checkbox" id="wmToggleTab-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
+            <span>🛡️ Chữ ký mờ @StickSto</span>
+          </label>
           <button type="button" class="btn-primary btn-sm" onclick="openCinemaFinalVideo('${esc(itemId)}')">
             ⛶ Xem Phóng To Toàn Màn Hình
           </button>
@@ -5442,7 +5450,11 @@ function renderFinalVideoTabSection(item, cl, vp) {
           Đối chiếu độ phủ thời lượng các Shot video hiện có với Audio EN chuẩn trước khi xuất bản Video Thành Phẩm.
         </div>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none">
+          <input type="checkbox" id="wmToggleTab-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
+          <span>🛡️ Chữ ký mờ @StickSto</span>
+        </label>
         <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', false, this)" ${!isReady ? 'disabled title="Cần đủ thời lượng video trước khi ráp chuẩn"' : ''}>
           🎬 Ráp Thành Phẩm Ngay
         </button>
@@ -6177,8 +6189,17 @@ async function deleteImage(itemId, seqNum, kind = 'keyframe') {
   }
 }
 
+function syncWatermarkToggle(itemId, checked) {
+  const topEl = document.getElementById(`wmToggle-${itemId}`);
+  const tabEl = document.getElementById(`wmToggleTab-${itemId}`);
+  if (topEl) topEl.checked = !!checked;
+  if (tabEl) tabEl.checked = !!checked;
+}
+
 async function confirmAssemble(itemId, allowShortfall, btnEl = null) {
   const prevText = btnEl ? btnEl.textContent : '';
+  const wmEl = document.getElementById(`wmToggle-${itemId}`) || document.getElementById(`wmToggleTab-${itemId}`);
+  const watermarkEnabled = wmEl ? !!wmEl.checked : true;
   if (btnEl) {
     btnEl.disabled = true;
     btnEl.textContent = '⏳ Đang ghép video...';
@@ -6188,7 +6209,12 @@ async function confirmAssemble(itemId, allowShortfall, btnEl = null) {
     const r = await apiFetch(`/api/v1/todos/${itemId}/confirm-assemble`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ burn_subtitles: false, allow_shortfall: !!allowShortfall }),
+      body: JSON.stringify({
+        burn_subtitles: false,
+        allow_shortfall: !!allowShortfall,
+        watermark_enabled: watermarkEnabled,
+        watermark_text: '@StickSto'
+      }),
       timeoutMs: 300000
     });
     if (!r.ok) {

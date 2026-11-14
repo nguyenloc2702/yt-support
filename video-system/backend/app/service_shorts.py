@@ -202,7 +202,7 @@ class ShortService:
              (patch.get("title") or validated["title"]).strip()[:200],
              int(validated.get("word_count") or 0), now(), short_id),
         )
-        self._sync_scenes(short_id, validated)
+        self._sync_scenes(short_id, validated, lang=lang)
         if row["status"] == domain.ShortStatus.FAILED.value:
             self._transition(short_id, domain.ShortStatus.SCRIPTED.value)  # failed → scripted
         self._event(short_id, "short.script_updated", actor,
@@ -351,20 +351,31 @@ class ShortService:
         if stock_media.is_configured():
             stock_dir = objects / "stock_media"
             stock_dir.mkdir(parents=True, exist_ok=True)
+            kw_en_list = list(script.get("search_keywords_en") or [])
+            used_stock_paths: set[str] = set()
             for sc in scenes:
                 seq = int(sc["seq_num"])
                 if seq <= len(article_paths):
                     continue  # scene này đã có ảnh gốc bài báo
-                q = stock_media.keywords_for_query(sc["text"])
+                q_en = kw_en_list[seq - 1].strip() if seq - 1 < len(kw_en_list) else ""
+                q = q_en or stock_media.keywords_for_query(sc["text"])
                 if not q:
                     continue
                 got = None
                 try:
-                    got = stock_media.fetch_photo(q) or stock_media.fetch_video(q)
+                    # Ưu tiên video b-roll động trước, sau đó mới fallback ảnh tĩnh
+                    got = stock_media.fetch_video(q) or stock_media.fetch_photo(q)
+                    if got and str(got["path"]) in used_stock_paths:
+                        alt_q = stock_media.keywords_for_query(sc["text"], max_words=3)
+                        if alt_q and alt_q != q:
+                            got_alt = stock_media.fetch_video(alt_q) or stock_media.fetch_photo(alt_q)
+                            if got_alt:
+                                got = got_alt
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("pexels scene %d failed: %s", seq, exc)
+                    logger.warning("stock scene %d failed: %s", seq, exc)
                 if not got:
                     continue
+                used_stock_paths.add(str(got["path"]))
                 local = stock_dir / f"scene_{seq:03d}{got['path'].suffix.lower()}"
                 if not local.exists():
                     local.write_bytes(got["path"].read_bytes())
@@ -452,8 +463,17 @@ class ShortService:
             for sc in scenes
         ]
         out_dir = objects / "exports"
+        presets = SHORT_CONFIG.get("render_presets") or {}
+        preset = presets.get("en_default", "split_news_60") if lang == "en" else presets.get("vi_default", "viral_redpill")
+        overlay_spec = {
+            "preset": preset,
+            "hook_headline": str(script.get("title") or row.get("title") or "").strip(),
+            "source_note": str(script.get("source_note") or row.get("source_note") or "").strip(),
+            "mood": "energetic" if (lang == "en" or mode == "decode") else "ominous",
+        }
         result = assembler.assemble_short(short_id, scene_render, voice["audio_path"],
-                                          voice["words"], str(ass_path), out_dir)
+                                          voice["words"], str(ass_path), out_dir,
+                                          overlay_spec=overlay_spec)
         video_path = Path(result["video_path"])
         video_ast = self._put_asset(short_id, "final",
                                     f"shorts/{short_id}/exports/short_{short_id}.mp4",
@@ -479,15 +499,13 @@ class ShortService:
         return {"duration": result["duration"], "scenes_count": len(scenes),
                 "video_path": str(video_path)}
 
-    # ------------------------------------------------------------------ job (G.13)
+    # ------------------------------------------------------------------ job (G.13/G.14)
     def publish_job(self, short_id: str, actor: str = "api") -> dict:
-        """Phát hành job cho agent video ngoài (CHỈ short EN): TTS + timeline
-        + karaoke subs → status queued. Agent poll GET /api/v1/short-jobs."""
+        """Phát hành job cho agent video ngoài (cả VI & EN): TTS + timeline
+        + karaoke subs + prompt chi tiết từng shot → status queued."""
         row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
         if not row:
             raise KeyError(short_id)
-        if (row.get("lang") or "vi") != "en":
-            raise ValueError("Job mode chỉ dành cho short EN (lang='en').")
         if row["status"] != domain.ShortStatus.SCRIPTED.value:
             raise ValueError(
                 f"Chỉ phát hành job từ trạng thái 'scripted' (hiện: {row['status']}).")
@@ -540,16 +558,31 @@ class ShortService:
             "SELECT * FROM short_scenes WHERE short_id=? ORDER BY seq_num", (short_id,))
         clips = self.store.query(
             "SELECT * FROM short_clips WHERE short_id=? ORDER BY seq_num", (short_id,))
+        lang = row.get("lang") or "vi"
+        kw_en_list = list(script.get("search_keywords_en") or [])
+        headline_hint = str(script.get("title") or row.get("title") or "").strip()
         scene_rows = []
         for sc in scenes:
+            seq = int(sc["seq_num"])
+            dur_s = round(float(sc["end_sec"]) - float(sc["start_sec"]), 3)
+            kw = (kw_en_list[seq - 1].strip() if seq - 1 < len(kw_en_list) else "") or stock_media.keywords_for_query(sc["text"])
+            shot_type = "hook" if seq == 1 else ("closing" if seq == len(scenes) else "beat")
+            detailed_prompt = skill_bundle_short.build_detailed_shot_prompt(
+                shot_type, seq, sc["text"], dur_s,
+                lang=lang, headline_hint=headline_hint, stock_keywords=kw,
+            )
             scene_rows.append({
-                "seq": int(sc["seq_num"]),
+                "seq": seq,
                 "narration": sc["text"],
                 "audio_start_sec": float(sc["start_sec"]),
                 "audio_end_sec": float(sc["end_sec"]),
-                "duration_sec": round(float(sc["end_sec"]) - float(sc["start_sec"]), 3),
-                "visual_prompt": sc["image_prompt"],
-                "stock_search_keywords": stock_media.keywords_for_query(sc["text"]),
+                "duration_sec": dur_s,
+                "visual_prompt": detailed_prompt,
+                "stock_search_keywords": kw,
+                "sub_shots": skill_bundle_short.slice_sub_shots(
+                    seq, sc["text"], float(sc["start_sec"]), float(sc["end_sec"]),
+                    lang=lang, headline_hint=headline_hint, stock_keywords=kw,
+                ),
                 "agent_checked": bool(sc["agent_checked"]),
                 "generated_duration_sec": float(sc["generated_duration_sec"] or 0.0),
             })
@@ -847,25 +880,52 @@ class ShortService:
             subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
                             "-i", str(concat_list), "-c", "copy", str(joined)],
                            check=True, timeout=300)
-            # 3) Mix voice + BGM (reuse assembler)
+            # 3) Mix voice + BGM theo mood + Impact/Whoosh SFX
             mixed = tmp / "mixed.wav"
-            bgm_used = assembler._mix_bgm_bed(Path(audio_path), mixed, audio_dur, short_id)
-            # 4) Burn karaoke + mux
-            ass_escaped = Path(ass_path).resolve().as_posix().replace(":", r"\:")
-            cmd_final = [
-                "ffmpeg", "-y", "-v", "error",
-                "-i", str(joined), "-i", str(mixed),
-                "-vf", f"ass='{ass_escaped}'",
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                "-ar", str(RENDER_SPEC_SHORT["audio"]["rate"]),
-                "-movflags", "+faststart",
-                "-t", f"{audio_dur:.3f}",
-                str(final_path),
-            ]
-            subprocess.run(cmd_final, check=True, timeout=600)
+            presets = SHORT_CONFIG.get("render_presets") or {}
+            preset = presets.get("en_default", "split_news_60") if lang == "en" else presets.get("vi_default", "viral_redpill")
+            mood = "energetic" if (lang == "en" or row["mode"] == "decode") else "ominous"
+            whoosh_times = ([float(scenes[0]["end_sec"]), max(0.4, float(scenes[-1]["start_sec"]) - 0.1)]
+                            if len(scenes) >= 2 else [])
+            bgm_used = assembler._mix_bgm_bed(Path(audio_path), mixed, audio_dur, short_id,
+                                              mood=mood, whoosh_times=whoosh_times)
+            # 4) Burn TikTok Overlay (Pillow RGBA safe-zone) hoặc fallback ASS + mux
+            words_ast_row = self.store.query_one("SELECT storage_key FROM assets WHERE id=?", (row["words_asset_id"],)) if row.get("words_asset_id") else None
+            words_list = []
+            if words_ast_row:
+                wp = data_dir() / "objects" / words_ast_row["storage_key"]
+                if wp.exists():
+                    words_list = json.loads(wp.read_text(encoding="utf-8"))
+            from .pipeline_short import overlay_renderer
+            used_overlay = False
+            try:
+                used_overlay = overlay_renderer.render_overlay_and_mux(
+                    joined, mixed, audio_dur, words_list, final_path, tmp,
+                    preset=preset,
+                    hook_headline=str(script.get("title") or row.get("title") or "").strip(),
+                    source_note=str(script.get("source_note") or row.get("source_note") or "").strip(),
+                    crf=crf,
+                    audio_rate=int(RENDER_SPEC_SHORT["audio"]["rate"]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("job overlay_renderer fallback ASS (%s): %s", short_id, exc)
+                used_overlay = False
+            if not used_overlay:
+                ass_escaped = Path(ass_path).resolve().as_posix().replace(":", r"\:")
+                cmd_final = [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-i", str(joined), "-i", str(mixed),
+                    "-vf", f"ass='{ass_escaped}'",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-ar", str(RENDER_SPEC_SHORT["audio"]["rate"]),
+                    "-movflags", "+faststart",
+                    "-t", f"{audio_dur:.3f}",
+                    str(final_path),
+                ]
+                subprocess.run(cmd_final, check=True, timeout=600)
             probe = assembler._probe_video(final_path)
             problems = []
             if int(probe["width"]) != width or int(probe["height"]) != height:

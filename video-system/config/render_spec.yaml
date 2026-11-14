@@ -34,4 +34,9 @@ storage:
   gdrive_remote: "gdrive:video_system_assets"
   auto_sync_on_assemble: true
   purge_intermediates_on_assemble: true
+watermark:
+  default_enabled: true
+  text: "@StickSto"
+  opacity: 0.22
+  font_size: 36
 

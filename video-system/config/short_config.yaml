@@ -21,17 +21,19 @@ modes:
     hero_images: 0
 tts_vi:
   default_voice: "vi-VN-HoaiMyNeural"
-  fallback_voice: "vi-VN-HoaiThyNeural"
-  rate: "+0%"
+  fallback_voice: "vi-VN-HoaiMyNeural"
+  rate: "+10%"
   words_per_sec_estimate: 2.6   # tiếng Việt ~2.4–3.0 từ/s
-  inter_scene_pause_sec: 0.24
+  inter_scene_pause_sec: 0.14
 tts_en:
-  default_voice: "en-US-AndrewMultilingualNeural"
+  default_voice: "en-US-GuyNeural"
   fallback_voice: "en-US-ChristopherNeural"
-  rate: "+0%"                   # Andrew + rate âm bị edge-tts từ chối (test 2026-11-12);
-                                # Christopher vẫn chạy -6% nhưng giữ đồng bộ 1 rate cho mảng EN
+  rate: "+6%"
   words_per_sec_estimate: 2.45  # đồng bộ audio_config.yaml tts_en
-  inter_scene_pause_sec: 0.24
+  inter_scene_pause_sec: 0.14
+render_presets:
+  vi_default: "viral_redpill"
+  en_default: "split_news_60"
 master:
   loudness_lufs: -16
   true_peak_dbtp: -1.5

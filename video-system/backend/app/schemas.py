@@ -151,6 +151,15 @@ class ConfirmAssembleRequest(BaseModel):
         default=False,
         description="Set to true to confirm assembly even when total video duration is shorter than EN audio",
     )
+    watermark_enabled: bool = Field(
+        default=True,
+        description="Whether to burn a moving translucent anti-theft watermark into the final assembled MP4",
+    )
+    watermark_text: str | None = Field(
+        default=None,
+        max_length=40,
+        description="Optional custom watermark text (defaults to render_spec.yaml watermark.text, e.g. @StickSto)",
+    )
 
 
 class SyncGdriveRequest(BaseModel):
