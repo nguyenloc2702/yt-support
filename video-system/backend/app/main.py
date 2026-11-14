@@ -23,7 +23,8 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
                       CharacterSheetCreate,
                       ConfirmAssembleRequest, FeedbackBatchCreate, FeedbackItemCreate,
                       FeedbackResolveRequest, GateDecision, GenerateRequest,
-                      HoldRequest, ItemCreate, ShortCreate, ShortScriptUpdate,
+                      HoldRequest, ItemCreate, ReadMeCreateRequest, ReadMePatchRequest,
+                      ReadMePutRequest, ShortCreate, ShortScriptUpdate,
                       ShotChecklistBatchUpdate,
                       ShotCheckUpdate, ShotImport, SyncGdriveRequest,
                       TodoCollectReferencesRequest, TodoFromScriptCreate,
@@ -40,6 +41,7 @@ from .service_batches import BatchService
 from .service_bgm import BgmService
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
+from .service_readme import ReadMeService
 from .service_shots import ShotService
 from .service_shorts import ShortService, ShortfallError
 from .service_todos import TodoService
@@ -77,6 +79,7 @@ else:
 shorts = ShortService(store, webhooks)
 youtube = YouTubeService(store, webhooks)
 bgm_service = BgmService(store)
+readme_service = ReadMeService()
 
 
 @app.on_event("startup")
@@ -1825,6 +1828,75 @@ def delete_bgm_track(track_id: str, request: Request = None):
         return bgm_service.delete_track(track_id)
     except KeyError:
         raise HTTPException(404, "bgm track not found")
+
+
+# -- read_me Knowledge Base & Logs CRUD ----------------------------------------
+
+@app.get("/api/v1/read-me")
+def list_read_me_docs(prefix: str | None = None, q: str | None = None, request: Request = None):
+    auth.require(request, "read")
+    return readme_service.list_docs(prefix=prefix, q=q)
+
+
+@app.get("/api/v1/read-me/{doc_path:path}")
+def get_read_me_doc(doc_path: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return readme_service.get_doc(doc_path)
+    except FileNotFoundError:
+        raise HTTPException(404, "read_me doc not found")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.post("/api/v1/read-me")
+def create_read_me_doc(body: ReadMeCreateRequest, request: Request = None):
+    auth.require(request, "ingest")
+    try:
+        res = readme_service.create_doc(body.path, body.content, overwrite=body.overwrite)
+        return JSONResponse(res, status_code=201)
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.put("/api/v1/read-me/{doc_path:path}")
+def put_read_me_doc(doc_path: str, body: ReadMePutRequest, request: Request = None):
+    auth.require(request, "ingest")
+    try:
+        return readme_service.put_doc(doc_path, body.content)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.patch("/api/v1/read-me/{doc_path:path}")
+def patch_read_me_doc(doc_path: str, body: ReadMePatchRequest, request: Request = None):
+    auth.require(request, "ingest")
+    try:
+        return readme_service.patch_doc(
+            doc_path,
+            mode=body.mode,
+            content=body.content,
+            target_text=body.target_text,
+            replacement=body.replacement,
+        )
+    except FileNotFoundError:
+        raise HTTPException(404, "read_me doc not found")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.delete("/api/v1/read-me/{doc_path:path}")
+def delete_read_me_doc(doc_path: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return readme_service.delete_doc(doc_path)
+    except FileNotFoundError:
+        raise HTTPException(404, "read_me doc not found")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
 
 
 

@@ -216,6 +216,23 @@ class BgmTrackSubmitJson(BaseModel):
     file_path: str | None = None
 
 
+class ReadMeCreateRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=180, description="Relative path inside read_me/, e.g. 'logs/2026-11-14.md'")
+    content: str = Field(..., description="UTF-8 markdown/text/json content")
+    overwrite: bool = Field(default=False)
+
+
+class ReadMePutRequest(BaseModel):
+    content: str = Field(..., description="Full replacement UTF-8 content")
+
+
+class ReadMePatchRequest(BaseModel):
+    mode: str = Field(default="append", pattern="^(append|prepend|replace_text|overwrite)$")
+    content: str = Field(default="")
+    target_text: str | None = Field(default=None)
+    replacement: str | None = Field(default=None)
+
+
 class FeedbackItemCreate(BaseModel):
     category: str = Field(
         default="pronunciation",
