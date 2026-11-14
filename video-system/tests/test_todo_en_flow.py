@@ -170,7 +170,7 @@ def test_sequential_videos_shortfall_warning_and_confirm_assemble(
     r_confirm_blocked = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": False},
+        json={"burn_subtitles": False, "allow_shortfall": False, "allow_missing_thumbnail": True},
     )
     assert r_confirm_blocked.status_code == 409, r_confirm_blocked.text
     err_body = r_confirm_blocked.json()
@@ -200,7 +200,7 @@ def test_sequential_videos_shortfall_warning_and_confirm_assemble(
     r_confirm_ok = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": False},
+        json={"burn_subtitles": False, "allow_shortfall": False, "allow_missing_thumbnail": True},
     )
     assert r_confirm_ok.status_code == 200, r_confirm_ok.text
     assembled = r_confirm_ok.json()
@@ -247,7 +247,7 @@ def test_confirm_assemble_with_explicit_allow_shortfall(
     r_confirm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": True},
+        json={"burn_subtitles": False, "allow_shortfall": True, "allow_missing_thumbnail": True},
     )
     assert r_confirm.status_code == 200, r_confirm.text
     res = r_confirm.json()
@@ -580,7 +580,7 @@ def test_multi_shot_video_override_status_filters_and_ui_contracts(
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": True},
+        json={"burn_subtitles": False, "allow_shortfall": True, "allow_missing_thumbnail": True},
     )
     assert r_asm.status_code == 200, r_asm.text
 
@@ -640,7 +640,7 @@ def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_cl
     r_orph_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": True},
+        json={"burn_subtitles": False, "allow_shortfall": True, "allow_missing_thumbnail": True},
     )
     assert r_orph_asm.status_code == 422, r_orph_asm.text
 
@@ -668,7 +668,7 @@ def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_cl
     r_blocked = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": False},
+        json={"burn_subtitles": False, "allow_shortfall": False, "allow_missing_thumbnail": True},
     )
     assert r_blocked.status_code == 409, r_blocked.text
     assert r_blocked.json()["error"] == "video_duration_shortfall"
@@ -694,7 +694,7 @@ def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_cl
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": False},
+        json={"burn_subtitles": False, "allow_shortfall": False, "allow_missing_thumbnail": True},
     )
     assert r_asm.status_code == 200, r_asm.text
     asm = r_asm.json()
@@ -767,7 +767,7 @@ def test_assemble_non_contiguous_override_short_merged_clip_and_burn_subtitles(
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": True, "allow_shortfall": False},
+        json={"burn_subtitles": True, "allow_shortfall": False, "allow_missing_thumbnail": True},
     )
     assert r_asm.status_code == 200, r_asm.text
     asm = r_asm.json()

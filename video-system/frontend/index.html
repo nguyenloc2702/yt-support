@@ -5351,16 +5351,19 @@ function renderTodoCard(summaryItem) {
         </div>
       </div>
       <div class="todo-actions">
+        ${(vp.has_thumbnail || item.has_thumbnail)
+          ? `<span class="pill pill-ok" title="Đã có ảnh thumbnail cho video">🖼️ Có Thumbnail</span>`
+          : `<span class="pill pill-warn" title="Bắt buộc có 1 ảnh thumbnail trước khi hoàn thành job">⚠️ Thiếu Thumbnail</span>`}
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none" title="Gắn chữ ký mờ @StickSto chuyển động chống re-up vào video thành phẩm">
           <input type="checkbox" id="wmToggle-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
           <span>🛡️ Chữ ký mờ @StickSto</span>
         </label>
         <button type="button" class="btn-sm" onclick="refreshSingleItem('${esc(itemId)}', true, this)">🔄 Đồng bộ Shot</button>
-        <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', false, this)" ${!vp.is_duration_sufficient ? 'disabled title="Cần đủ thời lượng video trước khi ráp"' : ''}>
+        <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', false, this)" ${(!vp.is_duration_sufficient || !(vp.has_thumbnail || item.has_thumbnail)) ? `disabled title="${!(vp.has_thumbnail || item.has_thumbnail) ? 'Bắt buộc có 1 ảnh thumbnail trước khi ráp thành phẩm' : 'Cần đủ thời lượng video trước khi ráp'}"` : ''}>
           🎬 Ráp Thành Phẩm
         </button>
         ${!vp.is_duration_sufficient && (vp.uploaded_videos_count || 0) > 0 ? `
-          <button type="button" class="btn-warn btn-sm" onclick="confirmAssemble('${esc(itemId)}', true, this)">
+          <button type="button" class="btn-warn btn-sm" onclick="confirmAssemble('${esc(itemId)}', true, this)" ${!(vp.has_thumbnail || item.has_thumbnail) ? 'disabled title="Bắt buộc có 1 ảnh thumbnail trước khi ráp thành phẩm"' : ''}>
             ⚡ Ráp Cưỡng Bức (-${fmtSec(vp.shortfall_sec)})
           </button>
         ` : ''}
@@ -5404,6 +5407,9 @@ function renderFinalVideoTabSection(item, cl, vp) {
   const generatedSec = Number(cl.generated_total_duration_sec || vp.uploaded_videos_duration_sec || 0);
   const shortfallSec = Number(vp.shortfall_sec ?? cl.remaining_duration_to_generate_sec ?? Math.max(0, expectedSec - generatedSec));
   const isReady = !!vp.is_duration_sufficient || shortfallSec <= 0.5;
+  const hasThumb = !!(vp.has_thumbnail || item.has_thumbnail);
+  const thumbUrl = vp.thumbnail_url || item.thumbnail_url || '';
+  const canComplete = isReady && hasThumb;
 
   if (item.final_video_url) {
     return `
@@ -5442,9 +5448,11 @@ function renderFinalVideoTabSection(item, cl, vp) {
       <div>
         <h3 class="panel-title">
           <span>🏆 Trạng Thái Ráp Video Thành Phẩm (final_en.mp4)</span>
-          ${isReady
-            ? `<span class="pill pill-ok">⚡ Đủ thời lượng — Sẵn sàng ráp</span>`
-            : `<span class="pill pill-warn">⏳ Chưa đủ thời lượng chuẩn</span>`}
+          ${canComplete
+            ? `<span class="pill pill-ok">⚡ Đủ thời lượng &amp; Thumbnail — Sẵn sàng hoàn thành</span>`
+            : !hasThumb
+              ? `<span class="pill pill-warn">🖼️ Thiếu Thumbnail (bắt buộc 1 ảnh)</span>`
+              : `<span class="pill pill-warn">⏳ Chưa đủ thời lượng chuẩn</span>`}
         </h3>
         <div class="panel-subtitle">
           Đối chiếu độ phủ thời lượng các Shot video hiện có với Audio EN chuẩn trước khi xuất bản Video Thành Phẩm.
@@ -5455,11 +5463,25 @@ function renderFinalVideoTabSection(item, cl, vp) {
           <input type="checkbox" id="wmToggleTab-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
           <span>🛡️ Chữ ký mờ @StickSto</span>
         </label>
-        <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', false, this)" ${!isReady ? 'disabled title="Cần đủ thời lượng video trước khi ráp chuẩn"' : ''}>
+        <div style="margin:10px 0;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.03);display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          ${hasThumb && thumbUrl
+            ? `<img src="${esc(thumbUrl)}" alt="Video Thumbnail" style="width:128px;height:72px;object-fit:cover;border-radius:6px;border:1px solid var(--border)">`
+            : `<div style="width:128px;height:72px;border-radius:6px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted)">Chưa có Thumbnail</div>`}
+          <div style="flex:1;min-width:220px">
+            <div style="font-size:12px;font-weight:600;margin-bottom:4px">
+              🖼️ Ảnh Thumbnail Video ${hasThumb ? '<span class="pill pill-ok">Đã có</span>' : '<span class="pill pill-warn">Bắt buộc</span>'}
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="file" id="thumbFile-${esc(itemId)}" accept="image/*" style="font-size:11px;max-width:220px">
+              <button type="button" class="btn-sm" onclick="uploadTodoThumbnail('${esc(itemId)}', this)">📤 Upload Thumbnail</button>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', false, this)" ${!canComplete ? `disabled title="${!hasThumb ? 'Bắt buộc có 1 ảnh thumbnail trước khi hoàn thành job' : 'Cần đủ thời lượng video trước khi ráp chuẩn'}"` : ''}>
           🎬 Ráp Thành Phẩm Ngay
         </button>
         ${!isReady && withVideoCount > 0 ? `
-          <button type="button" class="btn-warn btn-sm" onclick="confirmAssemble('${esc(itemId)}', true, this)">
+          <button type="button" class="btn-warn btn-sm" onclick="confirmAssemble('${esc(itemId)}', true, this)" ${!hasThumb ? 'disabled title="Bắt buộc có 1 ảnh thumbnail trước khi hoàn thành job"' : ''}>
             ⚡ Ráp Cưỡng Bức (Đang thiếu ${fmtSec(shortfallSec)})
           </button>
         ` : ''}
@@ -6194,6 +6216,42 @@ function syncWatermarkToggle(itemId, checked) {
   const tabEl = document.getElementById(`wmToggleTab-${itemId}`);
   if (topEl) topEl.checked = !!checked;
   if (tabEl) tabEl.checked = !!checked;
+}
+
+async function uploadTodoThumbnail(itemId, btnEl = null) {
+  const input = document.getElementById(`thumbFile-${itemId}`);
+  const file = input && input.files && input.files[0];
+  if (!file) {
+    showToast('⚠️ Vui lòng chọn 1 file ảnh thumbnail trước khi upload.', 'warn', 3500);
+    return;
+  }
+  const prevText = btnEl ? btnEl.textContent : '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = '⏳ Đang tải lên...';
+  }
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('kind', 'thumbnail');
+    fd.append('seq_num', '1');
+    const r = await apiFetch(`/api/v1/todos/${itemId}/images`, {
+      method: 'POST',
+      body: fd,
+      timeoutMs: 60000
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || d.message || `HTTP ${r.status}`);
+    showToast('✅ Đã upload ảnh thumbnail cho job!', 'ok', 3500);
+    await refreshSingleItem(itemId, false);
+  } catch (e) {
+    showToast(`❌ Lỗi upload thumbnail: ${e.message}`, 'err', 5000);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = prevText;
+    }
+  }
 }
 
 async function confirmAssemble(itemId, allowShortfall, btnEl = null) {

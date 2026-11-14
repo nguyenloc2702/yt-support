@@ -160,6 +160,10 @@ class ConfirmAssembleRequest(BaseModel):
         max_length=40,
         description="Optional custom watermark text (defaults to render_spec.yaml watermark.text, e.g. @StickSto)",
     )
+    allow_missing_thumbnail: bool = Field(
+        default=False,
+        description="Set to true to allow assembly even when no thumbnail image (kind=thumbnail) has been uploaded",
+    )
 
 
 class SyncGdriveRequest(BaseModel):

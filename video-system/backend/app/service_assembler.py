@@ -131,6 +131,14 @@ class ShortfallWarningError(Exception):
         super().__init__(progress.get("shortfall_warning") or "Total video duration is shorter than audio duration")
 
 
+class ThumbnailMissingError(Exception):
+    """Raised when no thumbnail image (kind=thumbnail) has been uploaded for the TODO item."""
+
+    def __init__(self, progress: dict[str, Any]) -> None:
+        self.progress = progress
+        super().__init__(progress.get("completion_warning") or "Job chưa có ảnh Thumbnail (kind=thumbnail)")
+
+
 class AssemblerService:
     def __init__(self, store: Store, items: ItemService, todos: TodoService) -> None:
         self.store = store
@@ -295,6 +303,7 @@ class AssemblerService:
         actor: str = "user",
         watermark_enabled: bool = True,
         watermark_text: str | None = None,
+        allow_missing_thumbnail: bool = False,
     ) -> dict[str, Any]:
         """Confirm and assemble planned script video layers with the standardized EN Audio."""
         item = self.items.get(item_id)
@@ -309,6 +318,9 @@ class AssemblerService:
 
         if not progress["is_duration_sufficient"] and not allow_shortfall:
             raise ShortfallWarningError(progress)
+
+        if not progress.get("has_thumbnail") and not allow_missing_thumbnail:
+            raise ThumbnailMissingError(progress)
 
         audio_path = self.todos.resolve_audio_path(item_id)
         audio_dur = progress["audio_duration_sec"]

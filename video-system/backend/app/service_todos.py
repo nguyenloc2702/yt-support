@@ -601,11 +601,18 @@ class TodoService:
         item: dict[str, Any],
         videos: list[dict[str, Any]] | None = None,
         shots_rows: list[dict[str, Any]] | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Calculate total uploaded video duration vs EN audio duration and post-trim planned coverage."""
+        """Calculate total uploaded video duration vs EN audio duration and thumbnail readiness."""
         item_id = item["id"]
         if videos is None:
             videos = self.list_videos(item_id)
+        if images is None:
+            images = self.list_images(item_id)
+
+        thumbs = [i for i in images if i.get("kind") == "thumbnail"]
+        has_thumbnail = len(thumbs) > 0
+        thumbnail_url = thumbs[-1]["file_url"] if thumbs else None
 
         audio_dur = round(float(item.get("audio_duration_sec") or 0.0), 3)
         if audio_dur <= 0:
@@ -690,6 +697,14 @@ class TodoService:
             "is_shortfall": is_shortfall,
             "ready_to_assemble": is_sufficient,
             "is_duration_sufficient": is_sufficient,
+            "has_thumbnail": has_thumbnail,
+            "thumbnail_count": len(thumbs),
+            "thumbnail_url": thumbnail_url,
+            "ready_to_complete": bool(is_sufficient and has_thumbnail),
+            "completion_warning": (
+                None if (not is_sufficient or has_thumbnail)
+                else "Đã đủ thời lượng video nhưng CHƯA CÓ ẢNH THUMBNAIL (kind=thumbnail) để hoàn thành job."
+            ),
             "shortfall_warning": warning,
         }
 
@@ -1064,6 +1079,14 @@ class TodoService:
         keyframes_cnt = sum(1 for i in images if i.get("kind") == "keyframe")
         chars_cnt = sum(1 for i in images if i.get("kind") == "character")
         refs_cnt = sum(1 for i in images if i.get("kind") == "reference")
+        thumbs = [i for i in images if i.get("kind") == "thumbnail"]
+        has_thumbnail = len(thumbs) > 0
+        thumbnail_url = thumbs[-1]["file_url"] if thumbs else None
+        hook_hint = (shots_formatted[0]["narration"] if shots_formatted else "")[:140]
+        thumbnail_prompt_hint = (
+            f"16:9 YouTube Thumbnail (1280x720): high-contrast focal visual for '{item.get('title', '')}', "
+            f"hook concept: '{hook_hint}', bold minimal 2-3 word text overlay, Crayon Capital editorial contrast."
+        )
         reference_images = [i for i in images if i.get("kind") == "reference"]
         uploaded_images = [i for i in images if i.get("kind") != "reference"]
         feedbacks = (
@@ -1096,11 +1119,16 @@ class TodoService:
             "audio_feedbacks": feedbacks,
             "feedback_summary": feedback_summary,
             "open_feedbacks_count": feedback_summary["open"],
+            "has_thumbnail": has_thumbnail,
+            "thumbnail_url": thumbnail_url,
+            "thumbnail_prompt_hint": thumbnail_prompt_hint,
             "image_progress": {
                 "uploaded_images_count": len(uploaded_images),
                 "keyframes_count": keyframes_cnt,
                 "characters_count": chars_cnt,
                 "references_count": refs_cnt,
+                "thumbnail_count": len(thumbs),
+                "has_thumbnail": has_thumbnail,
                 "total_images_count": len(images),
                 "total_shots": len(shots_formatted),
             },
@@ -1203,10 +1231,12 @@ class TodoService:
             "char": "character",
             "style_ref": "reference",
             "ref": "reference",
+            "thumb": "thumbnail",
+            "cover": "thumbnail",
         }
         kind = kind_aliases.get(kind, kind)
-        if kind not in {"keyframe", "character", "scene", "reference"}:
-            raise ValueError("kind must be 'keyframe', 'character', 'scene', or 'reference'")
+        if kind not in {"keyframe", "character", "scene", "reference", "thumbnail"}:
+            raise ValueError("kind must be 'keyframe', 'character', 'scene', 'reference', or 'thumbnail'")
 
         if raw_bytes is None and file_bytes is not None:
             raw_bytes = file_bytes
@@ -1217,7 +1247,9 @@ class TodoService:
             src_path = file_path
 
         if seq_num is None:
-            if shot_index is not None and shot_index >= 1:
+            if kind == "thumbnail":
+                seq_num = 1
+            elif shot_index is not None and shot_index >= 1:
                 seq_num = int(shot_index)
             else:
                 row = self.store.query_one(
@@ -1344,6 +1376,8 @@ class TodoService:
                 "uploaded_images_count": len(images),
             },
         )
+        thumb_cnt = sum(1 for i in images if i.get("kind") == "thumbnail")
+        vp = self.compute_video_progress(item, images=images)
         return {
             "item_id": item_id,
             "kind": kind,
@@ -1354,7 +1388,10 @@ class TodoService:
                 "keyframes_count": sum(1 for i in images if i.get("kind") == "keyframe"),
                 "characters_count": sum(1 for i in images if i.get("kind") == "character"),
                 "references_count": sum(1 for i in images if i.get("kind") == "reference"),
+                "thumbnail_count": thumb_cnt,
+                "has_thumbnail": thumb_cnt > 0,
             },
+            "video_progress": vp,
         }
 
     def delete_image(

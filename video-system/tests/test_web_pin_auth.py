@@ -215,7 +215,7 @@ def test_confirm_assemble_preserves_raw_shot_videos_for_4col_grid(client, ingest
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
-        json={"burn_subtitles": False, "allow_shortfall": True},
+        json={"burn_subtitles": False, "allow_shortfall": True, "allow_missing_thumbnail": True},
     )
     assert r_asm.status_code == 200, r_asm.text
     asm_data = r_asm.json()

@@ -216,6 +216,18 @@ curl -X POST "https://vidfac.gacdero.vn/api/v1/todos/itm_54095b4c9bea/images" \
   -F "prompt_used=STYLE LOCKED: ..."
 ```
 
+#### 5.5. Bắt buộc gửi 1 Ảnh Thumbnail của video (`kind=thumbnail`)
+> ⚠️ **Bắt buộc:** Mọi job todo đều **phải có ít nhất 1 ảnh Thumbnail (`kind=thumbnail`)** trước khi gọi `confirm-assemble` (nếu thiếu sẽ trả về HTTP `409 thumbnail_missing`).
+
+```bash
+curl -X POST "https://vidfac.gacdero.vn/api/v1/todos/itm_54095b4c9bea/images" \
+  -H "Authorization: Bearer sk-video-agent-prod" \
+  -F "file=@thumbnail.png" \
+  -F "kind=thumbnail" \
+  -F "seq_num=1" \
+  -F "prompt_used=High-CTR 16:9 thumbnail matching video style & hook"
+```
+
 ---
 
 ### Bước 6: Upload các đoạn Video đã gen theo thứ tự tuần tự (`seq_num = 1, 2, 3...`)

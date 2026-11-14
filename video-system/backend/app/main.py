@@ -29,7 +29,7 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, CharacterSheetCreate,
                       TodoFromYoutubeCreate, TodoImageSubmitJson,
                       ShortClipSubmitJson, TodoImportPackageCreate, TodoVideoSubmitJson,
                       WebLoginRequest, WebhookRegister)
-from .service_assembler import AssemblerService, ShortfallWarningError
+from .service_assembler import AssemblerService, ShortfallWarningError, ThumbnailMissingError
 from .service_news import (dismiss_news, list_news, push_selected as push_selected_news,
                            run_once as news_run_once, start_news_scheduler)
 from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sync_item_to_gdrive
@@ -982,9 +982,20 @@ def confirm_assemble_todo(
             allow_shortfall=req.allow_shortfall,
             watermark_enabled=req.watermark_enabled,
             watermark_text=req.watermark_text,
+            allow_missing_thumbnail=req.allow_missing_thumbnail,
         )
     except KeyError:
         raise HTTPException(404, "todo item not found")
+    except ThumbnailMissingError as e:
+        return JSONResponse(
+            {
+                "error": "thumbnail_missing",
+                "message": "Job chưa có ảnh Thumbnail (kind=thumbnail). Vui lòng upload 1 ảnh thumbnail trước khi hoàn thành job.",
+                "hint": f"POST /api/v1/todos/{item_id}/images với kind=thumbnail",
+                "video_progress": e.progress,
+            },
+            status_code=409,
+        )
     except ShortfallWarningError as e:
         return JSONResponse(
             {
@@ -1198,7 +1209,7 @@ def get_agent_guide(format: str | None = None, request: Request = None):
             {"method": "GET", "path": "/api/v1/todos/{item_id}/script", "description": "Step 3b: Download script_en.json"},
             {"method": "GET", "path": "/api/v1/todos/{item_id}/references", "description": "Step 3c: Harvest reference images"},
             {"method": "POST", "path": "/api/v1/todos/{item_id}/feedback", "description": "Step 4: Audit audio & submit feedback"},
-            {"method": "POST", "path": "/api/v1/todos/{item_id}/images", "description": "Step 5: Upload generated keyframes/sheets"},
+            {"method": "POST", "path": "/api/v1/todos/{item_id}/images", "description": "Step 5: Upload generated keyframes/sheets AND mandatory 1 thumbnail (kind=thumbnail)"},
             {"method": "POST", "path": "/api/v1/todos/{item_id}/videos", "description": "Step 6: Upload sequential video clips"},
             {"method": "POST", "path": "/api/v1/todos/{item_id}/confirm-assemble", "description": "Step 7: Confirm & assemble"},
             {"method": "POST", "path": "/api/v1/todos/{item_id}/sync-gdrive", "description": "Manual trigger GDrive sync"},
