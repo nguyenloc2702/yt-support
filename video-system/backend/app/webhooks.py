@@ -29,8 +29,12 @@ def _assert_public_webhook_url(url: str) -> None:
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError(f"webhook target resolves to private IP: {host}")
 
-EVENTS = {"item.analyzed", "item.awaiting_review", "shot.held", "shot.appended",
-          "item.ready", "item.failed"}
+EVENTS = {
+    "item.analyzed", "item.awaiting_review", "shot.held", "shot.appended",
+    "item.ready", "item.failed",
+    "youtube.channel.connected", "youtube.channel.disconnected",
+    "youtube.upload.completed", "youtube.upload.failed",
+}
 
 
 def build_payload(event_row: dict, extra: dict | None = None) -> bytes:

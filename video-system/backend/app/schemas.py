@@ -173,6 +173,26 @@ class SyncGdriveRequest(BaseModel):
     )
 
 
+class YouTubePublishRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    privacy_status: str = Field(default="private", pattern="^(private|unlisted|public)$")
+    publish_at: str | None = Field(
+        default=None,
+        description="Optional ISO-8601 UTC/offset timestamp at least 10 minutes in the future; forces privacy_status='private'",
+    )
+    upload_captions: bool = Field(default=True)
+    category_id: str = Field(default="22", max_length=16)
+
+
+class YouTubeVideoPatchRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=5000)
+    tags: list[str] | None = Field(default=None, max_length=30)
+    privacy_status: str | None = Field(default=None, pattern="^(private|unlisted|public)$")
+
+
 class FeedbackItemCreate(BaseModel):
     category: str = Field(
         default="pronunciation",

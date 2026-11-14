@@ -1100,6 +1100,12 @@ class TodoService:
             else self.get_feedback_summary(item_id)
         )
 
+        yt_row = self.store.query_one(
+            "SELECT id, youtube_video_id, youtube_url, title, privacy_status, publish_at, "
+            "upload_status, progress_pct, thumbnail_synced, captions_synced, error_message, updated_at "
+            "FROM youtube_uploads WHERE item_id=? ORDER BY created_at DESC LIMIT 1",
+            (item_id,),
+        )
         return {
             **item,
             "item_id": item_id,
@@ -1134,6 +1140,7 @@ class TodoService:
             },
             "uploaded_videos": videos,
             "video_progress": progress,
+            "youtube_upload": dict(yt_row) if yt_row else None,
         }
 
 

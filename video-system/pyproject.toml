@@ -12,6 +12,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "edge-tts>=6.1",
     "pillow>=10.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

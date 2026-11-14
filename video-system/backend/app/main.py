@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import domain
@@ -28,7 +28,8 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, CharacterSheetCreate,
                       TodoCollectReferencesRequest, TodoFromScriptCreate,
                       TodoFromYoutubeCreate, TodoImageSubmitJson,
                       ShortClipSubmitJson, TodoImportPackageCreate, TodoVideoSubmitJson,
-                      WebLoginRequest, WebhookRegister)
+                      WebLoginRequest, WebhookRegister,
+                      YouTubePublishRequest, YouTubeVideoPatchRequest)
 from .service_assembler import AssemblerService, ShortfallWarningError, ThumbnailMissingError
 from .service_news import (dismiss_news, list_news, push_selected as push_selected_news,
                            run_once as news_run_once, start_news_scheduler)
@@ -40,6 +41,7 @@ from .service_items import ItemService
 from .service_shots import ShotService
 from .service_shorts import ShortService, ShortfallError
 from .service_todos import TodoService
+from .service_youtube import YouTubeConflictError, YouTubeError, YouTubeService
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
 
@@ -71,18 +73,21 @@ else:
     logger.info("VIDEO_XKIRO_API_KEY unset — Short Studio LLM/image adapters fail-closed")
 
 shorts = ShortService(store, webhooks)
+youtube = YouTubeService(store, webhooks)
 
 
 @app.on_event("startup")
 def _start_news_scheduler() -> None:
     # Phụ lục G.10 — hộp tin nóng: chỉ bật khi VIDEO_NEWS_SYNC_ENABLED=1.
     start_news_scheduler(store)
+    youtube.startup_sweep()
 
 # -- Web PIN gate (chặn mọi request không có session/bearer hợp lệ) -----------
 # Mở: health, 3 endpoint auth/*, OPTIONS (preflight), "/favicon.ico", và "/" (shell HTML chứa
 # màn hình khóa — dữ liệu vẫn nằm sau API được bảo vệ).
 _WEB_OPEN_PATHS = {"/", "/favicon.ico", "/api/v1/health", "/api/v1/auth/login",
-                   "/api/v1/auth/session", "/api/v1/auth/logout"}
+                   "/api/v1/auth/session", "/api/v1/auth/logout",
+                   "/api/v1/youtube/auth/callback"}
 
 
 @app.middleware("http")
@@ -1570,5 +1575,133 @@ def news_push_selected(news_id: str, request: Request = None):
         raise HTTPException(404, "news item not found")
     except ValueError as e:
         raise HTTPException(422, str(e))
+
+
+# -- YouTube Channel OAuth & Publishing ----------------------------------------
+
+def _yt_error_response(exc: YouTubeError) -> JSONResponse:
+    payload: dict = {"error": exc.code, "message": exc.message, "detail": exc.message}
+    if isinstance(exc, YouTubeConflictError) and exc.upload_id:
+        payload["upload_id"] = exc.upload_id
+    return JSONResponse(payload, status_code=exc.status_code)
+
+
+@app.get("/api/v1/youtube/status")
+def youtube_status(request: Request = None):
+    auth.require(request, "read")
+    return youtube.get_status()
+
+
+@app.get("/api/v1/youtube/auth/start")
+def youtube_auth_start(request: Request = None):
+    auth.require(request, "read")
+    try:
+        return {"auth_url": youtube.make_auth_url()}
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.get("/api/v1/youtube/auth/callback")
+def youtube_auth_callback(code: str = "", state: str = "", error: str = ""):
+    import urllib.parse as _up
+    if error:
+        return RedirectResponse(f"/#/youtube?yt=error&reason={_up.quote(error)}", status_code=302)
+    if not code or not state:
+        return RedirectResponse("/#/youtube?yt=error&reason=missing_code_or_state", status_code=302)
+    try:
+        youtube.handle_callback(code, state)
+        return RedirectResponse("/#/youtube?yt=connected", status_code=302)
+    except YouTubeError as exc:
+        return RedirectResponse(f"/#/youtube?yt=error&reason={_up.quote(exc.message)}", status_code=302)
+
+
+@app.get("/api/v1/youtube/channel")
+def youtube_get_channel(request: Request = None):
+    auth.require(request, "read")
+    try:
+        return youtube.get_channel()
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.delete("/api/v1/youtube/channel")
+def youtube_disconnect_channel(request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return youtube.disconnect_channel()
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.get("/api/v1/youtube/videos")
+def youtube_list_videos(limit: int = 25, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return youtube.list_videos(limit=limit)
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.patch("/api/v1/youtube/videos/{video_id}")
+def youtube_patch_video(video_id: str, body: YouTubeVideoPatchRequest, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return youtube.patch_video(
+            video_id,
+            title=body.title,
+            description=body.description,
+            tags=body.tags,
+            privacy_status=body.privacy_status,
+        )
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.post("/api/v1/todos/{item_id}/youtube/publish")
+def youtube_publish_todo(item_id: str, body: YouTubePublishRequest, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        res = youtube.publish_todo(
+            item_id,
+            title=body.title,
+            description=body.description,
+            tags=body.tags,
+            privacy_status=body.privacy_status,
+            publish_at=body.publish_at,
+            upload_captions=body.upload_captions,
+            category_id=body.category_id,
+        )
+        status = 200 if res.get("already_published") else 202
+        return JSONResponse(res, status_code=status)
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.get("/api/v1/youtube/uploads/{upload_id}")
+def youtube_get_upload(upload_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return youtube.get_upload(upload_id)
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.post("/api/v1/youtube/uploads/{upload_id}/retry")
+def youtube_retry_upload(upload_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return youtube.retry_upload(upload_id)
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
+@app.post("/api/v1/youtube/uploads/{upload_id}/cancel")
+def youtube_cancel_upload(upload_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return youtube.cancel_upload(upload_id)
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
 
 

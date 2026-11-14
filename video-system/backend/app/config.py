@@ -119,3 +119,25 @@ def session_secret() -> str:
         key_file.write_text(secrets.token_hex(32), encoding="utf-8")
     return key_file.read_text(encoding="utf-8").strip()
 
+
+def youtube_client_id() -> str:
+    return os.environ.get("YOUTUBE_CLIENT_ID", "").strip()
+
+
+def youtube_client_secret() -> str:
+    return os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip()
+
+
+def youtube_token_encryption_key() -> str:
+    return os.environ.get("YOUTUBE_TOKEN_ENCRYPTION_KEY", "").strip()
+
+
+def youtube_upload_chunk_bytes() -> int:
+    raw = os.environ.get("YOUTUBE_UPLOAD_CHUNK_MB", "4").strip()
+    try:
+        mb = int(raw)
+    except ValueError:
+        mb = 4
+    mb = max(1, min(16, mb))
+    return mb * 1024 * 1024
+

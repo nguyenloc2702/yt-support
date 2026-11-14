@@ -2984,6 +2984,7 @@ summary:focus-visible {
       <div class="top-nav-group" role="group" aria-label="Chuyển giữa các trang">
         <button type="button" class="top-nav-btn active" id="navTodoBtn" onclick="goTodoJobsPage()">Điều phối Shot</button>
         <button type="button" class="top-nav-btn" id="navShortBtn" onclick="goShortStudioPage()">Short Studio</button>
+        <button type="button" class="top-nav-btn" id="navYoutubeBtn" onclick="goYoutubePage()">📺 YouTube</button>
       </div>
       <button type="button" onclick="openAgentGuideModal()">📖 Xem Hướng Dẫn Agent</button>
       <button type="button" id="storageBadgeBtn" onclick="openStorageStatusModal()">☁️ Lưu Trữ: Đang kiểm tra...</button>
@@ -3067,6 +3068,9 @@ summary:focus-visible {
 
   <!-- PAGE 3: SHORT STUDIO (Phụ lục G — Tin nóng & Giải mã tiền bạc, 9:16) -->
   <div id="pageShortStudio" class="page-view hidden"></div>
+
+  <!-- PAGE 4: KÊNH YOUTUBE (#/youtube) -->
+  <div id="pageYoutube" class="page-view hidden"></div>
 </main>
 
 <!-- Non-Blocking Toast Notifications -->
@@ -3654,6 +3658,7 @@ function openTodoDetailPage(itemId, initialTab = '') {
   if (listPageEl) listPageEl.classList.add('hidden');
   if (detailPageEl) detailPageEl.classList.remove('hidden');
   hideShortsPage();
+  hideYoutubePage();
   setActiveNav('todos');
 
   renderTodoDetailPage(itemId);
@@ -3680,6 +3685,7 @@ function backToTodoListPage() {
 
   if (listPageEl) listPageEl.classList.remove('hidden');
   hideShortsPage();
+  hideYoutubePage();
   setActiveNav('todos');
   renderJobDirectory();
   renderFilteredTodos();
@@ -3779,6 +3785,10 @@ function openUploadTabForImage(itemId, shotIndex = '') {
 function syncRouteFromHash() {
   if (suppressHashSync) return;
   const h = (window.location.hash || '').trim();
+  if (h.startsWith('#/youtube')) {
+    openYoutubePage();
+    return;
+  }
   if (h.startsWith('#/shorts')) {
     const ms = h.match(/^#\/shorts\/([^/?#]+)/);
     if (ms && ms[1]) {
@@ -5434,8 +5444,12 @@ function renderFinalVideoTabSection(item, cl, vp) {
           <button type="button" class="btn-ok btn-sm" onclick="confirmAssemble('${esc(itemId)}', ${!isReady ? 'true' : 'false'}, this)">
             🔄 Ráp Lại Thành Phẩm
           </button>
+          <button type="button" class="btn-primary btn-sm" onclick="openYoutubePublishModal('${esc(itemId)}')" ${!hasThumb ? 'disabled title="Cần có 1 ảnh thumbnail trước khi đăng YouTube"' : ''}>
+            📺 Đăng lên YouTube
+          </button>
         </div>
       </div>
+      ${renderTodoYoutubeStatusBanner(item)}
       <div class="final-video-stage">
         <video controls preload="none" playsinline src="${esc(item.final_video_url)}"></video>
       </div>
@@ -7058,8 +7072,10 @@ const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc' 
 function setActiveNav(page) {
   const t = document.getElementById('navTodoBtn');
   const s = document.getElementById('navShortBtn');
+  const y = document.getElementById('navYoutubeBtn');
   if (t) t.classList.toggle('active', page === 'todos');
   if (s) s.classList.toggle('active', page === 'shorts');
+  if (y) y.classList.toggle('active', page === 'youtube');
 }
 
 function hideShortsPage() {
@@ -7068,6 +7084,11 @@ function hideShortsPage() {
     cleanupVideosInContainer(el);
     el.classList.add('hidden');
   }
+}
+
+function hideYoutubePage() {
+  const el = document.getElementById('pageYoutube');
+  if (el) el.classList.add('hidden');
 }
 
 function goTodoJobsPage() {
@@ -7079,6 +7100,7 @@ function goTodoJobsPage() {
     setTimeout(() => { suppressHashSync = false; }, 40);
   }
   hideShortsPage();
+  hideYoutubePage();
   activeDetailItemId = '';
   const detailEl = document.getElementById('pageTodoDetail');
   if (detailEl) { cleanupVideosInContainer(detailEl); detailEl.classList.add('hidden'); }
@@ -7100,6 +7122,7 @@ function goShortStudioPage() {
 function openShortStudioPage() {
   hideTodoDetailDom();
   hideShortsPage();
+  hideYoutubePage();
   const page = document.getElementById('pageShortStudio');
   page.classList.remove('hidden');
   window.scrollTo({ top: 0, behavior: 'auto' });
@@ -7882,6 +7905,403 @@ setupPinBoxes();
     showLockScreen('Lỗi kết nối máy chủ — vui lòng kiểm tra mạng hoặc nhập mã PIN.');
   }
 })();
+
+// =====================================================================
+// YOUTUBE CHANNEL & DIRECT PUBLISHING (#/youtube + #/todos modal)
+// =====================================================================
+let ytStateCache = { status: null, videos: [], uploads: [] };
+let ytPollTimers = {};
+
+function goYoutubePage() {
+  setActiveNav('youtube');
+  if ((window.location.hash || '') !== '#/youtube') {
+    suppressHashSync = true;
+    window.location.hash = '#/youtube';
+    setTimeout(() => { suppressHashSync = false; }, 40);
+  }
+  openYoutubePage();
+}
+
+function openYoutubePage() {
+  setActiveNav('youtube');
+  hideTodoDetailDom();
+  hideShortsPage();
+  document.getElementById('pageTodoList')?.classList.add('hidden');
+  const page = document.getElementById('pageYoutube');
+  if (!page) return;
+  page.classList.remove('hidden');
+  window.scrollTo({ top: 0, behavior: 'auto' });
+
+  const h = window.location.hash || '';
+  if (h.includes('yt=connected')) {
+    showToast('✅ Đã kết nối kênh YouTube thành công!', 'ok', 4000);
+  } else if (h.includes('yt=error')) {
+    const m = h.match(/reason=([^&]+)/);
+    const reason = m ? decodeURIComponent(m[1]) : 'OAuth thất bại';
+    showToast(`❌ Lỗi kết nối YouTube: ${reason}`, 'err', 6000);
+  }
+  loadYoutubeDashboard();
+}
+
+async function loadYoutubeDashboard() {
+  const page = document.getElementById('pageYoutube');
+  if (!page) return;
+  page.innerHTML = `<section class="panel"><div style="padding:16px;color:var(--fg-muted)">⏳ Đang tải trạng thái kênh YouTube...</div></section>`;
+  try {
+    const rs = await apiFetch('/api/v1/youtube/status');
+    const st = await rs.json();
+    ytStateCache.status = st;
+    if (st.connected) {
+      const rv = await apiFetch('/api/v1/youtube/videos?limit=25');
+      if (rv.ok) {
+        const dv = await rv.json();
+        ytStateCache.videos = dv.videos || [];
+        ytStateCache.uploads = dv.uploads || [];
+      }
+    } else {
+      ytStateCache.videos = [];
+      ytStateCache.uploads = [];
+    }
+    renderYoutubeDashboard();
+  } catch (err) {
+    page.innerHTML = `<section class="panel"><div style="padding:16px;color:var(--danger)">❌ Lỗi tải YouTube dashboard: ${esc(err.message)}</div></section>`;
+  }
+}
+
+function renderYoutubeDashboard() {
+  const page = document.getElementById('pageYoutube');
+  if (!page) return;
+  const st = ytStateCache.status || {};
+  const ch = st.channel;
+  const quotaPct = Math.min(100, Math.round(((st.quota_used_today || 0) / (st.quota_limit || 10000)) * 100));
+
+  let channelCard = '';
+  if (!st.configured) {
+    channelCard = `
+      <div style="padding:14px;border-radius:10px;border:1px dashed var(--warn);background:rgba(255,193,7,.08)">
+        <div style="font-weight:700;margin-bottom:6px">⚙️ Chưa cấu hình YouTube OAuth trên máy chủ</div>
+        <div style="font-size:12px;color:var(--fg-muted);line-height:1.6">
+          Vui lòng thêm <code>YOUTUBE_CLIENT_ID</code>, <code>YOUTUBE_CLIENT_SECRET</code> và <code>YOUTUBE_TOKEN_ENCRYPTION_KEY</code> vào <code>.env</code>.<br>
+          Authorized redirect URI trên Google Cloud Console: <code>${esc(st.redirect_uri || '')}</code>
+        </div>
+      </div>`;
+  } else if (!st.connected || !ch) {
+    channelCard = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-weight:700;font-size:15px">Chưa liên kết kênh YouTube</div>
+          <div style="font-size:12px;color:var(--fg-muted)">Bấm nút bên phải để đăng nhập Google và cấp quyền quản lý/đăng video lên kênh của bạn.</div>
+        </div>
+        <button type="button" class="btn-primary" onclick="startYoutubeConnect()">🔗 Kết nối Kênh YouTube</button>
+      </div>`;
+  } else {
+    channelCard = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:12px">
+          ${ch.thumbnail_url ? `<img src="${esc(ch.thumbnail_url)}" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:1px solid var(--border)">` : ''}
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <strong style="font-size:16px">${esc(ch.title || 'Kênh YouTube')}</strong>
+              ${ch.custom_url ? `<span class="pill pill-ghost mono">${esc(ch.custom_url)}</span>` : ''}
+              <span class="pill pill-ok">✅ Đã kết nối</span>
+            </div>
+            <div style="font-size:12px;color:var(--fg-muted);margin-top:4px">
+              Subscribers: <strong>${Number(ch.subscriber_count || 0).toLocaleString('vi-VN')}</strong> ·
+              Tổng video: <strong>${Number(ch.video_count || 0).toLocaleString('vi-VN')}</strong> ·
+              Quota hôm nay: <strong class="mono">${Number(st.quota_used_today || 0).toLocaleString('vi-VN')} / ${Number(st.quota_limit || 10000).toLocaleString('vi-VN')}</strong> (${quotaPct}%)
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn-sm" onclick="loadYoutubeDashboard()">🔄 Làm mới</button>
+          <button type="button" class="btn-sm" onclick="startYoutubeConnect()">🔁 Đổi kênh</button>
+          <button type="button" class="btn-warn btn-sm" onclick="disconnectYoutubeChannel()">🔌 Ngắt kết nối</button>
+        </div>
+      </div>`;
+  }
+
+  const videosRows = (ytStateCache.videos || []).map(v => `
+    <tr>
+      <td style="width:110px">
+        ${v.thumbnail_url ? `<img src="${esc(v.thumbnail_url)}" alt="" style="width:96px;height:54px;object-fit:cover;border-radius:6px">` : ''}
+      </td>
+      <td>
+        <a href="${esc(v.youtube_url)}" target="_blank" rel="noopener" style="font-weight:600;color:var(--accent)">${esc(v.title)}</a>
+        <div style="font-size:11px;color:var(--fg-muted);margin-top:2px">ID: <code>${esc(v.video_id)}</code> · ${esc((v.published_at || '').slice(0, 10))}</div>
+      </td>
+      <td><span class="pill ${v.privacy_status === 'public' ? 'pill-ok' : 'pill-warn'}">${esc(v.privacy_status)}</span></td>
+      <td class="mono" style="font-size:12px">${Number(v.view_count || 0).toLocaleString('vi-VN')} views · ${Number(v.like_count || 0).toLocaleString('vi-VN')} likes</td>
+      <td>
+        <button type="button" class="btn-sm" onclick="openYoutubeEditVideoModal('${esc(v.video_id)}')">✏️ Sửa</button>
+      </td>
+    </tr>
+  `).join('');
+
+  const uploadRows = (ytStateCache.uploads || []).map(u => `
+    <tr>
+      <td class="mono" style="font-size:12px"><a href="#/todos/${esc(u.item_id)}?tab=final_video" style="color:var(--accent)">${esc(u.item_id)}</a></td>
+      <td>${esc(u.title || '')}</td>
+      <td><span class="pill ${u.upload_status === 'uploaded' ? 'pill-ok' : (u.upload_status === 'failed' || u.upload_status === 'canceled' ? 'pill-warn' : 'pill-accent')}">${esc(u.upload_status)} (${Number(u.progress_pct || 0).toFixed(0)}%)</span></td>
+      <td style="font-size:12px">
+        ${u.youtube_url ? `<a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" style="color:var(--accent)">Mở YouTube ↗</a>` : ''}
+        ${u.error_message ? `<div style="color:var(--danger);font-size:11px">${esc(u.error_message)}</div>` : ''}
+      </td>
+      <td>
+        ${u.upload_status === 'failed' ? `<button type="button" class="btn-sm" onclick="retryYoutubeUpload('${esc(u.upload_id)}')">🔁 Thử lại</button>` : ''}
+        ${['queued','uploading','processing'].includes(u.upload_status) ? `<button type="button" class="btn-warn btn-sm" onclick="cancelYoutubeUpload('${esc(u.upload_id)}')">✖ Hủy</button>` : ''}
+      </td>
+    </tr>
+  `).join('');
+
+  page.innerHTML = `
+    <section class="panel" style="margin-bottom:14px">
+      <div class="panel-header"><h3 class="panel-title">📺 Kênh YouTube Liên Kết</h3></div>
+      ${channelCard}
+    </section>
+    ${st.connected ? `
+    <section class="panel" style="margin-bottom:14px">
+      <div class="panel-header"><h3 class="panel-title">🎬 Video trên Kênh (${(ytStateCache.videos || []).length})</h3></div>
+      ${videosRows ? `<div style="overflow-x:auto"><table class="yt-table" style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;border-bottom:1px solid var(--border)"><th style="padding:8px">Ảnh</th><th style="padding:8px">Tiêu đề</th><th style="padding:8px">Chế độ</th><th style="padding:8px">Thống kê</th><th style="padding:8px">Thao tác</th></tr></thead><tbody>${videosRows}</tbody></table></div>` : `<div style="color:var(--fg-muted);font-size:13px">Chưa có video nào trên kênh.</div>`}
+    </section>
+    <section class="panel">
+      <div class="panel-header"><h3 class="panel-title">📤 Lịch sử Publish từ Video Factory</h3></div>
+      ${uploadRows ? `<div style="overflow-x:auto"><table class="yt-table" style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;border-bottom:1px solid var(--border)"><th style="padding:8px">Job ID</th><th style="padding:8px">Tiêu đề</th><th style="padding:8px">Trạng thái</th><th style="padding:8px">Link / Ghi chú</th><th style="padding:8px">Thao tác</th></tr></thead><tbody>${uploadRows}</tbody></table></div>` : `<div style="color:var(--fg-muted);font-size:13px">Chưa có lượt publish nào từ hệ thống.</div>`}
+    </section>
+    ` : ''}
+  `;
+}
+
+async function startYoutubeConnect() {
+  try {
+    const r = await apiFetch('/api/v1/youtube/auth/start');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || d.detail || `HTTP ${r.status}`);
+    window.location.href = d.auth_url;
+  } catch (err) {
+    showToast(`❌ Không thể mở Google OAuth: ${err.message}`, 'err', 5000);
+  }
+}
+
+async function disconnectYoutubeChannel() {
+  if (!confirm('Bạn có chắc muốn ngắt kết nối kênh YouTube khỏi hệ thống?')) return;
+  try {
+    const r = await apiFetch('/api/v1/youtube/channel', { method: 'DELETE' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    showToast('🔌 Đã ngắt kết nối kênh YouTube.', 'ok', 3500);
+    loadYoutubeDashboard();
+  } catch (err) {
+    showToast(`❌ Lỗi ngắt kết nối: ${err.message}`, 'err', 4500);
+  }
+}
+
+async function retryYoutubeUpload(uploadId) {
+  try {
+    const r = await apiFetch(`/api/v1/youtube/uploads/${uploadId}/retry`, { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || d.detail || `HTTP ${r.status}`);
+    showToast('🔁 Đã khởi động lại quá trình upload YouTube.', 'ok', 3500);
+    loadYoutubeDashboard();
+  } catch (err) {
+    showToast(`❌ Lỗi retry: ${err.message}`, 'err', 4500);
+  }
+}
+
+async function cancelYoutubeUpload(uploadId) {
+  try {
+    const r = await apiFetch(`/api/v1/youtube/uploads/${uploadId}/cancel`, { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    showToast('✖ Đã hủy upload.', 'ok', 3000);
+    loadYoutubeDashboard();
+  } catch (err) {
+    showToast(`❌ Lỗi hủy upload: ${err.message}`, 'err', 4500);
+  }
+}
+
+function renderTodoYoutubeStatusBanner(item) {
+  const u = item && item.youtube_upload;
+  if (!u) return '';
+  if (u.upload_status === 'uploaded' && u.youtube_url) {
+    return `<div style="margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid rgba(46,204,113,.35);background:rgba(46,204,113,.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <span>✅ <strong>Đã đăng YouTube</strong> (${esc(u.privacy_status)}) ${u.error_message ? `<span style="color:var(--warn);font-size:12px">· ${esc(u.error_message)}</span>` : ''}</span>
+      <a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" class="btn-sm btn-primary" style="text-decoration:none">▶ Xem trên YouTube ↗</a>
+    </div>`;
+  }
+  if (['queued', 'uploading', 'processing'].includes(u.upload_status)) {
+    return `<div id="ytUploadProgress-${esc(item.item_id)}" style="margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid rgba(52,152,219,.35);background:rgba(52,152,219,.08)">
+      <div style="font-size:13px;font-weight:600">⏳ Đang đăng lên YouTube (${esc(u.upload_status)}): <span class="mono">${Number(u.progress_pct || 0).toFixed(1)}%</span></div>
+      <div style="height:6px;border-radius:4px;background:rgba(255,255,255,.1);margin-top:6px;overflow:hidden"><div style="height:100%;width:${Math.min(100, Number(u.progress_pct || 0))}%;background:var(--accent)"></div></div>
+    </div>`;
+  }
+  if (u.upload_status === 'failed') {
+    return `<div style="margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid rgba(231,76,60,.35);background:rgba(231,76,60,.08);display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+      <span style="font-size:12px">❌ Đăng YouTube thất bại: ${esc(u.error_message || '')}</span>
+      <button type="button" class="btn-sm" onclick="retryYoutubeUpload('${esc(u.id || u.upload_id)}').then(() => refreshSingleItem('${esc(item.item_id)}', false))">🔁 Thử lại</button>
+    </div>`;
+  }
+  return '';
+}
+
+function openYoutubePublishModal(itemId) {
+  const item = detailsCache[itemId] || allTodos.find(t => t.item_id === itemId);
+  if (!item) return;
+  const old = document.getElementById('ytModalOverlay');
+  if (old) old.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'ytModalOverlay';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  wrap.innerHTML = `
+    <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:540px;width:100%;padding:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0;font-size:16px">📺 Đăng Video lên YouTube</h3>
+        <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">✖</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+        <label>Tiêu đề (tối đa 100 ký tự)<input id="ytPubTitle" type="text" maxlength="100" value="${esc(item.title || '')}" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
+        <label>Mô tả<textarea id="ytPubDesc" rows="3" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></textarea></label>
+        <label>Tags (cách nhau dấu phẩy)<input id="ytPubTags" type="text" placeholder="finance, explainer, history" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <label style="flex:1">Chế độ hiển thị
+            <select id="ytPubPrivacy" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)">
+              <option value="private" selected>Private (an toàn mặc định)</option>
+              <option value="unlisted">Unlisted (không công khai)</option>
+              <option value="public">Public (công khai)</option>
+            </select>
+          </label>
+          <label style="flex:1">Hẹn giờ đăng (tùy chọn, ≥10 phút)
+            <input id="ytPubAt" type="datetime-local" onchange="document.getElementById('ytPubPrivacy').disabled = !!this.value; if(this.value) document.getElementById('ytPubPrivacy').value='private';" style="width:100%;margin-top:4px;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)">
+          </label>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input id="ytPubSrt" type="checkbox" checked> Đính kèm phụ đề tiếng Anh (.srt) nếu có
+        </label>
+        <div style="font-size:11px;color:var(--fg-muted)">💡 Lưu ý: Hệ thống tự đính kèm Video thành phẩm + Ảnh Thumbnail đã duyệt. Nếu OAuth app chưa verify với Google, video mới sẽ bị giữ ở chế độ Private.</div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">
+          <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">Hủy</button>
+          <button type="button" class="btn-primary btn-sm" onclick="submitYoutubePublish('${esc(itemId)}', this)">🚀 Bắt đầu Đăng</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+}
+
+async function submitYoutubePublish(itemId, btnEl) {
+  const title = (document.getElementById('ytPubTitle')?.value || '').trim();
+  if (!title) { showToast('⚠️ Vui lòng nhập tiêu đề video.', 'warn', 3000); return; }
+  const description = document.getElementById('ytPubDesc')?.value || '';
+  const tagsRaw = document.getElementById('ytPubTags')?.value || '';
+  const tags = tagsRaw.split(',').map(s => s.trim()).filter(Boolean);
+  const privacy = document.getElementById('ytPubPrivacy')?.value || 'private';
+  const pubAtRaw = document.getElementById('ytPubAt')?.value || '';
+  const publishAt = pubAtRaw ? new Date(pubAtRaw).toISOString() : null;
+  const uploadCaptions = !!document.getElementById('ytPubSrt')?.checked;
+
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Đang gửi...'; }
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/youtube/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title, description, tags, privacy_status: privacy, publish_at: publishAt, upload_captions: uploadCaptions
+      })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || d.detail || `HTTP ${r.status}`);
+    document.getElementById('ytModalOverlay')?.remove();
+    if (d.already_published) {
+      showToast(`✅ Video đã được đăng trước đó: ${d.youtube_url}`, 'ok', 4500);
+    } else {
+      showToast('🚀 Đang upload video lên YouTube...', 'info', 4000);
+      pollYoutubeUploadProgress(itemId, d.upload_id);
+    }
+    await refreshSingleItem(itemId, false);
+  } catch (err) {
+    showToast(`❌ Lỗi đăng YouTube: ${err.message}`, 'err', 5500);
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🚀 Bắt đầu Đăng'; }
+  }
+}
+
+function pollYoutubeUploadProgress(itemId, uploadId) {
+  if (ytPollTimers[uploadId]) clearInterval(ytPollTimers[uploadId]);
+  ytPollTimers[uploadId] = setInterval(async () => {
+    try {
+      const r = await apiFetch(`/api/v1/youtube/uploads/${uploadId}`);
+      if (!r.ok) return;
+      const u = await r.json();
+      if (!['queued', 'uploading', 'processing'].includes(u.upload_status)) {
+        clearInterval(ytPollTimers[uploadId]);
+        delete ytPollTimers[uploadId];
+        if (u.upload_status === 'uploaded') {
+          showToast(`🎉 Đã đăng YouTube thành công!`, 'ok', 5000);
+        } else if (u.upload_status === 'failed') {
+          showToast(`❌ Upload YouTube lỗi: ${u.error_message || ''}`, 'err', 6000);
+        }
+        await refreshSingleItem(itemId, false);
+      } else {
+        const box = document.getElementById(`ytUploadProgress-${itemId}`);
+        if (box) {
+          box.querySelector('.mono').textContent = `${Number(u.progress_pct || 0).toFixed(1)}%`;
+        }
+      }
+    } catch (_) {}
+  }, 2000);
+}
+
+function openYoutubeEditVideoModal(videoId) {
+  const v = (ytStateCache.videos || []).find(x => x.video_id === videoId);
+  if (!v) return;
+  const old = document.getElementById('ytModalOverlay');
+  if (old) old.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'ytModalOverlay';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  wrap.innerHTML = `
+    <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:520px;width:100%;padding:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0;font-size:16px">✏️ Sửa Video YouTube (${esc(videoId)})</h3>
+        <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">✖</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+        <label>Tiêu đề<input id="ytEditTitle" type="text" maxlength="100" value="${esc(v.title || '')}" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
+        <label>Mô tả<textarea id="ytEditDesc" rows="4" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)">${esc(v.description || '')}</textarea></label>
+        <label>Tags (cách nhau dấu phẩy)<input id="ytEditTags" type="text" value="${esc((v.tags || []).join(', '))}" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
+        <label>Chế độ hiển thị
+          <select id="ytEditPrivacy" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)">
+            <option value="private" ${v.privacy_status === 'private' ? 'selected' : ''}>Private</option>
+            <option value="unlisted" ${v.privacy_status === 'unlisted' ? 'selected' : ''}>Unlisted</option>
+            <option value="public" ${v.privacy_status === 'public' ? 'selected' : ''}>Public</option>
+          </select>
+        </label>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">
+          <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">Hủy</button>
+          <button type="button" class="btn-primary btn-sm" onclick="submitYoutubeEditVideo('${esc(videoId)}', this)">💾 Lưu thay đổi</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+}
+
+async function submitYoutubeEditVideo(videoId, btnEl) {
+  const title = (document.getElementById('ytEditTitle')?.value || '').trim();
+  const description = document.getElementById('ytEditDesc')?.value || '';
+  const tags = (document.getElementById('ytEditTags')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const privacy_status = document.getElementById('ytEditPrivacy')?.value || 'private';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Đang lưu...'; }
+  try {
+    const r = await apiFetch(`/api/v1/youtube/videos/${videoId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description, tags, privacy_status })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || d.detail || `HTTP ${r.status}`);
+    document.getElementById('ytModalOverlay')?.remove();
+    showToast('✅ Đã cập nhật video trên YouTube!', 'ok', 3500);
+    loadYoutubeDashboard();
+  } catch (err) {
+    showToast(`❌ Lỗi cập nhật video: ${err.message}`, 'err', 5000);
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '💾 Lưu thay đổi'; }
+  }
+}
 </script>
 </body>
 </html>

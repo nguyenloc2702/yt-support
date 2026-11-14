@@ -214,6 +214,58 @@ CREATE TABLE IF NOT EXISTS news_items (
   pushed_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_news_status ON news_items(status, fetched_at);
+CREATE TABLE IF NOT EXISTS youtube_channels (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT UNIQUE NOT NULL,
+  title TEXT,
+  custom_url TEXT,
+  thumbnail_url TEXT,
+  uploads_playlist_id TEXT,
+  subscriber_count INTEGER DEFAULT 0,
+  video_count INTEGER DEFAULT 0,
+  access_token_enc TEXT NOT NULL,
+  refresh_token_enc TEXT NOT NULL,
+  token_expires_at REAL,
+  scopes TEXT,
+  status TEXT DEFAULT 'connected', -- connected | disconnected | expired
+  is_default INTEGER DEFAULT 1,
+  connected_at REAL,
+  updated_at REAL
+);
+CREATE TABLE IF NOT EXISTS youtube_uploads (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  target_type TEXT DEFAULT 'todo',
+  channel_id TEXT NOT NULL,
+  youtube_video_id TEXT,
+  youtube_url TEXT,
+  title TEXT,
+  description TEXT,
+  tags_json TEXT,
+  privacy_status TEXT DEFAULT 'private',
+  publish_at TEXT,
+  upload_status TEXT DEFAULT 'queued', -- queued | uploading | processing | uploaded | failed | canceled
+  progress_pct REAL DEFAULT 0.0,
+  bytes_uploaded INTEGER DEFAULT 0,
+  total_bytes INTEGER DEFAULT 0,
+  upload_session_uri TEXT,
+  attempt_count INTEGER DEFAULT 0,
+  thumbnail_synced INTEGER DEFAULT 0,
+  captions_synced INTEGER DEFAULT 0,
+  error_message TEXT,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_yt_uploads_item ON youtube_uploads(item_id, created_at);
+CREATE TABLE IF NOT EXISTS youtube_quota_ledger (
+  day TEXT PRIMARY KEY,
+  units_used INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS youtube_oauth_nonces (
+  nonce TEXT PRIMARY KEY,
+  expires_at REAL NOT NULL,
+  used_at REAL
+);
 """
 
 _ITEM_MIGRATION_COLS = [
