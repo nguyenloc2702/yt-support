@@ -91,8 +91,12 @@ def _pick_bgm_track(bgm_dir: Path, seed: str, mood: str = "ominous") -> Path | N
 def _mix_bgm_bed(voice_wav: Path, out_wav: Path, duration: float, seed: str,
                  mood: str = "ominous", whoosh_times: list[float] | None = None) -> bool:
     """Trộn BGM theo mood + Impact/Whoosh SFX dưới giọng đọc. Trả False nếu thiếu BGM."""
-    repo_root = Path(__file__).resolve().parents[4]
-    bgm_dir = repo_root / "assets" / "music" / "bgm"
+    here = Path(__file__).resolve()
+    bgm_dir = next(
+        (p / "assets" / "music" / "bgm" for p in (here.parents[3], here.parents[4])
+         if (p / "assets" / "music" / "bgm").exists()),
+        here.parents[3] / "assets" / "music" / "bgm",
+    )
     track = _pick_bgm_track(bgm_dir, seed, mood=mood)
     if not track:
         shutil.copy2(voice_wav, out_wav)
