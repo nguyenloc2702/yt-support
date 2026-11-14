@@ -266,6 +266,29 @@ CREATE TABLE IF NOT EXISTS youtube_oauth_nonces (
   expires_at REAL NOT NULL,
   used_at REAL
 );
+CREATE TABLE IF NOT EXISTS bgm_tracks (
+  id TEXT PRIMARY KEY,
+  filename TEXT UNIQUE NOT NULL,
+  title TEXT NOT NULL,
+  mood TEXT NOT NULL,
+  track_type TEXT NOT NULL DEFAULT 'bgm',
+  beat_role TEXT,
+  genre TEXT,
+  bpm INTEGER,
+  energy TEXT,
+  tags_json TEXT,
+  artist TEXT,
+  license TEXT,
+  source_url TEXT,
+  note TEXT,
+  duration_sec REAL DEFAULT 0.0,
+  lufs REAL,
+  true_peak_dbtp REAL,
+  active INTEGER DEFAULT 1,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_bgm_mood ON bgm_tracks(mood, track_type, active);
 """
 
 _ITEM_MIGRATION_COLS = [

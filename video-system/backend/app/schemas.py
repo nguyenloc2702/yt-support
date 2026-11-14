@@ -193,6 +193,29 @@ class YouTubeVideoPatchRequest(BaseModel):
     privacy_status: str | None = Field(default=None, pattern="^(private|unlisted|public)$")
 
 
+class BgmTrackSubmitJson(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    mood: str = Field(..., min_length=1, max_length=40, description="mysterious|nostalgic|gentle|energetic|quirky|ominous|triumphant|celebratory")
+    track_type: str = Field(default="bgm", max_length=30, description="bgm|sfx|ambient|stinger")
+    beat_role: str | None = Field(default=None, max_length=30, description="hook|setup|rising|crisis|breakthrough|payoff")
+    genre: str | None = Field(default=None, max_length=50)
+    bpm: int | None = Field(default=None, ge=20, le=300)
+    energy: str | None = Field(default=None, max_length=20, description="low|medium|high hoặc 1-10")
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    artist: str | None = Field(default=None, max_length=100)
+    license: str | None = Field(default=None, max_length=100)
+    source_url: str | None = Field(default=None, max_length=500)
+    note: str | None = Field(default=None, max_length=500)
+    lufs: float | None = Field(default=None)
+    true_peak_dbtp: float | None = Field(default=None)
+    overwrite: bool = Field(default=False)
+    allow_custom_mood: bool = Field(default=False)
+    filename: str | None = Field(default=None, max_length=150)
+    base64_data: str | None = None
+    file_url: str | None = None
+    file_path: str | None = None
+
+
 class FeedbackItemCreate(BaseModel):
     category: str = Field(
         default="pronunciation",

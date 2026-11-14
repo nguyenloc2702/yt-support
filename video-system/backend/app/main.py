@@ -19,7 +19,8 @@ from . import domain
 from .auth import SESSION_COOKIE, SESSION_TTL_SEC, Auth, webauth
 from .config import db_path, data_dir, RENDER_SPEC, AUDIO_CONFIG, REPO_ROOT
 from .providers import AdapterNotConfigured, registry
-from .schemas import (AudioRegenerateRequest, BatchCreate, CharacterSheetCreate,
+from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
+                      CharacterSheetCreate,
                       ConfirmAssembleRequest, FeedbackBatchCreate, FeedbackItemCreate,
                       FeedbackResolveRequest, GateDecision, GenerateRequest,
                       HoldRequest, ItemCreate, ShortCreate, ShortScriptUpdate,
@@ -36,6 +37,7 @@ from .service_news import (dismiss_news, list_news, push_selected as push_select
 from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sync_item_to_gdrive
 
 from .service_batches import BatchService
+from .service_bgm import BgmService
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
 from .service_shots import ShotService
@@ -74,6 +76,7 @@ else:
 
 shorts = ShortService(store, webhooks)
 youtube = YouTubeService(store, webhooks)
+bgm_service = BgmService(store)
 
 
 @app.on_event("startup")
@@ -1702,6 +1705,127 @@ def youtube_cancel_upload(upload_id: str, request: Request = None):
         return youtube.cancel_upload(upload_id)
     except YouTubeError as exc:
         return _yt_error_response(exc)
+
+
+# -- BGM / Background Music Collection -----------------------------------------
+
+def _parse_bool_flag(val: object, default: bool = False) -> bool:
+    if val is None or val == "":
+        return default
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.post("/api/v1/bgm")
+async def submit_bgm_track(request: Request):
+    """Add a track into the BGM library (supports multipart/form-data & application/json)."""
+    auth.require(request, "ingest")
+    ctype = (request.headers.get("content-type") or "").lower()
+    try:
+        if "multipart/form-data" in ctype:
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None or not hasattr(upload, "read"):
+                raise HTTPException(422, "multipart form must include 'file'")
+            raw_bytes = await upload.read()
+            title = str(form.get("title") or Path(getattr(upload, "filename", "track.mp3")).stem).strip()
+            mood = str(form.get("mood") or "").strip()
+            if not mood:
+                raise HTTPException(422, "multipart form must include 'mood'")
+            tags_raw = form.get("tags")
+            tags: list[str] = []
+            if tags_raw:
+                ts = str(tags_raw).strip()
+                tags = json.loads(ts) if ts.startswith("[") else [x.strip() for x in ts.split(",") if x.strip()]
+            bpm_raw = form.get("bpm")
+            lufs_raw = form.get("lufs")
+            tp_raw = form.get("true_peak_dbtp")
+            res = await run_in_threadpool(
+                bgm_service.add_track,
+                title=title,
+                mood=mood,
+                track_type=str(form.get("track_type") or "bgm"),
+                beat_role=str(form.get("beat_role") or "") or None,
+                genre=str(form.get("genre") or "") or None,
+                bpm=int(bpm_raw) if bpm_raw not in (None, "") else None,
+                energy=str(form.get("energy") or "") or None,
+                tags=tags,
+                artist=str(form.get("artist") or "") or None,
+                license=str(form.get("license") or "") or None,
+                source_url=str(form.get("source_url") or "") or None,
+                note=str(form.get("note") or "") or None,
+                lufs=float(lufs_raw) if lufs_raw not in (None, "") else None,
+                true_peak_dbtp=float(tp_raw) if tp_raw not in (None, "") else None,
+                overwrite=_parse_bool_flag(form.get("overwrite"), False),
+                allow_custom_mood=_parse_bool_flag(form.get("allow_custom_mood"), False),
+                file_bytes=raw_bytes,
+                filename=getattr(upload, "filename", "track.mp3"),
+            )
+        else:
+            payload = await request.json()
+            body = BgmTrackSubmitJson(**payload)
+            res = await run_in_threadpool(
+                bgm_service.add_track,
+                title=body.title,
+                mood=body.mood,
+                track_type=body.track_type,
+                beat_role=body.beat_role,
+                genre=body.genre,
+                bpm=body.bpm,
+                energy=body.energy,
+                tags=body.tags,
+                artist=body.artist,
+                license=body.license,
+                source_url=body.source_url,
+                note=body.note,
+                lufs=body.lufs,
+                true_peak_dbtp=body.true_peak_dbtp,
+                overwrite=body.overwrite,
+                allow_custom_mood=body.allow_custom_mood,
+                filename=body.filename,
+                base64_data=body.base64_data,
+                file_path=Path(body.file_path) if body.file_path else None,
+                file_url=body.file_url,
+            )
+        return JSONResponse(res, status_code=201)
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/v1/bgm")
+def list_bgm_tracks(
+    mood: str | None = None,
+    track_type: str | None = None,
+    beat_role: str | None = None,
+    genre: str | None = None,
+    q: str | None = None,
+    request: Request = None,
+):
+    auth.require(request, "read")
+    return bgm_service.list_tracks(mood=mood, track_type=track_type, beat_role=beat_role, genre=genre, q=q)
+
+
+@app.get("/api/v1/bgm/{track_id}/file")
+def get_bgm_track_file(track_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        p = bgm_service.get_track_file(track_id)
+    except (KeyError, FileNotFoundError):
+        raise HTTPException(404, "bgm track not found")
+    return FileResponse(p, media_type="audio/mpeg", filename=p.name)
+
+
+@app.delete("/api/v1/bgm/{track_id}")
+def delete_bgm_track(track_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return bgm_service.delete_track(track_id)
+    except KeyError:
+        raise HTTPException(404, "bgm track not found")
+
 
 
 
