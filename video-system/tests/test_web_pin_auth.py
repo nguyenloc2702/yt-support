@@ -265,6 +265,11 @@ def test_loading_states_try_catch_and_error_reporting(client, read_key, monkeypa
     assert "function renderTodoDetailPage(" in html
     assert "todo-summary-card" in html
     assert "detail-flow-tabs" in html
+    assert 'id="tabShorts"' in html
+    assert "function renderShortSummaryCard(" in html
+    assert "function openShortPreviewModal(" in html
+    assert "function renderYoutubeActionButton(" in html
+    assert "/youtube/publish" in html
     assert "Không thể tải dữ liệu danh sách công việc TODO" in html
     assert "Thử tải lại ngay" in html
 

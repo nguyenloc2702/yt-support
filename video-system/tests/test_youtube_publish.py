@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -181,6 +182,7 @@ def test_list_videos_never_calls_search_and_patch_merges_category(client, ingest
 
     yt = _setup_mock_youtube(monkeypatch, handler)
     _connect_sample_channel(yt, app_main.store)
+    app_main.store.execute("DELETE FROM youtube_quota_ledger")
 
     r_list = client.get("/api/v1/youtube/videos", headers=read_key)
     assert r_list.status_code == 200, r_list.text
@@ -315,6 +317,7 @@ def test_startup_sweep_and_disconnect(client, ingest, yt_env, monkeypatch):
 
     yt = _setup_mock_youtube(monkeypatch, handler)
     _connect_sample_channel(yt, app_main.store)
+    app_main.store.execute("DELETE FROM youtube_quota_ledger")
     t = time.time()
     # Record with no session URI -> startup sweep marks failed
     app_main.store.execute(
@@ -335,3 +338,180 @@ def test_startup_sweep_and_disconnect(client, ingest, yt_env, monkeypatch):
     r_disc = client.delete("/api/v1/youtube/channel", headers={"Authorization": "Bearer test-admin"})
     assert r_disc.status_code == 200
     assert yt.get_upload("ytu_q")["upload_status"] == "canceled"
+
+
+def test_publish_short_immediate_scheduled_and_ui_hydration(client, ingest, read_key, yt_env, monkeypatch):
+    admin_hdr = {"Authorization": "Bearer test-admin"}
+    init_bodies: list[dict] = []
+    cap_langs: list[str] = []
+    called_ops: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/upload/youtube/v3/videos" and req.method == "POST":
+            called_ops.append("init")
+            init_bodies.append(json.loads(req.content.decode("utf-8")))
+            return httpx.Response(200, headers={"Location": "https://upload.yt.example/session/short1"})
+        if req.url.host == "upload.yt.example" and req.method == "PUT":
+            cr = req.headers.get("Content-Range", "")
+            if cr.startswith("bytes 0-1048575/") and not cr.endswith("/1048576"):
+                return httpx.Response(308, headers={"Range": f"bytes=0-{1024*1024 - 1}"})
+            return httpx.Response(200, json={"id": "yt_short_1"})
+        if req.url.path == "/youtube/v3/videos" and req.method == "GET":
+            called_ops.append("poll")
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "yt_short_1", "processingDetails": {"processingStatus": "succeeded"}}]},
+            )
+        if req.url.path == "/youtube/v3/channels":
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "UC_TEST_123", "contentDetails": {"relatedPlaylists": {"uploads": "UU_TEST_123"}}}]},
+            )
+        if req.url.path == "/youtube/v3/playlistItems":
+            return httpx.Response(200, json={"items": []})
+        if req.url.path == "/upload/youtube/v3/thumbnails/set":
+            called_ops.append("thumb")
+            return httpx.Response(200, json={})
+        if req.url.path == "/upload/youtube/v3/captions":
+            called_ops.append("captions")
+            cap_langs.append(req.content.decode("utf-8", errors="ignore"))
+            return httpx.Response(200, json={"id": "cap_short_1"})
+        raise AssertionError(f"Unexpected request: {req.method} {req.url}")
+
+    yt = _setup_mock_youtube(monkeypatch, handler)
+    _connect_sample_channel(yt, app_main.store)
+    app_main.store.execute("DELETE FROM youtube_quota_ledger")
+
+    # 1. Missing short -> 404
+    r_404 = client.post("/api/v1/shorts/sho_missing/youtube/publish", headers=admin_hdr, json={"title": "Nope"})
+    assert r_404.status_code == 404
+
+    # 2. Short without MP4 -> 422
+    t = time.time()
+    app_main.store.execute(
+        "INSERT INTO shorts (id, mode, lang, title, status, script_json, source_text, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("sho_nomp4", "news", "vi", "No MP4 Short", "scripted", "{}", "raw", t, t),
+    )
+    r_nomp4 = client.post("/api/v1/shorts/sho_nomp4/youtube/publish", headers=admin_hdr, json={"title": "No MP4"})
+    assert r_nomp4.status_code == 422
+    assert r_nomp4.json()["error"] == "missing_final_video"
+
+    # 3. Upload valid MP4 Short (no thumbnail required) & immediate publish via HTTP endpoint
+    mp4_small = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"\x00" * 512
+    r_up1 = client.post(
+        "/api/v1/shorts/upload",
+        headers=admin_hdr,
+        data={"title": "Immediate Short Product", "mode": "news", "lang": "en"},
+        files={"file": ("imm_short.mp4", BytesIO(mp4_small), "video/mp4")},
+    )
+    assert r_up1.status_code == 201
+    sid1 = r_up1.json()["id"]
+
+    r_pub1 = client.post(
+        f"/api/v1/shorts/{sid1}/youtube/publish",
+        headers=admin_hdr,
+        json={
+            "title": "Immediate Short #Shorts",
+            "description": "Fast update\n\n#Shorts",
+            "tags": ["Shorts", "news"],
+            "privacy_status": "public",
+            "upload_captions": True,
+        },
+    )
+    assert r_pub1.status_code == 202
+    uid1 = r_pub1.json()["upload_id"]
+    assert r_pub1.json()["target_type"] == "short"
+
+    # Wait briefly for worker thread to finish
+    status_data = None
+    for _ in range(50):
+        ru = client.get(f"/api/v1/youtube/uploads/{uid1}", headers=read_key)
+        status_data = ru.json()
+        if status_data["upload_status"] in ("uploaded", "failed"):
+            break
+        time.sleep(0.02)
+    assert status_data is not None
+    assert status_data["upload_status"] == "uploaded"
+    assert status_data["target_type"] == "short"
+    assert status_data["thumbnail_synced"] is False
+    assert status_data["captions_synced"] is False
+    assert "thumb" not in called_ops
+    assert init_bodies[-1]["status"]["privacyStatus"] == "public"
+    assert "publishAt" not in init_bodies[-1]["status"]
+
+    # Hydration on GET /api/v1/shorts & GET /api/v1/shorts/{id} & /api/v1/youtube/videos
+    r_list = client.get("/api/v1/shorts", headers=read_key)
+    assert r_list.status_code == 200
+    matched = [s for s in r_list.json()["shorts"] if s["id"] == sid1]
+    assert matched and matched[0]["youtube_upload"]["upload_status"] == "uploaded"
+    assert matched[0]["youtube_upload"]["youtube_video_id"] == "yt_short_1"
+
+    r_get = client.get(f"/api/v1/shorts/{sid1}", headers=read_key)
+    assert r_get.status_code == 200
+    assert r_get.json()["youtube_upload"]["youtube_url"] == "https://www.youtube.com/watch?v=yt_short_1"
+
+    r_ytv = client.get("/api/v1/youtube/videos", headers=read_key)
+    assert r_ytv.status_code == 200
+    yt_up = [u for u in r_ytv.json()["uploads"] if u["upload_id"] == uid1]
+    assert yt_up and yt_up[0]["target_type"] == "short"
+
+    # Duplicate publish guard -> 200 already_published
+    r_dup = client.post(
+        f"/api/v1/shorts/{sid1}/youtube/publish",
+        headers=admin_hdr,
+        json={"title": "Dup"},
+    )
+    assert r_dup.status_code == 200
+    assert r_dup.json()["already_published"] is True
+
+    # 4. Scheduled publish (>1MB 2 chunks) + VI SRT captions on second Short
+    mp4_big = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"\x00" * (1200 * 1024)
+    r_up2 = client.post(
+        "/api/v1/shorts/upload",
+        headers=admin_hdr,
+        data={"title": "Scheduled VI Short", "mode": "decode", "lang": "vi"},
+        files={"file": ("sched_short.mp4", BytesIO(mp4_big), "video/mp4")},
+    )
+    assert r_up2.status_code == 201
+    sid2 = r_up2.json()["id"]
+
+    # Attach an SRT asset to sid2
+    srt_rel = f"shorts/{sid2}/subtitles.srt"
+    srt_file = yt._resolve_upload_artifacts("short", sid2)["video_path"].parent / "subtitles.srt"
+    srt_file.write_text("1\n00:00:00,000 --> 00:00:02,000\nXin chào!\n", encoding="utf-8")
+    app_main.store.execute(
+        "INSERT INTO assets (id, item_id, kind, storage_key, sha256, size, provenance_engine, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("ast_srt_2", None, "subtitle", srt_rel, "0" * 64, srt_file.stat().st_size, "test", t),
+    )
+    app_main.store.execute("UPDATE shorts SET srt_asset_id=? WHERE id=?", ("ast_srt_2", sid2))
+
+    # Past publish_at rejected -> 422
+    past_iso = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    r_past = client.post(
+        f"/api/v1/shorts/{sid2}/youtube/publish",
+        headers=admin_hdr,
+        json={"title": "Past", "publish_at": past_iso, "privacy_status": "public"},
+    )
+    assert r_past.status_code == 422
+
+    future_iso = (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat()
+    res2 = yt.publish_short(
+        sid2,
+        title="Scheduled Short #Shorts",
+        description="Scheduled #Shorts",
+        tags=["Shorts"],
+        privacy_status="public",
+        publish_at=future_iso,
+        upload_captions=True,
+        run_async=False,
+    )
+    assert res2["upload_status"] == "uploaded"
+    assert res2["target_type"] == "short"
+    assert res2["privacy_status"] == "private"
+    assert res2["publish_at"] is not None
+    assert res2["thumbnail_synced"] is False
+    assert res2["captions_synced"] is True
+    assert '"language": "vi"' in cap_langs[-1]
+    assert "publishAt" in init_bodies[-1]["status"]

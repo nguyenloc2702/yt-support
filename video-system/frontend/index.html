@@ -3141,6 +3141,7 @@ summary:focus-visible {
           <button type="button" class="seg-tab" data-status="todo" id="tabTodo" onclick="setStatusFilter('todo')">Đang chờ video</button>
           <button type="button" class="seg-tab" data-status="ready_to_assemble" id="tabReady" onclick="setStatusFilter('ready_to_assemble')">Đủ thời lượng (Chờ ráp)</button>
           <button type="button" class="seg-tab" data-status="assembled" id="tabAssembled" onclick="setStatusFilter('assembled')">Đã ráp thành phẩm</button>
+          <button type="button" class="seg-tab" data-status="shorts" id="tabShorts" onclick="setStatusFilter('shorts')">📱 Short Video</button>
         </div>
         <input type="search" id="searchBox" class="search-input" placeholder="Tìm theo tiêu đề bài hoặc mã công việc..." oninput="renderFilteredTodos()"/>
         <select id="sortSelect" aria-label="Sắp xếp danh sách công việc" onchange="setTodoSortOrder(this.value)">
@@ -3238,6 +3239,7 @@ let currentStatusFilter = '';
 let currentSortOrder = 'default';
 let selectedJobId = '';             // '' = Master List Page, or specific item_id
 let activeDetailItemId = '';        // '' = on Page 1 (#pageTodoList), or item_id on Page 2 (#pageTodoDetail)
+let activeDetailShortId = '';       // short_id when Page Short Studio displays detail
 let suppressHashSync = false;
 let quickUploadTarget = null;       // { itemId, shotIndex }
 let currentModalContext = null;     // For keyboard prev/next in Cinema or Lightbox
@@ -3968,7 +3970,10 @@ async function loadTodos(opts = {}) {
   }
 
   try {
-    const r = await apiFetch('/api/v1/todos', { timeoutMs: 25000 });
+    const [r, sr] = await Promise.all([
+      apiFetch('/api/v1/todos', { timeoutMs: 25000 }),
+      apiFetch('/api/v1/shorts', { timeoutMs: 20000 }).catch(() => null),
+    ]);
     if (!r.ok) {
       if (r.status === 401) {
         return;
@@ -3987,6 +3992,17 @@ async function loadTodos(opts = {}) {
       detailsCache[t.item_id] = t;
     });
 
+    if (sr && sr.ok) {
+      try {
+        const sData = await sr.json();
+        if (sData && Array.isArray(sData.shorts)) {
+          allShorts = sData.shorts;
+          shortsLoaded = true;
+          allShorts.forEach(s => { shortDetailsCache[s.id] = s; });
+        }
+      } catch (_) {}
+    }
+
     hideStatusBanner();
     updateOverviewStats();
     renderJobDirectory();
@@ -3999,7 +4015,8 @@ async function loadTodos(opts = {}) {
     }
 
     if (opts.notify) {
-      showToast(`Đã tải thành công ${allTodos.length} công việc TODO`, 'ok', 2800);
+      const sNote = allShorts.length ? ` · ${allShorts.length} Short video` : '';
+      showToast(`Đã tải thành công ${allTodos.length} công việc TODO${sNote}`, 'ok', 2800);
     }
   } catch (err) {
     console.error('[loadTodos] Error:', err);
@@ -4058,9 +4075,12 @@ function updateOverviewStats() {
     }
   });
 
-  document.getElementById('statTotalJobs').textContent = String(allTodos.length);
+  const shortsTotal = allShorts.length;
+  const shortsReady = allShorts.filter(s => s.status === 'ready').length;
+  document.getElementById('statTotalJobs').textContent = String(allTodos.length + shortsTotal);
   document.getElementById('statTotalJobsSub').textContent =
-    `${todoCount} đang gen · ${readyCount} chờ ráp · ${assembledCount} đã ráp`;
+    `${todoCount} đang gen · ${readyCount} chờ ráp · ${assembledCount} đã ráp` +
+    (shortsTotal > 0 ? ` · ${shortsTotal} Short (${shortsReady} sẵn sàng)` : '');
   document.getElementById('statShotsChecked').textContent = `${checkedShots} / ${totalShots}`;
   document.getElementById('statShotsCheckedSub').textContent =
     `Còn ${Math.max(0, totalShots - checkedShots)} shot chưa gen`;
@@ -4074,10 +4094,12 @@ function updateOverviewStats() {
   const tabTodo = document.getElementById('tabTodo');
   const tabReady = document.getElementById('tabReady');
   const tabAssembled = document.getElementById('tabAssembled');
-  if (tabAll) tabAll.textContent = `Tất cả (${allTodos.length})`;
+  const tabShorts = document.getElementById('tabShorts');
+  if (tabAll) tabAll.textContent = `Tất cả (${allTodos.length + shortsTotal})`;
   if (tabTodo) tabTodo.textContent = `Đang chờ video (${todoCount})`;
   if (tabReady) tabReady.textContent = `Đủ thời lượng (${readyCount})`;
-  if (tabAssembled) tabAssembled.textContent = `Đã ráp thành phẩm (${assembledCount})`;
+  if (tabAssembled) tabAssembled.textContent = `Đã ráp thành phẩm (${assembledCount + shortsReady})`;
+  if (tabShorts) tabShorts.textContent = `📱 Short Video (${shortsTotal})`;
 }
 
 function renderJobDirectory() {
@@ -4814,14 +4836,20 @@ function cancelPendingTodoAppendTimer() {
 function updateSummaryCounterText() {
   const el = document.getElementById('summaryText');
   if (!el) return;
+  const filteredShorts = getFilteredShorts();
+  if (currentStatusFilter === 'shorts') {
+    el.textContent = `Hiển thị ${filteredShorts.length} / ${allShorts.length} sản phẩm Short video`;
+    return;
+  }
+  const shortSuffix = filteredShorts.length ? ` · ${filteredShorts.length} Short video` : '';
   if (!currentFilteredTodos.length) {
-    el.textContent = `Hiển thị 0 / ${allTodos.length} công việc`;
+    el.textContent = `Hiển thị 0 / ${allTodos.length} công việc${shortSuffix}`;
     return;
   }
   if (renderedTodoCount < currentFilteredTodos.length) {
-    el.textContent = `Đang tải ${renderedTodoCount} / ${currentFilteredTodos.length} công việc (Cuộn xuống tự tải thêm · Tổng ${allTodos.length})`;
+    el.textContent = `Đang tải ${renderedTodoCount} / ${currentFilteredTodos.length} công việc (Cuộn xuống tự tải thêm · Tổng ${allTodos.length})${shortSuffix}`;
   } else {
-    el.textContent = `Hiển thị ${currentFilteredTodos.length} / ${allTodos.length} công việc`;
+    el.textContent = `Hiển thị ${currentFilteredTodos.length} / ${allTodos.length} công việc${shortSuffix}`;
   }
 }
 
@@ -4964,15 +4992,111 @@ function getJobProgressRatio(t) {
   return exp > 0 ? (gen / exp) : 0;
 }
 
+function getFilteredShorts() {
+  const searchEl = document.getElementById('searchBox');
+  const kw = ((searchEl && searchEl.value) || '').trim().toLowerCase();
+  const list = allShorts.filter(s => {
+    if (currentStatusFilter === 'ready_to_assemble') return false;
+    if (currentStatusFilter === 'assembled' && s.status !== 'ready') return false;
+    if (currentStatusFilter === 'todo' && ['ready', 'failed', 'cancelled'].includes(s.status)) return false;
+    if (!kw) return true;
+    return (s.title || '').toLowerCase().includes(kw) || (s.id || '').toLowerCase().includes(kw);
+  });
+  return list.slice().sort((a, b) => {
+    const ar = a.status === 'ready' ? 1 : 0;
+    const br = b.status === 'ready' ? 1 : 0;
+    if (ar !== br) return br - ar;
+    return Number(b.created_at || 0) - Number(a.created_at || 0);
+  });
+}
+
+function renderShortSummaryCard(rawShort) {
+  const s = shortDetailsCache[rawShort.id] || rawShort;
+  const sid = s.id;
+  const ready = s.status === 'ready' && !!s.video_asset_id;
+  const cardClass = ready ? 'is-assembled' : (s.status === 'failed' ? 'is-todo' : 'is-ready');
+  const modeLabel = s.mode === 'upload' ? 'Upload MP4' : (SHORT_MODE_NAMES[s.mode] || s.mode || 'Short');
+  return `
+  <article class="todo-summary-card ${cardClass}" id="short-card-${esc(sid)}" data-short-id="${esc(sid)}" role="button" tabindex="0" data-kb-click="1" aria-label="Mở Short Video: ${esc(s.title)}" onclick="openShortDetailPage('${esc(sid)}')">
+    <div>
+      <div class="summary-card-head">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0">
+          <span class="pill pill-accent">📱 SHORT 9:16</span>
+          <span class="pill pill-ghost mono" title="Mã Short">${esc(sid)}</span>
+          <span class="pill pill-ghost mono">${esc((s.lang || 'vi').toUpperCase())}</span>
+        </div>
+        <span class="pill ${SHORT_STATUS_PILL[s.status] || 'pill-ghost'}">${esc(s.status_label || s.status)}</span>
+      </div>
+      <h2 class="todo-summary-title" title="${esc(s.title)}">${esc(s.title)}</h2>
+    </div>
+
+    <div class="summary-badges-row">
+      <span class="pill pill-ghost">🎬 ${esc(modeLabel)}</span>
+      <span class="pill ${s.video_asset_id ? 'pill-ok' : 'pill-ghost'}">${s.video_asset_id ? '✅ Đã có MP4 9:16' : '⏳ Chưa có MP4'}</span>
+      ${Number(s.duration_s || 0) > 0 ? `<span class="pill pill-ghost mono">⏱ ${Number(s.duration_s).toFixed(1)}s</span>` : ''}
+      ${Number(s.word_count || 0) > 0 ? `<span class="pill pill-ghost mono">📝 ${Number(s.word_count)} từ</span>` : ''}
+      ${s.srt_asset_id ? `<span class="pill pill-ghost mono">.SRT</span>` : ''}
+    </div>
+
+    ${renderTodoYoutubeStatusBanner(s, 'short')}
+
+    <div class="summary-card-foot" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        ${s.video_asset_id ? `<button type="button" class="btn-sm" onclick="event.stopPropagation();openShortPreviewModal('${esc(sid)}')">▶ Xem MP4</button>` : ''}
+        ${renderYoutubeActionButton(s, 'short', 'btn-primary btn-sm')}
+      </div>
+      <button type="button" class="btn-sm" onclick="event.stopPropagation();openShortDetailPage('${esc(sid)}')">
+        Chi tiết →
+      </button>
+    </div>
+  </article>`;
+}
+
+function rerenderSingleShortCard(shortId) {
+  const s = shortDetailsCache[shortId] || allShorts.find(x => x.id === shortId);
+  const existing = document.getElementById('short-card-' + shortId);
+  if (!s || !existing) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderShortSummaryCard(s).trim();
+  if (tmp.firstElementChild) existing.replaceWith(tmp.firstElementChild);
+}
+
+function openShortPreviewModal(shortId) {
+  const s = shortDetailsCache[shortId] || allShorts.find(x => x.id === shortId);
+  if (!s || !s.video_asset_id) {
+    showToast('Short này chưa có video MP4.', 'warn', 2800);
+    return;
+  }
+  openWebModal({
+    title: `📱 Short Video 9:16 — ${s.title}`,
+    subtitle: `${s.id} · ${Number(s.duration_s || 0).toFixed(1)}s · ${(s.lang || 'vi').toUpperCase()}`,
+    bodyHtml: `
+      <div style="display:flex;justify-content:center;background:#0B1120;border-radius:12px;padding:12px">
+        <video controls autoplay playsinline src="/api/v1/shorts/${esc(shortId)}/video" style="max-height:72vh;width:auto;max-width:100%;aspect-ratio:9/16;border-radius:10px;background:#000"></video>
+      </div>
+    `,
+    footHtml: `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        ${renderYoutubeActionButton(s, 'short', 'btn-primary btn-sm')}
+        <button type="button" class="btn-sm" onclick="closeWebModal();openShortDetailPage('${esc(shortId)}')">Mở trang chi tiết Short →</button>
+      </div>
+      <span style="font-size:12px;color:var(--fg-muted)">9:16 Vertical Short</span>
+    `
+  });
+}
+
 function renderFilteredTodos() {
   const searchEl = document.getElementById('searchBox');
   const kw = ((searchEl && searchEl.value) || '').trim().toLowerCase();
-  const filtered = allTodos.filter(t => {
-    const eff = getEffectiveStatus(t);
-    if (currentStatusFilter && eff !== currentStatusFilter) return false;
-    if (!kw) return true;
-    return (t.title || '').toLowerCase().includes(kw) || (t.item_id || '').toLowerCase().includes(kw);
-  });
+  const filtered = currentStatusFilter === 'shorts'
+    ? []
+    : allTodos.filter(t => {
+        const eff = getEffectiveStatus(t);
+        if (currentStatusFilter && eff !== currentStatusFilter) return false;
+        if (!kw) return true;
+        return (t.title || '').toLowerCase().includes(kw) || (t.item_id || '').toLowerCase().includes(kw);
+      });
+  const filteredShorts = getFilteredShorts();
 
   if (currentSortOrder === 'progress_desc') {
     filtered.sort((a, b) => getJobProgressRatio(b) - getJobProgressRatio(a));
@@ -4993,24 +5117,56 @@ function renderFilteredTodos() {
     todoInfiniteObserver.disconnect();
     todoInfiniteObserver = null;
   }
-  if (!filtered.length) {
+  if (!filtered.length && !filteredShorts.length) {
     updateSummaryCounterText();
+    const emptyMsg = currentStatusFilter === 'shorts'
+      ? `Chưa có sản phẩm Short video nào${kw ? ` khớp "${kw}"` : ''}. Bạn có thể tạo hoặc upload MP4 mới trong Short Studio.`
+      : `Không có công việc hoặc sản phẩm nào khớp bộ lọc đang chọn (Hệ thống có ${allTodos.length} bài dài và ${allShorts.length} Short).`;
     container.innerHTML = `
       <div class="panel" style="text-align:center;padding:40px 20px;color:var(--fg-muted)">
         <div style="font-size:14px;font-weight:600;color:var(--fg);margin-bottom:6px">
-          Không có công việc nào khớp bộ lọc đang chọn (Hệ thống đang có tổng cộng ${allTodos.length} công việc TODO).
+          ${esc(emptyMsg)}
         </div>
-        <div style="margin-top:12px">
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
           <button type="button" class="btn-primary btn-sm" onclick="document.getElementById('searchBox').value='';setStatusFilter('')">
-            Xem tất cả ${allTodos.length} công việc TODO
+            Xem tất cả (${allTodos.length + allShorts.length})
           </button>
+          ${currentStatusFilter === 'shorts' ? `<button type="button" class="btn-sm" onclick="goShortStudioPage()">+ Tạo / Upload Short Video</button>` : ''}
         </div>
       </div>`;
     return;
   }
 
   container.innerHTML = '';
-  appendNextTodoCardsBatch(TODO_INFINITE_BATCH_SIZE);
+  if (filteredShorts.length) {
+    container.insertAdjacentHTML('beforeend', `
+      <section id="shortSummarySection" style="margin-bottom:18px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:2px 0 10px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <h3 style="margin:0;font-size:15px;font-weight:700">📱 Sản phẩm Short Video (${filteredShorts.length})</h3>
+            <span class="pill pill-ghost" style="font-size:11px">Đăng ngay hoặc hẹn giờ YouTube trực tiếp từ đây</span>
+          </div>
+          <button type="button" class="btn-xs" onclick="goShortStudioPage()">+ Short Studio</button>
+        </div>
+        <div id="shortSummaryGrid" class="todo-summary-grid">
+          ${filteredShorts.map(s => renderShortSummaryCard(s)).join('')}
+        </div>
+      </section>
+    `);
+  }
+
+  if (filtered.length) {
+    if (filteredShorts.length) {
+      container.insertAdjacentHTML('beforeend', `
+        <div style="display:flex;align-items:center;gap:8px;margin:6px 0 10px">
+          <h3 style="margin:0;font-size:15px;font-weight:700">🎬 Sản phẩm Video Dài 16:9 (${filtered.length})</h3>
+        </div>
+      `);
+    }
+    appendNextTodoCardsBatch(TODO_INFINITE_BATCH_SIZE);
+  } else {
+    updateSummaryCounterText();
+  }
 }
 
 function rerenderSingleCard(itemId) {
@@ -5129,6 +5285,8 @@ function renderTodoSummaryCard(summaryItem) {
       <span class="pill ${checkedShots > 0 ? 'pill-ok' : 'pill-ghost'}">📋 ${checkedShots}/${totalShots} Checklist đã tick</span>
     </div>
 
+    ${item.youtube_upload ? renderTodoYoutubeStatusBanner(item, 'todo') : ''}
+
     <div class="summary-card-foot">
       <div class="summary-flow-chips" aria-label="Mở nhanh từng tab công việc">
         <button type="button" class="btn-xs flow-chip" onclick="event.stopPropagation();openTodoDetailPage('${esc(itemId)}', 'overview')" title="Tab 1: Tổng quan & Kịch bản">
@@ -5150,9 +5308,12 @@ function renderTodoSummaryCard(summaryItem) {
           📤 6. Tải lên & Audio
         </button>
       </div>
-      <button type="button" class="btn-primary summary-cta-btn" onclick="event.stopPropagation();openTodoDetailPage('${esc(itemId)}', 'overview')">
-        👉 Mở trang chi tiết công việc (6 Tab Lazy Load) →
-      </button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${eff === 'assembled' && item.final_video_url ? renderYoutubeActionButton(item, 'todo', 'btn-ok btn-sm') : ''}
+        <button type="button" class="btn-primary summary-cta-btn" style="flex:1" onclick="event.stopPropagation();openTodoDetailPage('${esc(itemId)}', 'overview')">
+          👉 Mở trang chi tiết công việc (6 Tab Lazy Load) →
+        </button>
+      </div>
     </div>
   </article>`;
 }
@@ -5370,7 +5531,7 @@ function renderDetailTabPaneHtml(summaryItem, requestedTab = '') {
               <span class="pill pill-ghost">Upload & BGM</span>
             </div>
             <div style="font-size:11.5px;color:var(--fg-muted)">
-              Tải video vào Shot, tải ảnh Keyframe/Character Sheet và tạo lại Audio EN chậm rõ kèm nhạc nền.
+              Tải video vào Shot, tải ảnh Keyframe/Character Sheet và tạo lại Audio EN theo nhịp mới kèm nhạc nền.
             </div>
           </div>
           <button type="button" class="btn-xs" style="width:100%">
@@ -6643,13 +6804,13 @@ function renderFeedbackAndRegenSection(item, defaultOpen = false) {
         `).join('') : `<div style="font-size:12px;color:var(--fg-muted)">Chưa có góp ý nào cho bản thu này.</div>`}
       </div>
       <div>
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">Tạo lại Audio EN (Đọc chậm rõ & trộn nhạc nền ấm)</div>
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px">Tạo lại Audio EN (Tinh chỉnh tốc độ đọc & trộn nhạc nền)</div>
         <div class="regen-controls-row">
           <label>Hệ số tốc độ:
-            <input type="number" id="slow-${esc(itemId)}" value="0.96" min="0.75" max="1.20" step="0.01" style="width:70px"/>
+            <input type="number" id="slow-${esc(itemId)}" value="1.00" min="0.75" max="1.30" step="0.01" style="width:70px"/>
           </label>
           <label>Nghỉ thêm (giây):
-            <input type="number" id="pause-${esc(itemId)}" value="0.12" min="0.0" max="0.8" step="0.02" style="width:70px"/>
+            <input type="number" id="pause-${esc(itemId)}" value="0.05" min="0.0" max="0.8" step="0.01" style="width:70px"/>
           </label>
           <button type="button" class="btn-sm" onclick="regenerateAudio('${esc(itemId)}', this)">🎚 Tạo Lại Audio</button>
         </div>
@@ -6660,8 +6821,8 @@ function renderFeedbackAndRegenSection(item, defaultOpen = false) {
 }
 
 async function regenerateAudio(itemId, btnEl = null) {
-  const slow = parseFloat(document.getElementById(`slow-${itemId}`).value || '0.96');
-  const pause = parseFloat(document.getElementById(`pause-${itemId}`).value || '0.12');
+  const slow = parseFloat(document.getElementById(`slow-${itemId}`).value || '1.00');
+  const pause = parseFloat(document.getElementById(`pause-${itemId}`).value || '0.05');
   const st = document.getElementById(`regenStatus-${itemId}`);
   if (st) st.textContent = '⏳ Đang tổng hợp lại giọng đọc và cập nhật thời lượng từng shot...';
   if (btnEl) btnEl.disabled = true;
@@ -7193,6 +7354,7 @@ function setActiveNav(page) {
 }
 
 function hideShortsPage() {
+  activeDetailShortId = '';
   const el = document.getElementById('pageShortStudio');
   if (el) {
     cleanupVideosInContainer(el);
@@ -7219,6 +7381,7 @@ function goTodoJobsPage() {
   const detailEl = document.getElementById('pageTodoDetail');
   if (detailEl) { cleanupVideosInContainer(detailEl); detailEl.classList.add('hidden'); }
   document.getElementById('pageTodoList')?.classList.remove('hidden');
+  updateOverviewStats();
   renderJobDirectory();
   renderFilteredTodos();
 }
@@ -7265,6 +7428,10 @@ async function loadShorts(opts = {}) {
     allShorts = d.shorts || [];
     shortsLoaded = true;
     allShorts.forEach(s => { shortDetailsCache[s.id] = s; });
+    updateOverviewStats();
+    if (!document.getElementById('pageTodoList')?.classList.contains('hidden')) {
+      renderFilteredTodos();
+    }
   } catch (err) {
     console.error('[loadShorts]', err);
     showToast(err.message || 'Không thể tải danh sách Short', 'error');
@@ -7631,11 +7798,16 @@ function renderShortStudioShell() {
                 </div>
                 <h4 class="short-card-title" title="${esc(s.title)}">${esc(s.title)}</h4>
                 <div class="short-card-meta">
-                  <span class="pill pill-accent">${esc(SHORT_MODE_NAMES[s.mode] || s.mode)}</span>
+                  <span class="pill pill-accent">${esc(SHORT_MODE_NAMES[s.mode] || s.mode || 'Upload MP4')}</span>
                   ${s.lang === 'en' ? '<span class="pill pill-ghost mono">EN</span>' : ''}
                   ${s.duration_s > 0 ? `<span class="mono">${Number(s.duration_s).toFixed(1)}s</span>` : ''}
                   <span class="mono">${Number(s.word_count || 0)} từ</span>
-                  ${s.video_asset_id ? `<span class="pill pill-ok">MP4 9:16</span><button type="button" class="btn-xs" style="margin-left:auto" onclick="previewShortOnPhone('${esc(s.id)}', event)">▶ Xem</button>` : ''}
+                  ${s.video_asset_id ? `<span class="pill pill-ok">MP4 9:16</span>` : ''}
+                </div>
+                ${s.youtube_upload ? `<div style="margin-top:6px">${renderTodoYoutubeStatusBanner(s, 'short')}</div>` : ''}
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+                  ${s.video_asset_id ? `<button type="button" class="btn-xs" onclick="previewShortOnPhone('${esc(s.id)}', event)">▶ Xem</button>` : ''}
+                  ${renderYoutubeActionButton(s, 'short', 'btn-primary btn-xs')}
                 </div>
               </article>`).join('')}
           </div>
@@ -7765,6 +7937,7 @@ async function uploadExistingShortVideo(shortId, inputEl) {
 
 async function openShortDetailPage(shortId, initialTab = '') {
   setActiveNav('shorts');
+  activeDetailShortId = shortId;
   if ((window.location.hash || '') !== `#/shorts/${encodeURIComponent(shortId)}`) {
     suppressHashSync = true;
     window.location.hash = `#/shorts/${encodeURIComponent(shortId)}`;
@@ -7888,11 +8061,13 @@ function renderShortDetailPage(short) {
         </div>
         <div class="short-publish-actions">
           <a class="btn btn-primary btn-sm" href="/api/v1/shorts/${esc(id)}/video?download=true" download>Tải MP4</a>
+          ${renderYoutubeActionButton(short, 'short', 'btn-primary btn-sm')}
           <button type="button" class="btn-ok btn-sm" onclick="openShortPublishModal('${esc(id)}')">Gói đăng bài</button>
           ${short.ass_asset_id ? `<a class="btn btn-sm" href="/api/v1/shorts/${esc(id)}/subtitles.ass" download>.ASS</a>` : ''}
           ${short.srt_asset_id ? `<a class="btn btn-sm" href="/api/v1/shorts/${esc(id)}/subtitles.srt" download>.SRT</a>` : ''}
         </div>
       </div>
+      ${renderTodoYoutubeStatusBanner(short, 'short')}
     </section>` : '';
 
   // G.13 — Agent Job panel: chỉ cho short EN (job mode cho agent video ngoài)
@@ -8304,21 +8479,28 @@ function renderYoutubeDashboard() {
     </tr>
   `).join('');
 
-  const uploadRows = (ytStateCache.uploads || []).map(u => `
+  const uploadRows = (ytStateCache.uploads || []).map(u => {
+    const isShort = u.target_type === 'short';
+    const detailHref = isShort ? `#/shorts/${esc(u.item_id)}` : `#/todos/${esc(u.item_id)}?tab=final_video`;
+    return `
     <tr>
-      <td class="mono" style="font-size:12px"><a href="#/todos/${esc(u.item_id)}?tab=final_video" style="color:var(--accent)">${esc(u.item_id)}</a></td>
+      <td class="mono" style="font-size:12px">
+        <a href="${detailHref}" style="color:var(--accent)">${esc(u.item_id)}</a>
+        ${isShort ? '<span class="pill pill-accent" style="margin-left:4px;font-size:10px">Short 9:16</span>' : ''}
+      </td>
       <td>${esc(u.title || '')}</td>
       <td><span class="pill ${u.upload_status === 'uploaded' ? 'pill-ok' : (u.upload_status === 'failed' || u.upload_status === 'canceled' ? 'pill-warn' : 'pill-accent')}">${esc(u.upload_status)} (${Number(u.progress_pct || 0).toFixed(0)}%)</span></td>
       <td style="font-size:12px">
         ${u.youtube_url ? `<a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" style="color:var(--accent)">Mở YouTube ↗</a>` : ''}
+        ${u.publish_at ? `<div style="font-size:11px;color:var(--fg-muted)">🕒 Hẹn: ${esc(u.publish_at)}</div>` : ''}
         ${u.error_message ? `<div style="color:var(--danger);font-size:11px">${esc(u.error_message)}</div>` : ''}
       </td>
       <td>
         ${u.upload_status === 'failed' ? `<button type="button" class="btn-sm" onclick="retryYoutubeUpload('${esc(u.upload_id)}')">🔁 Thử lại</button>` : ''}
         ${['queued','uploading','processing'].includes(u.upload_status) ? `<button type="button" class="btn-warn btn-sm" onclick="cancelYoutubeUpload('${esc(u.upload_id)}')">✖ Hủy</button>` : ''}
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 
   page.innerHTML = `
     <section class="panel" style="margin-bottom:14px">
@@ -8384,33 +8566,132 @@ async function cancelYoutubeUpload(uploadId) {
   }
 }
 
-function renderTodoYoutubeStatusBanner(item) {
+async function refreshSingleShort(shortId) {
+  try {
+    const r = await apiFetch(`/api/v1/shorts/${encodeURIComponent(shortId)}`, { timeoutMs: 20000 });
+    if (!r.ok) return;
+    const fresh = await r.json();
+    shortDetailsCache[shortId] = fresh;
+    const idx = allShorts.findIndex(x => x.id === shortId);
+    if (idx >= 0) allShorts[idx] = fresh;
+    else allShorts.unshift(fresh);
+    shortsLoaded = true;
+    updateOverviewStats();
+    rerenderSingleShortCard(shortId);
+    const shortPage = document.getElementById('pageShortStudio');
+    if (shortPage && !shortPage.classList.contains('hidden')) {
+      if (activeDetailShortId === shortId) {
+        renderShortDetailPage(fresh);
+      } else if (!activeDetailShortId) {
+        renderShortStudioShell();
+      }
+    }
+  } catch (err) {
+    console.warn('[refreshSingleShort]', err);
+  }
+}
+
+async function refreshSingleTarget(targetId, targetType = 'todo') {
+  if (targetType === 'short') {
+    await refreshSingleShort(targetId);
+  } else {
+    await refreshSingleItem(targetId, false);
+  }
+}
+
+function renderYoutubeActionButton(target, targetType = 'todo', extraClass = 'btn-primary btn-sm') {
+  if (!target) return '';
+  const id = targetType === 'short' ? target.id : target.item_id;
+  const u = target.youtube_upload;
+  if (u && u.upload_status === 'uploaded' && u.youtube_url) {
+    return `<a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" class="btn-ok btn-sm" style="text-decoration:none" onclick="event.stopPropagation()">▶ Xem trên YouTube ↗</a>`;
+  }
+  if (u && ['queued', 'uploading', 'processing'].includes(u.upload_status)) {
+    return `<button type="button" class="${esc(extraClass)}" disabled onclick="event.stopPropagation()">⏳ Đang đăng YT (${Number(u.progress_pct || 0).toFixed(0)}%)</button>`;
+  }
+  if (targetType === 'short') {
+    if (target.status !== 'ready' || !target.video_asset_id) {
+      return `<button type="button" class="${esc(extraClass)}" disabled title="Short cần có MP4 9:16 sẵn sàng trước khi đăng YouTube" onclick="event.stopPropagation()">⏳ Chờ MP4 9:16</button>`;
+    }
+    const label = (u && u.upload_status === 'failed') ? '🔁 Đăng lại YouTube' : '📺 Đăng lên YouTube';
+    return `<button type="button" class="${esc(extraClass)}" onclick="event.stopPropagation();openYoutubePublishModal('${esc(id)}', 'short')">${label}</button>`;
+  }
+  const hasThumb = (target.uploaded_images || []).some(img => img.kind === 'thumbnail');
+  const label = (u && u.upload_status === 'failed') ? '🔁 Đăng lại YouTube' : '📺 Đăng lên YouTube';
+  return `<button type="button" class="${esc(extraClass)}" onclick="event.stopPropagation();openYoutubePublishModal('${esc(id)}', 'todo')" ${!hasThumb ? 'disabled title="Cần có 1 ảnh thumbnail trước khi đăng YouTube"' : ''}>${label}</button>`;
+}
+
+function formatYoutubeScheduleNote(publishAt) {
+  if (!publishAt) return '';
+  try {
+    const dt = new Date(publishAt);
+    if (!Number.isNaN(dt.getTime())) {
+      return ` · 🕒 Hẹn công chiếu: ${dt.toLocaleString('vi-VN')}`;
+    }
+  } catch (_) {}
+  return ` · 🕒 Hẹn: ${publishAt}`;
+}
+
+function renderTodoYoutubeStatusBanner(item, targetType = 'todo') {
   const u = item && item.youtube_upload;
   if (!u) return '';
+  const targetId = targetType === 'short' ? (item.id || item.item_id) : (item.item_id || item.id);
+  const schedNote = formatYoutubeScheduleNote(u.publish_at);
   if (u.upload_status === 'uploaded' && u.youtube_url) {
-    return `<div style="margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid rgba(46,204,113,.35);background:rgba(46,204,113,.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-      <span>✅ <strong>Đã đăng YouTube</strong> (${esc(u.privacy_status)}) ${u.error_message ? `<span style="color:var(--warn);font-size:12px">· ${esc(u.error_message)}</span>` : ''}</span>
-      <a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" class="btn-sm btn-primary" style="text-decoration:none">▶ Xem trên YouTube ↗</a>
+    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(46,204,113,.35);background:rgba(46,204,113,.08);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px">
+      <span>✅ <strong>Đã đăng YouTube</strong> (${esc(u.privacy_status)})${esc(schedNote)} ${u.error_message ? `<span style="color:var(--warn)">· ${esc(u.error_message)}</span>` : ''}</span>
+      <a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" class="btn-xs btn-primary" style="text-decoration:none" onclick="event.stopPropagation()">▶ Xem trên YouTube ↗</a>
     </div>`;
   }
   if (['queued', 'uploading', 'processing'].includes(u.upload_status)) {
-    return `<div id="ytUploadProgress-${esc(item.item_id)}" style="margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid rgba(52,152,219,.35);background:rgba(52,152,219,.08)">
-      <div style="font-size:13px;font-weight:600">⏳ Đang đăng lên YouTube (${esc(u.upload_status)}): <span class="mono">${Number(u.progress_pct || 0).toFixed(1)}%</span></div>
+    return `<div id="ytUploadProgress-${esc(targetType)}-${esc(targetId)}" style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(52,152,219,.35);background:rgba(52,152,219,.08)">
+      <div style="font-size:12px;font-weight:600">⏳ Đang đăng lên YouTube (${esc(u.upload_status)}): <span class="mono">${Number(u.progress_pct || 0).toFixed(1)}%</span></div>
       <div style="height:6px;border-radius:4px;background:rgba(255,255,255,.1);margin-top:6px;overflow:hidden"><div style="height:100%;width:${Math.min(100, Number(u.progress_pct || 0))}%;background:var(--accent)"></div></div>
     </div>`;
   }
   if (u.upload_status === 'failed') {
-    return `<div style="margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid rgba(231,76,60,.35);background:rgba(231,76,60,.08);display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(231,76,60,.35);background:rgba(231,76,60,.08);display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
       <span style="font-size:12px">❌ Đăng YouTube thất bại: ${esc(u.error_message || '')}</span>
-      <button type="button" class="btn-sm" onclick="retryYoutubeUpload('${esc(u.id || u.upload_id)}').then(() => refreshSingleItem('${esc(item.item_id)}', false))">🔁 Thử lại</button>
+      <button type="button" class="btn-xs" onclick="event.stopPropagation();retryYoutubeUpload('${esc(u.id || u.upload_id)}').then(() => refreshSingleTarget('${esc(targetId)}', '${esc(targetType)}'))">🔁 Thử lại</button>
     </div>`;
   }
   return '';
 }
 
-function openYoutubePublishModal(itemId) {
-  const item = detailsCache[itemId] || allTodos.find(t => t.item_id === itemId);
-  if (!item) return;
+function buildShortPublishPrefill(s) {
+  const sc = s.script || {};
+  const ytTags = Array.isArray(sc.hashtags?.youtube) ? sc.hashtags.youtube : [];
+  const normHashtags = ytTags.map(t => (String(t).startsWith('#') ? String(t) : `#${t}`));
+  if (!normHashtags.some(h => h.toLowerCase() === '#shorts')) {
+    normHashtags.unshift('#Shorts');
+  }
+  const descParts = [
+    (sc.description || '').trim(),
+    sc.source_note ? `Nguồn: ${sc.source_note}` : '',
+    normHashtags.join(' '),
+  ].filter(Boolean);
+  const tagList = ['Shorts', ...normHashtags.map(h => h.replace(/^#/, '')).filter(Boolean)];
+  const uniqueTags = Array.from(new Set(tagList));
+  return {
+    title: (s.title || '').slice(0, 100),
+    description: descParts.join('\n\n'),
+    tags: uniqueTags.join(', '),
+    hasSrt: !!s.srt_asset_id,
+  };
+}
+
+function openYoutubePublishModal(targetId, targetType = 'todo') {
+  const target = targetType === 'short'
+    ? (shortDetailsCache[targetId] || allShorts.find(s => s.id === targetId))
+    : (detailsCache[targetId] || allTodos.find(t => t.item_id === targetId));
+  if (!target) {
+    showToast('Không tìm thấy sản phẩm để đăng YouTube.', 'error', 3000);
+    return;
+  }
+  const isShort = targetType === 'short';
+  const prefill = isShort
+    ? buildShortPublishPrefill(target)
+    : { title: (target.title || '').slice(0, 100), description: '', tags: '', hasSrt: true };
   const old = document.getElementById('ytModalOverlay');
   if (old) old.remove();
   const wrap = document.createElement('div');
@@ -8419,13 +8700,13 @@ function openYoutubePublishModal(itemId) {
   wrap.innerHTML = `
     <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:540px;width:100%;padding:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h3 style="margin:0;font-size:16px">📺 Đăng Video lên YouTube</h3>
+        <h3 style="margin:0;font-size:16px">${isShort ? '📱 Đăng Short 9:16 lên YouTube' : '📺 Đăng Video lên YouTube'}</h3>
         <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">✖</button>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
-        <label>Tiêu đề (tối đa 100 ký tự)<input id="ytPubTitle" type="text" maxlength="100" value="${esc(item.title || '')}" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
-        <label>Mô tả<textarea id="ytPubDesc" rows="3" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></textarea></label>
-        <label>Tags (cách nhau dấu phẩy)<input id="ytPubTags" type="text" placeholder="finance, explainer, history" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
+        <label>Tiêu đề (tối đa 100 ký tự)<input id="ytPubTitle" type="text" maxlength="100" value="${esc(prefill.title)}" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
+        <label>Mô tả<textarea id="ytPubDesc" rows="3" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)">${esc(prefill.description)}</textarea></label>
+        <label>Tags (cách nhau dấu phẩy)<input id="ytPubTags" type="text" value="${esc(prefill.tags)}" placeholder="Shorts, finance, explainer" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)"></label>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
           <label style="flex:1">Chế độ hiển thị
             <select id="ytPubPrivacy" style="width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg)">
@@ -8439,19 +8720,23 @@ function openYoutubePublishModal(itemId) {
           </label>
         </div>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input id="ytPubSrt" type="checkbox" checked> Đính kèm phụ đề tiếng Anh (.srt) nếu có
+          <input id="ytPubSrt" type="checkbox" ${prefill.hasSrt ? 'checked' : 'disabled'}> ${isShort && !prefill.hasSrt ? 'Short này chưa có file phụ đề .srt' : 'Đính kèm phụ đề (.srt) nếu có'}
         </label>
-        <div style="font-size:11px;color:var(--fg-muted)">💡 Lưu ý: Hệ thống tự đính kèm Video thành phẩm + Ảnh Thumbnail đã duyệt. Nếu OAuth app chưa verify với Google, video mới sẽ bị giữ ở chế độ Private.</div>
+        <div style="font-size:11px;color:var(--fg-muted)">
+          ${isShort
+            ? `💡 Video Short 9:16 (${Number(target.duration_s || 0).toFixed(1)}s) sẽ được upload trực tiếp lên YouTube Shorts. Để trống "Hẹn giờ" để đăng ngay, hoặc chọn giờ (tối thiểu +10 phút).`
+            : `💡 Lưu ý: Hệ thống tự đính kèm Video thành phẩm + Ảnh Thumbnail đã duyệt. Nếu OAuth app chưa verify với Google, video mới sẽ bị giữ ở chế độ Private.`}
+        </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">
           <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">Hủy</button>
-          <button type="button" class="btn-primary btn-sm" onclick="submitYoutubePublish('${esc(itemId)}', this)">🚀 Bắt đầu Đăng</button>
+          <button type="button" class="btn-primary btn-sm" onclick="submitYoutubePublish('${esc(targetId)}', this, '${esc(targetType)}')">🚀 Bắt đầu Đăng</button>
         </div>
       </div>
     </div>`;
   document.body.appendChild(wrap);
 }
 
-async function submitYoutubePublish(itemId, btnEl) {
+async function submitYoutubePublish(targetId, btnEl, targetType = 'todo') {
   const title = (document.getElementById('ytPubTitle')?.value || '').trim();
   if (!title) { showToast('⚠️ Vui lòng nhập tiêu đề video.', 'warn', 3000); return; }
   const description = document.getElementById('ytPubDesc')?.value || '';
@@ -8462,9 +8747,13 @@ async function submitYoutubePublish(itemId, btnEl) {
   const publishAt = pubAtRaw ? new Date(pubAtRaw).toISOString() : null;
   const uploadCaptions = !!document.getElementById('ytPubSrt')?.checked;
 
+  const endpoint = targetType === 'short'
+    ? `/api/v1/shorts/${encodeURIComponent(targetId)}/youtube/publish`
+    : `/api/v1/todos/${encodeURIComponent(targetId)}/youtube/publish`;
+
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Đang gửi...'; }
   try {
-    const r = await apiFetch(`/api/v1/todos/${itemId}/youtube/publish`, {
+    const r = await apiFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -8477,17 +8766,17 @@ async function submitYoutubePublish(itemId, btnEl) {
     if (d.already_published) {
       showToast(`✅ Video đã được đăng trước đó: ${d.youtube_url}`, 'ok', 4500);
     } else {
-      showToast('🚀 Đang upload video lên YouTube...', 'info', 4000);
-      pollYoutubeUploadProgress(itemId, d.upload_id);
+      showToast(publishAt ? '🕒 Đã lên lịch & đang upload video lên YouTube...' : '🚀 Đang upload video lên YouTube...', 'info', 4000);
+      pollYoutubeUploadProgress(targetId, d.upload_id, targetType);
     }
-    await refreshSingleItem(itemId, false);
+    await refreshSingleTarget(targetId, targetType);
   } catch (err) {
     showToast(`❌ Lỗi đăng YouTube: ${err.message}`, 'err', 5500);
     if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🚀 Bắt đầu Đăng'; }
   }
 }
 
-function pollYoutubeUploadProgress(itemId, uploadId) {
+function pollYoutubeUploadProgress(targetId, uploadId, targetType = 'todo') {
   if (ytPollTimers[uploadId]) clearInterval(ytPollTimers[uploadId]);
   ytPollTimers[uploadId] = setInterval(async () => {
     try {
@@ -8502,9 +8791,10 @@ function pollYoutubeUploadProgress(itemId, uploadId) {
         } else if (u.upload_status === 'failed') {
           showToast(`❌ Upload YouTube lỗi: ${u.error_message || ''}`, 'err', 6000);
         }
-        await refreshSingleItem(itemId, false);
+        await refreshSingleTarget(targetId, targetType);
       } else {
-        const box = document.getElementById(`ytUploadProgress-${itemId}`);
+        const box = document.getElementById(`ytUploadProgress-${targetType}-${targetId}`)
+          || document.getElementById(`ytUploadProgress-${targetId}`);
         if (box) {
           box.querySelector('.mono').textContent = `${Number(u.progress_pct || 0).toFixed(1)}%`;
         }

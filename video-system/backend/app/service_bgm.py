@@ -368,3 +368,22 @@ class BgmService:
         self._remove_from_loudness_json(bdir, row["filename"])
         self.store.execute("DELETE FROM bgm_tracks WHERE id=?", (track_id,))
         return {"deleted": True, "track_id": track_id, "filename": row["filename"]}
+
+    def delete_disk_track(self, filename: str) -> dict[str, Any]:
+        """Delete a disk BGM file (unregistered or registered) safely by exact basename."""
+        clean_name = Path(filename).name
+        if not clean_name or clean_name != filename or Path(clean_name).suffix.lower() != ".mp3":
+            raise ValueError("filename không hợp lệ (chỉ chấp nhận tên file .mp3 nằm trực tiếp trong thư mục BGM).")
+        bdir = self.bgm_dir().resolve()
+        p = (bdir / clean_name).resolve()
+        if p.parent != bdir:
+            raise ValueError("Đường dẫn file BGM không hợp lệ.")
+        row = self.store.query_one("SELECT id FROM bgm_tracks WHERE filename=?", (clean_name,))
+        if not p.exists() and not row:
+            raise FileNotFoundError(clean_name)
+        if p.exists():
+            p.unlink()
+        self._remove_from_loudness_json(bdir, clean_name)
+        if row:
+            self.store.execute("DELETE FROM bgm_tracks WHERE id=?", (row["id"],))
+        return {"deleted": True, "filename": clean_name, "track_id": row["id"] if row else None}

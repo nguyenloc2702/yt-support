@@ -168,6 +168,15 @@ class ShortService:
             short["script"] = {}
         short.pop("script_json", None)
         short["status_label"] = domain.SHORT_LABELS_VI.get(row["status"], row["status"])
+        yt_row = self.store.query_one(
+            "SELECT id, id AS upload_id, COALESCE(target_type,'short') AS target_type, "
+            "youtube_video_id, youtube_url, title, privacy_status, publish_at, "
+            "upload_status, progress_pct, thumbnail_synced, captions_synced, error_message, updated_at "
+            "FROM youtube_uploads WHERE item_id=? AND COALESCE(target_type,'todo')='short' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (row["id"],),
+        )
+        short["youtube_upload"] = dict(yt_row) if yt_row else None
         if with_scenes:
             short["scenes"] = self.store.query(
                 "SELECT * FROM short_scenes WHERE short_id=? ORDER BY seq_num", (row["id"],))

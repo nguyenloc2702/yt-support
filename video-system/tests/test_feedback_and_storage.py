@@ -353,17 +353,18 @@ def test_agent_feedback_full_lifecycle(client, ingest, read_key, fast_offline_tt
 
 
 def test_audio_config_spec():
-    """Verifies audio_config.yaml tuning: slower speech, longer pauses, and louder BGM."""
-    audio_cfg_path = Path(r"C:\app\work\video-system\config\audio_config.yaml")
+    """Verifies audio_config.yaml tuning: 165-180 WPM target pacing, crisp pauses, and BGM mix."""
+    audio_cfg_path = Path(__file__).resolve().parents[1] / "config" / "audio_config.yaml"
     assert audio_cfg_path.exists()
     cfg = yaml.safe_load(audio_cfg_path.read_text(encoding="utf-8"))
 
     assert cfg.get("version") == 2
     tts = cfg["tts_en"]
-    assert tts["rate"] == "-6%", "Speech rate must be tuned to -6% (slower)"
-    assert tts["words_per_sec_estimate"] == 2.45
-    assert tts["inter_shot_pause_sec"] == 0.32, "Inter-shot pause must be 0.32s"
-    assert tts["intra_sentence_pause_sec"] == 0.26, "Intra-sentence pause must be 0.26s"
+    assert tts["rate"] == "+8%", "Speech rate must be tuned to +8% (165-180 WPM)"
+    assert tts["atempo"] == 1.08
+    assert tts["words_per_sec_estimate"] == 2.85
+    assert tts["inter_shot_pause_sec"] == 0.25, "Inter-shot pause must be 0.25s"
+    assert tts["intra_sentence_pause_sec"] == 0.20, "Intra-sentence pause must be 0.20s"
 
     bgm = cfg["bgm"]
     assert bgm["duck_db"] == -20.0, "Ducking level must match audio_config.yaml (-20.0 dB)"

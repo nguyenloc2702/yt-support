@@ -72,6 +72,62 @@ def _load_bgm_loudness(bgm_dir: Path) -> dict[str, dict[str, float]]:
     return {}
 
 
+def _load_active_db_bgm_tracks(bgm_dir: Path) -> list[dict[str, Any]]:
+    """Read active registered BGM tracks from SQLite when their files exist in bgm_dir."""
+    import sqlite3
+    from ..config import db_path
+
+    db_file = db_path()
+    if not db_file.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT filename, mood, beat_role, lufs, true_peak_dbtp "
+                "FROM bgm_tracks WHERE active=1 AND track_type='bgm'"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+    tracks: list[dict[str, Any]] = []
+    for r in rows:
+        fn = str(r["filename"] or "").strip()
+        if fn and (bgm_dir / fn).exists():
+            tracks.append(dict(r))
+    return tracks
+
+
+def _select_bgm_pool_for_role(
+    role: str,
+    bgm_dir: Path,
+    db_tracks: list[dict[str, Any]] | None = None,
+) -> list[Path]:
+    """Select candidate BGM files for a narrative act, preferring registered DB tracks."""
+    if db_tracks:
+        by_role = [bgm_dir / t["filename"] for t in db_tracks if (t.get("beat_role") or "").lower() == role]
+        if by_role:
+            return sorted(by_role)
+        moods = set(BEAT_ROLE_MOODS.get(role, ["mysterious"]))
+        by_mood = [bgm_dir / t["filename"] for t in db_tracks if (t.get("mood") or "").lower() in moods]
+        if by_mood:
+            return sorted(by_mood)
+        if role != "crisis":
+            non_ominous = [bgm_dir / t["filename"] for t in db_tracks if (t.get("mood") or "").lower() != "ominous"]
+            if non_ominous:
+                return sorted(non_ominous)
+        return sorted(bgm_dir / t["filename"] for t in db_tracks)
+
+    mood_options = BEAT_ROLE_MOODS.get(role, ["mysterious"])
+    pool: list[Path] = []
+    for m in mood_options:
+        pool.extend(bgm_dir.glob(f"{m}__*.mp3"))
+    return sorted(pool)
+
+
 def _role_for_position(pos: float) -> str:
     for limit, role in BEAT_ROLE_POSITION:
         if pos < limit:
@@ -224,7 +280,7 @@ def _synthesize_shot_wav(text: str, out_wav: Path, voice: str, rate: str) -> flo
     import time
 
     words = len(text.split())
-    wps = float(AUDIO_CONFIG.get("tts_en", {}).get("words_per_sec_estimate", 2.45))
+    wps = float(AUDIO_CONFIG.get("tts_en", {}).get("words_per_sec_estimate", 2.85))
     est_seconds = max(1.8, round(words / wps, 2))
 
     use_offline = os.environ.get("VIDEO_OFFLINE_TTS", "").strip() in {"1", "true", "yes"}
@@ -436,6 +492,10 @@ def _mix_bgm_bed(
 
     bgm_dir = _get_bgm_dir()
     loudness_map = _load_bgm_loudness(bgm_dir)
+    db_tracks = _load_active_db_bgm_tracks(bgm_dir)
+    for t in db_tracks:
+        if t.get("lufs") is not None and t["filename"] not in loudness_map:
+            loudness_map[t["filename"]] = {"lufs": float(t["lufs"])}
     cues = _build_narrative_bgm_cues(total_dur, shot_durations)
 
     inputs: list[str] = ["-i", str(raw_voice_wav)]
@@ -451,13 +511,9 @@ def _mix_bgm_bed(
         cue_dur = round(eff_end - eff_start, 3)
         if cue_dur <= 0.5:
             continue
-        mood_options = BEAT_ROLE_MOODS.get(role, ["mysterious"])
-        pool: list[Path] = []
-        for m in mood_options:
-            pool.extend(bgm_dir.glob(f"{m}__*.mp3"))
+        pool = _select_bgm_pool_for_role(role, bgm_dir, db_tracks=db_tracks)
         if not pool:
             continue
-        pool.sort()
         track_id = f"beat_{role}_{k}"
         chosen_idx = zlib.crc32(f"{rotation_seed}|{track_id}".encode("utf-8")) % len(pool)
         track_file = pool[chosen_idx]
@@ -559,7 +615,7 @@ def _concat_wav_segments(
     of the inter-shot pause, matching word_timing.py's pause-centered cut law).
     """
     pause_sec = (
-        float(AUDIO_CONFIG.get("tts_en", {}).get("inter_shot_pause_sec", 0.24))
+        float(AUDIO_CONFIG.get("tts_en", {}).get("inter_shot_pause_sec", 0.25))
         if inter_shot_pause_sec is None
         else float(inter_shot_pause_sec)
     )
@@ -693,8 +749,8 @@ def synthesize_en_todo_package(
 
     tts_cfg = AUDIO_CONFIG.get("tts_en", {})
     chosen_voice = voice or tts_cfg.get("default_voice", "en-US-AndrewMultilingualNeural")
-    rate = tts_cfg.get("rate", "-6%")
-    inter_pause = float(tts_cfg.get("inter_shot_pause_sec", 0.32))
+    rate = tts_cfg.get("rate", "+8%")
+    inter_pause = float(tts_cfg.get("inter_shot_pause_sec", 0.25))
 
     shot_wavs: list[Path] = [Path() for _ in shots]
     try:
@@ -771,8 +827,8 @@ def retime_and_mix_existing_audio(
     audio_path: Path,
     shots: list[dict[str, Any]],
     out_dir: Path,
-    slow_factor: float = 0.96,
-    extra_pause_sec: float = 0.04,
+    slow_factor: float = 1.0,
+    extra_pause_sec: float = 0.05,
     bgm_enabled: bool = True,
     bgm_duck_db: float = -16.5,
     rotation_seed: str = "",

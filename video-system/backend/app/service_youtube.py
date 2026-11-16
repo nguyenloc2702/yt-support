@@ -725,11 +725,57 @@ class YouTubeService:
         p = data_dir() / "objects" / item_id / "todo" / "subtitles_en.srt"
         return p if p.exists() else None
 
+    def _resolve_upload_artifacts(self, target_type: str, item_id: str) -> dict[str, Any]:
+        if target_type == "short":
+            short = self.store.query_one(
+                "SELECT id, title, lang, video_asset_id, srt_asset_id FROM shorts WHERE id=?",
+                (item_id,),
+            )
+            video_path: Path | None = None
+            srt_path: Path | None = None
+            if short and short.get("video_asset_id"):
+                v_asset = self.store.query_one(
+                    "SELECT storage_key FROM assets WHERE id=?",
+                    (short["video_asset_id"],),
+                )
+                if v_asset and v_asset.get("storage_key"):
+                    video_path = data_dir() / "objects" / v_asset["storage_key"]
+            if short and short.get("srt_asset_id"):
+                s_asset = self.store.query_one(
+                    "SELECT storage_key FROM assets WHERE id=?",
+                    (short["srt_asset_id"],),
+                )
+                if s_asset and s_asset.get("storage_key"):
+                    cand = data_dir() / "objects" / s_asset["storage_key"]
+                    if cand.exists() and cand.stat().st_size > 0:
+                        srt_path = cand
+            lang = (short.get("lang") or "vi").lower() if short else "vi"
+            srt_lang = "en" if lang.startswith("en") else "vi"
+            return {
+                "exists": bool(short),
+                "video_path": video_path,
+                "thumb_path": None,
+                "srt_path": srt_path,
+                "srt_lang": srt_lang,
+                "srt_lang_name": "English" if srt_lang == "en" else "Vietnamese",
+            }
+
+        item = self.store.query_one("SELECT id, title FROM items WHERE id=? AND status!='deleted'", (item_id,))
+        return {
+            "exists": bool(item),
+            "video_path": self._final_video_path(item_id),
+            "thumb_path": self._thumbnail_path(self.store, item_id),
+            "srt_path": self._srt_path(item_id),
+            "srt_lang": "en",
+            "srt_lang_name": "English",
+        }
+
     @staticmethod
     def _format_upload(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "upload_id": row["id"],
             "item_id": row["item_id"],
+            "target_type": row.get("target_type") or "todo",
             "channel_id": row["channel_id"],
             "youtube_video_id": row["youtube_video_id"],
             "youtube_url": row["youtube_url"],
@@ -747,10 +793,12 @@ class YouTubeService:
             "updated_at": row["updated_at"],
         }
 
-    def publish_todo(
+    def _start_publish(
         self,
-        item_id: str,
         *,
+        target_type: str,
+        item_id: str,
+        video_path: Path,
         title: str,
         description: str = "",
         tags: list[str] | None = None,
@@ -760,32 +808,25 @@ class YouTubeService:
         category_id: str = "22",
         run_async: bool = True,
     ) -> dict[str, Any]:
-        item = self.store.query_one("SELECT id, title FROM items WHERE id=? AND status!='deleted'", (item_id,))
-        if not item:
-            raise YouTubeError(f"Không tìm thấy todo {item_id}.", status_code=404)
-
-        final_mp4 = self._final_video_path(item_id)
-        if not final_mp4.exists() or final_mp4.stat().st_size == 0:
-            raise YouTubeError("Job chưa có video thành phẩm final_en.mp4.", status_code=422, code="missing_final_video")
-
-        thumb_path = self._thumbnail_path(self.store, item_id)
-        if not thumb_path:
-            raise YouTubeError("Job chưa có ảnh thumbnail (kind=thumbnail).", status_code=422, code="missing_thumbnail")
-
         # Idempotency guard
         active = self.store.query_one(
-            "SELECT * FROM youtube_uploads WHERE item_id=? AND upload_status IN ('queued','uploading','processing') "
+            "SELECT * FROM youtube_uploads "
+            "WHERE item_id=? AND COALESCE(target_type,'todo')=? "
+            "AND upload_status IN ('queued','uploading','processing') "
             "ORDER BY created_at DESC LIMIT 1",
-            (item_id,),
+            (item_id, target_type),
         )
         if active:
+            label = "Short" if target_type == "short" else "Job"
             raise YouTubeConflictError(
-                f"Job đang có tiến trình đăng YouTube ({active['upload_status']}).",
+                f"{label} đang có tiến trình đăng YouTube ({active['upload_status']}).",
                 upload_id=active["id"],
             )
         done = self.store.query_one(
-            "SELECT * FROM youtube_uploads WHERE item_id=? AND upload_status='uploaded' ORDER BY created_at DESC LIMIT 1",
-            (item_id,),
+            "SELECT * FROM youtube_uploads "
+            "WHERE item_id=? AND COALESCE(target_type,'todo')=? AND upload_status='uploaded' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (item_id, target_type),
         )
         if done:
             res = self._format_upload(done)
@@ -797,7 +838,7 @@ class YouTubeService:
         self.quota.ensure_upload_budget()
 
         upload_id = new_id("ytu")
-        total_bytes = final_mp4.stat().st_size
+        total_bytes = video_path.stat().st_size
         t = now()
         self.store.execute(
             "INSERT INTO youtube_uploads "
@@ -807,7 +848,7 @@ class YouTubeService:
             (
                 upload_id,
                 item_id,
-                "todo",
+                target_type,
                 ch_row["channel_id"],
                 title,
                 description,
@@ -825,6 +866,79 @@ class YouTubeService:
         self._spawn_worker(upload_id, upload_captions=upload_captions, category_id=category_id, run_async=run_async)
         row = self.store.query_one("SELECT * FROM youtube_uploads WHERE id=?", (upload_id,))
         return self._format_upload(row)
+
+    def publish_todo(
+        self,
+        item_id: str,
+        *,
+        title: str,
+        description: str = "",
+        tags: list[str] | None = None,
+        privacy_status: str = "private",
+        publish_at: str | None = None,
+        upload_captions: bool = True,
+        category_id: str = "22",
+        run_async: bool = True,
+    ) -> dict[str, Any]:
+        art = self._resolve_upload_artifacts("todo", item_id)
+        if not art["exists"]:
+            raise YouTubeError(f"Không tìm thấy todo {item_id}.", status_code=404)
+
+        final_mp4 = art["video_path"]
+        if not final_mp4 or not final_mp4.exists() or final_mp4.stat().st_size == 0:
+            raise YouTubeError("Job chưa có video thành phẩm final_en.mp4.", status_code=422, code="missing_final_video")
+
+        if not art["thumb_path"]:
+            raise YouTubeError("Job chưa có ảnh thumbnail (kind=thumbnail).", status_code=422, code="missing_thumbnail")
+
+        return self._start_publish(
+            target_type="todo",
+            item_id=item_id,
+            video_path=final_mp4,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy_status=privacy_status,
+            publish_at=publish_at,
+            upload_captions=upload_captions,
+            category_id=category_id,
+            run_async=run_async,
+        )
+
+    def publish_short(
+        self,
+        short_id: str,
+        *,
+        title: str,
+        description: str = "",
+        tags: list[str] | None = None,
+        privacy_status: str = "private",
+        publish_at: str | None = None,
+        upload_captions: bool = True,
+        category_id: str = "22",
+        run_async: bool = True,
+    ) -> dict[str, Any]:
+        art = self._resolve_upload_artifacts("short", short_id)
+        if not art["exists"]:
+            raise YouTubeError(f"Không tìm thấy short {short_id}.", status_code=404)
+
+        final_mp4 = art["video_path"]
+        if not final_mp4 or not final_mp4.exists() or final_mp4.stat().st_size == 0:
+            raise YouTubeError("Short chưa có file video MP4 thành phẩm.", status_code=422, code="missing_final_video")
+
+        return self._start_publish(
+            target_type="short",
+            item_id=short_id,
+            video_path=final_mp4,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy_status=privacy_status,
+            publish_at=publish_at,
+            upload_captions=upload_captions,
+            category_id=category_id,
+            run_async=run_async,
+        )
 
     def _spawn_worker(
         self, upload_id: str, *, upload_captions: bool = True, category_id: str = "22", run_async: bool = True
@@ -918,10 +1032,13 @@ class YouTubeService:
             row = self.store.query_one("SELECT * FROM youtube_uploads WHERE id=?", (upload_id,))
             if not row or row["upload_status"] == "canceled":
                 return
+            target_type = row.get("target_type") or "todo"
             item_id = row["item_id"]
-            final_mp4 = self._final_video_path(item_id)
-            if not final_mp4.exists():
-                self._mark_failed(upload_id, item_id, "Không tìm thấy final_en.mp4.")
+            art = self._resolve_upload_artifacts(target_type, item_id)
+            final_mp4 = art["video_path"]
+            if not final_mp4 or not final_mp4.exists() or final_mp4.stat().st_size == 0:
+                missing_name = "video MP4 của Short" if target_type == "short" else "final_en.mp4"
+                self._mark_failed(upload_id, item_id, f"Không tìm thấy {missing_name}.")
                 return
 
             total_bytes = final_mp4.stat().st_size
@@ -1095,7 +1212,7 @@ class YouTubeService:
                 # Set thumbnail (up to 3 retries)
                 warnings: list[str] = []
                 thumb_synced = 0
-                thumb_path = self._thumbnail_path(self.store, item_id)
+                thumb_path = art["thumb_path"]
                 if thumb_path:
                     thumb_bytes = thumb_path.read_bytes()
                     ctype = "image/jpeg" if thumb_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
@@ -1120,10 +1237,10 @@ class YouTubeService:
 
                 # Optional captions (.srt)
                 cap_synced = 0
-                srt_path = self._srt_path(item_id)
+                srt_path = art["srt_path"]
                 if upload_captions and srt_path:
                     meta_part = json.dumps(
-                        {"snippet": {"videoId": video_id, "language": "en", "name": "English"}},
+                        {"snippet": {"videoId": video_id, "language": art["srt_lang"], "name": art["srt_lang_name"]}},
                         ensure_ascii=False,
                     ).encode("utf-8")
                     cr = client.post(
@@ -1132,7 +1249,7 @@ class YouTubeService:
                         headers=headers,
                         files={
                             "metadata": ("metadata.json", meta_part, "application/json; charset=utf-8"),
-                            "media": ("subtitles_en.srt", srt_path.read_bytes(), "text/plain"),
+                            "media": (srt_path.name, srt_path.read_bytes(), "text/plain"),
                         },
                     )
                     if cr.status_code in (200, 201):

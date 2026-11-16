@@ -258,8 +258,8 @@ class FeedbackResolveRequest(BaseModel):
 
 
 class AudioRegenerateRequest(BaseModel):
-    slow_factor: float = Field(default=0.96, ge=0.70, le=1.20, description="Speed factor (0.96 = ~4% slower)")
-    extra_pause_sec: float = Field(default=0.12, ge=0.0, le=1.0, description="Extra pause between shots in seconds")
+    slow_factor: float = Field(default=1.0, ge=0.70, le=1.30, description="Speed factor (1.0 = keep synthesized pace, >1.0 = faster)")
+    extra_pause_sec: float = Field(default=0.05, ge=0.0, le=1.0, description="Extra pause between shots in seconds (added to 0.20s base)")
     bgm_enabled: bool = Field(default=True, description="Mix multi-track BGM bed under voice track")
     bgm_duck_db: float = Field(default=-20.0, description="BGM duck level in dB (synced with audio_config.yaml)")
 

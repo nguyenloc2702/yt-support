@@ -1718,12 +1718,10 @@ def youtube_patch_video(video_id: str, body: YouTubeVideoPatchRequest, request: 
         return _yt_error_response(exc)
 
 
-@app.post("/api/v1/todos/{item_id}/youtube/publish")
-def youtube_publish_todo(item_id: str, body: YouTubePublishRequest, request: Request = None):
-    auth.require(request, "admin")
+def _run_yt_publish(publish_fn, target_id: str, body: YouTubePublishRequest) -> JSONResponse:
     try:
-        res = youtube.publish_todo(
-            item_id,
+        res = publish_fn(
+            target_id,
             title=body.title,
             description=body.description,
             tags=body.tags,
@@ -1736,6 +1734,18 @@ def youtube_publish_todo(item_id: str, body: YouTubePublishRequest, request: Req
         return JSONResponse(res, status_code=status)
     except YouTubeError as exc:
         return _yt_error_response(exc)
+
+
+@app.post("/api/v1/todos/{item_id}/youtube/publish")
+def youtube_publish_todo(item_id: str, body: YouTubePublishRequest, request: Request = None):
+    auth.require(request, "admin")
+    return _run_yt_publish(youtube.publish_todo, item_id, body)
+
+
+@app.post("/api/v1/shorts/{short_id}/youtube/publish")
+def youtube_publish_short(short_id: str, body: YouTubePublishRequest, request: Request = None):
+    auth.require(request, "admin")
+    return _run_yt_publish(youtube.publish_short, short_id, body)
 
 
 @app.get("/api/v1/youtube/uploads/{upload_id}")
@@ -1874,6 +1884,17 @@ def get_bgm_track_file(track_id: str, request: Request = None):
     except (KeyError, FileNotFoundError):
         raise HTTPException(404, "bgm track not found")
     return FileResponse(p, media_type="audio/mpeg", filename=p.name)
+
+
+@app.delete("/api/v1/bgm/disk/{filename}")
+def delete_disk_bgm_track(filename: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return bgm_service.delete_disk_track(filename)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except FileNotFoundError:
+        raise HTTPException(404, "bgm disk file not found")
 
 
 @app.delete("/api/v1/bgm/{track_id}")

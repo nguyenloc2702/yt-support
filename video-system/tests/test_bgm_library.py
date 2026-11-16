@@ -127,3 +127,40 @@ def test_bgm_json_base64_and_custom_mood(client, ingest, isolated_bgm_dir, tmp_p
     assert d["lufs"] == -22.5
     assert d["true_peak_dbtp"] == -2.0
     assert (isolated_bgm_dir / d["filename"]).exists()
+
+
+def test_delete_unregistered_disk_track_and_db_pool_selection(client, isolated_bgm_dir, tmp_path):
+    from backend.app.pipeline_en.audio_generator_en import _select_bgm_pool_for_role
+
+    disk_only = isolated_bgm_dir / "mysterious__arcadia.mp3"
+    disk_only.write_bytes(b"fake-mp3")
+    reg_hook = isolated_bgm_dir / "quirky__sneaky_snitch.mp3"
+    reg_hook.write_bytes(b"fake-mp3")
+    reg_crisis = isolated_bgm_dir / "ominous__the_complex.mp3"
+    reg_crisis.write_bytes(b"fake-mp3")
+
+    db_tracks = [
+        {"filename": "quirky__sneaky_snitch.mp3", "mood": "quirky", "beat_role": "hook"},
+        {"filename": "ominous__the_complex.mp3", "mood": "ominous", "beat_role": "crisis"},
+    ]
+    # Registered DB tracks must match beat_role='hook' and ignore unregistered mysterious__arcadia.mp3
+    hook_pool = _select_bgm_pool_for_role("hook", isolated_bgm_dir, db_tracks=db_tracks)
+    assert [p.name for p in hook_pool] == ["quirky__sneaky_snitch.mp3"]
+    # Non-crisis fallback avoids ominous track when no setup track is registered yet
+    setup_pool = _select_bgm_pool_for_role("setup", isolated_bgm_dir, db_tracks=db_tracks)
+    assert [p.name for p in setup_pool] == ["quirky__sneaky_snitch.mp3"]
+
+    # Admin can delete unregistered disk track cleanly via /api/v1/bgm/disk/{filename}
+    r_del = client.delete(
+        "/api/v1/bgm/disk/mysterious__arcadia.mp3",
+        headers={"Authorization": "Bearer test-admin"},
+    )
+    assert r_del.status_code == 200, r_del.text
+    assert not disk_only.exists()
+
+    # Path traversal / invalid extension rejected
+    r_bad = client.delete(
+        "/api/v1/bgm/disk/bad.txt",
+        headers={"Authorization": "Bearer test-admin"},
+    )
+    assert r_bad.status_code == 422

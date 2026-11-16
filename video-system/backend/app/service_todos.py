@@ -2255,8 +2255,8 @@ class TodoService:
     def regenerate_item_audio(
         self,
         item_id: str,
-        slow_factor: float = 0.96,
-        extra_pause_sec: float = 0.12,
+        slow_factor: float = 1.0,
+        extra_pause_sec: float = 0.05,
         bgm_enabled: bool = True,
         bgm_duck_db: float = -20.0,
         actor: str = "api",
