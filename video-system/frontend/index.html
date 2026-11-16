@@ -2780,13 +2780,28 @@ summary:focus-visible {
   max-width: 320px;
   margin: 0 auto;
   aspect-ratio: 9 / 16;
-  background: #0F172A;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-lg);
+  background: #0B1120;
+  border: 6px solid #1E293B;
+  border-radius: 28px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22), 0 0 0 1px rgba(148, 163, 184, 0.25);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   position: relative;
+}
+
+.phone-frame::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 68px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.35);
+  z-index: 3;
+  pointer-events: none;
 }
 
 .phone-frame video {
@@ -2803,17 +2818,109 @@ summary:focus-visible {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 18px 14px;
+  gap: 10px;
+  padding: 24px 18px;
   text-align: center;
   color: #CBD5E1;
-  font-size: 12px;
+  font-size: 12.5px;
+  background: radial-gradient(circle at 50% 30%, rgba(59, 130, 246, 0.14), transparent 65%);
 }
 
 .phone-frame .phone-empty .empty-slot-badge {
   color: #F87171;
   background: rgba(220, 38, 38, 0.16);
   border-color: rgba(220, 38, 38, 0.45);
+}
+
+/* Studio Create Switcher & Upload Dropzone */
+.short-studio-switcher {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+
+.short-studio-tab {
+  border: none;
+  background: transparent;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.short-studio-tab.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+}
+
+.short-upload-dropzone {
+  border: 2px dashed var(--border-strong);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.03), rgba(59, 130, 246, 0.01));
+  padding: 22px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.short-upload-dropzone:hover,
+.short-upload-dropzone.is-dragover {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.07);
+}
+
+.short-upload-dropzone .upload-icon {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.short-upload-dropzone .upload-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.short-upload-dropzone .upload-sub {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+.short-upload-filechip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.short-detail-upload-bar {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .phone-side {
@@ -2895,12 +3002,14 @@ summary:focus-visible {
   padding: 14px 16px;
   box-shadow: var(--shadow);
   cursor: pointer;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
   min-width: 0;
 }
 
 .short-card:hover {
   border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
 }
 
 .short-card.is-ready {
@@ -7059,12 +7168,17 @@ let shortNewsList = [];
 let shortMode = 'news';
 let shortLang = 'vi';          // vi | en — mảng quốc tế dùng giọng + prompt EN
 let newsLangFilter = '';       // '' = tất cả, 'vi', 'en'
+let shortCreateTab = 'ai';     // 'ai' | 'upload'
+let shortUploadFileObj = null;
+let shortUploadPreviewUrl = '';
+let shortQuickPreviewId = '';
 const SHORT_MODE_META = {
   news: { label: 'Tin nóng', hint: '25–40s · 80–110 từ · hook giật gân → 3 beat → câu hỏi mở', target: 32 },
   decode: { label: 'Giải mã tiền bạc', hint: '40–60s · 110–160 từ · nghịch lý → cơ chế → chốt loop', target: 48 }
 };
 const SHORT_STATUS_PILL = {
-  draft: 'pill-ghost', scripted: 'pill-ready', producing: 'pill-warn',
+  draft: 'pill-ghost', scripted: 'pill-ready', queued: 'pill-warn',
+  rendering: 'pill-warn', producing: 'pill-warn',
   ready: 'pill-assembled', failed: 'pill-failed', cancelled: 'pill-ghost'
 };
 const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc' };
@@ -7405,45 +7519,96 @@ function renderShortStudioShell() {
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h3 class="panel-title">Tạo Short mới</h3>
-            <div class="panel-subtitle">Dán tin vắn/chủ đề (hoặc chọn từ hộp tin nóng) — AI viết kịch bản theo công thức, bạn duyệt từng câu trước khi tổng hợp.</div>
+            <h3 class="panel-title">Short Studio</h3>
+            <div class="panel-subtitle">Tạo kịch bản bằng AI hoặc upload trực tiếp video MP4 9:16 thành phẩm lên hệ thống.</div>
           </div>
         </div>
-        <div class="short-mode-tabs" role="group" aria-label="Chọn chế độ Short">
-          ${Object.entries(SHORT_MODE_META).map(([k, m]) => `
-            <button type="button" class="btn short-mode-tab ${shortMode === k ? 'active' : ''}" data-mode="${k}" onclick="switchShortMode('${k}')">
-              <span><b>${esc(m.label)}</b><small>${esc(m.hint)}</small></span>
-            </button>`).join('')}
+        <div class="short-studio-switcher" role="tablist" aria-label="Phương thức tạo Short">
+          <button type="button" class="short-studio-tab ${shortCreateTab === 'ai' ? 'active' : ''}" onclick="switchShortCreateTab('ai')">✨ Tạo từ kịch bản AI</button>
+          <button type="button" class="short-studio-tab ${shortCreateTab === 'upload' ? 'active' : ''}" onclick="switchShortCreateTab('upload')">📤 Upload sản phẩm (.MP4)</button>
         </div>
-        <div class="short-mode-tabs" role="group" aria-label="Chọn ngôn ngữ Short" style="margin-top:8px">
-          <button type="button" class="btn short-lang-tab ${shortLang === 'vi' ? 'active' : ''}" data-lang="vi" onclick="switchShortLang('vi')">
-            <span><b>Tiếng Việt</b><small>voiceover vi-VN-HoaiMy</small></span>
-          </button>
-          <button type="button" class="btn short-lang-tab ${shortLang === 'en' ? 'active' : ''}" data-lang="en" onclick="switchShortLang('en')">
-            <span><b>English (Quốc tế)</b><small>voiceover en-US-Andrew · Pexels b-roll</small></span>
-          </button>
-        </div>
-        <div id="shortLangHint" style="font-size:11.5px;color:var(--fg-muted);margin-top:4px">
-          ${shortLang === 'en' ? 'Mảng quốc tế: voiceover tiếng Anh (Andrew), prompt EN, visual Pexels' : 'Tiếng Việt: voiceover HoaiMy, prompt VI'}
-        </div>
-        ${renderNewsInboxHtml()}
-        <div class="short-form-grid">
-          <textarea id="shortSourceText" rows="5" placeholder="Dán nội dung bài báo/tin vắn (mode Tin nóng) hoặc chủ đề giải mã (vd: 'Càng tiết kiệm càng nghèo')..." maxlength="6000"></textarea>
-          <div class="short-form-row">
-            <label for="shortSourceLink">Link bài báo (tùy chọn — lấy ảnh gốc minh họa):</label>
-            <input type="text" id="shortSourceLink" placeholder="https://... (hoặc để trống nếu chỉ có tin vắn)" maxlength="1000" style="flex:1;min-width:220px"/>
+
+        ${shortCreateTab === 'upload' ? `
+          <div class="short-form-grid">
+            <input type="file" id="shortUploadFile" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" class="hidden" onchange="onShortUploadFilePicked(this.files[0])"/>
+            <div class="short-upload-dropzone" id="shortUploadDropzone"
+                 onclick="document.getElementById('shortUploadFile').click()"
+                 ondragover="event.preventDefault();this.classList.add('is-dragover')"
+                 ondragleave="this.classList.remove('is-dragover')"
+                 ondrop="handleShortUploadDrop(event)">
+              <div class="upload-icon">🎬</div>
+              <div class="upload-title">${shortUploadFileObj ? 'Đã chọn file — bấm hoặc kéo thả để đổi file khác' : 'Kéo thả file MP4 9:16 vào đây hoặc bấm để chọn'}</div>
+              <div class="upload-sub">Hỗ trợ MP4, MOV, WEBM · Tự động nhận diện thời lượng &amp; xem trước ngay bên phải</div>
+              ${shortUploadFileObj ? `<span class="short-upload-filechip">📎 ${esc(shortUploadFileObj.name)} (${(shortUploadFileObj.size / 1048576).toFixed(2)} MB)</span>` : ''}
+            </div>
+            <div class="short-form-row">
+              <label for="shortUploadTitle">Tiêu đề Short:</label>
+              <input type="text" id="shortUploadTitle" placeholder="VD: SpaceX Catches Giant Rocket Mid-Air" maxlength="200" style="flex:1;min-width:220px" value="${esc(shortUploadFileObj ? shortUploadFileObj.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ') : '')}"/>
+            </div>
+            <div class="short-mode-tabs" role="group" aria-label="Chọn chế độ Short">
+              ${Object.entries(SHORT_MODE_META).map(([k, m]) => `
+                <button type="button" class="btn short-mode-tab ${shortMode === k ? 'active' : ''}" data-mode="${k}" onclick="switchShortMode('${k}')">
+                  <span><b>${esc(m.label)}</b><small>${esc(m.hint)}</small></span>
+                </button>`).join('')}
+            </div>
+            <div class="short-mode-tabs" role="group" aria-label="Chọn ngôn ngữ Short">
+              <button type="button" class="btn short-lang-tab ${shortLang === 'vi' ? 'active' : ''}" data-lang="vi" onclick="switchShortLang('vi')">
+                <span><b>Tiếng Việt</b><small>Nhãn VI</small></span>
+              </button>
+              <button type="button" class="btn short-lang-tab ${shortLang === 'en' ? 'active' : ''}" data-lang="en" onclick="switchShortLang('en')">
+                <span><b>English (Quốc tế)</b><small>Nhãn EN</small></span>
+              </button>
+            </div>
+            <div class="short-form-row">
+              <label for="shortUploadNote">Nguồn tin:</label>
+              <input type="text" id="shortUploadNote" placeholder="VD: SpaceX / Wikimedia Commons" maxlength="300" style="flex:1;min-width:160px"/>
+            </div>
+            <div class="short-form-row">
+              <label for="shortUploadDesc">Mô tả đăng bài (tùy chọn):</label>
+              <input type="text" id="shortUploadDesc" placeholder="Caption / hashtag khi đăng TikTok, Shorts..." maxlength="1000" style="flex:1;min-width:220px"/>
+            </div>
+            <div class="short-form-row">
+              <button type="button" id="shortUploadSubmitBtn" class="btn-primary" onclick="submitShortUpload(this)">📤 Upload &amp; Xuất bản Short</button>
+              <span style="font-size:11.5px;color:var(--fg-muted)">Video sẽ ở trạng thái Sẵn sàng ngay sau khi tải lên.</span>
+            </div>
           </div>
-          <div class="short-form-row">
-            <label for="shortSourceNote">Nguồn tin (ghi trên video):</label>
-            <input type="text" id="shortSourceNote" placeholder="Nguồn: VnExpress..." maxlength="300" style="flex:1;min-width:160px"/>
-            <label for="shortTargetSec">Giây mục tiêu:</label>
-            <input type="number" id="shortTargetSec" value="${SHORT_MODE_META[shortMode].target}" min="10" max="90" style="width:74px"/>
+        ` : `
+          <div class="short-mode-tabs" role="group" aria-label="Chọn chế độ Short">
+            ${Object.entries(SHORT_MODE_META).map(([k, m]) => `
+              <button type="button" class="btn short-mode-tab ${shortMode === k ? 'active' : ''}" data-mode="${k}" onclick="switchShortMode('${k}')">
+                <span><b>${esc(m.label)}</b><small>${esc(m.hint)}</small></span>
+              </button>`).join('')}
           </div>
-          <div class="short-form-row">
-            <button type="button" id="shortCreateBtn" class="btn-primary" onclick="createShortForm(event)">Tạo kịch bản</button>
-            <span style="font-size:11.5px;color:var(--fg-muted)">Kịch bản sync (10–30s) — chưa duyệt sẽ không render.</span>
+          <div class="short-mode-tabs" role="group" aria-label="Chọn ngôn ngữ Short" style="margin-top:8px">
+            <button type="button" class="btn short-lang-tab ${shortLang === 'vi' ? 'active' : ''}" data-lang="vi" onclick="switchShortLang('vi')">
+              <span><b>Tiếng Việt</b><small>voiceover vi-VN-HoaiMy</small></span>
+            </button>
+            <button type="button" class="btn short-lang-tab ${shortLang === 'en' ? 'active' : ''}" data-lang="en" onclick="switchShortLang('en')">
+              <span><b>English (Quốc tế)</b><small>voiceover en-US-Andrew · Pexels b-roll</small></span>
+            </button>
           </div>
-        </div>
+          <div id="shortLangHint" style="font-size:11.5px;color:var(--fg-muted);margin-top:4px">
+            ${shortLang === 'en' ? 'Mảng quốc tế: voiceover tiếng Anh (Andrew), prompt EN, visual Pexels' : 'Tiếng Việt: voiceover HoaiMy, prompt VI'}
+          </div>
+          ${renderNewsInboxHtml()}
+          <div class="short-form-grid">
+            <textarea id="shortSourceText" rows="5" placeholder="Dán nội dung bài báo/tin vắn (mode Tin nóng) hoặc chủ đề giải mã (vd: 'Càng tiết kiệm càng nghèo')..." maxlength="6000"></textarea>
+            <div class="short-form-row">
+              <label for="shortSourceLink">Link bài báo (tùy chọn — lấy ảnh gốc minh họa):</label>
+              <input type="text" id="shortSourceLink" placeholder="https://... (hoặc để trống nếu chỉ có tin vắn)" maxlength="1000" style="flex:1;min-width:220px"/>
+            </div>
+            <div class="short-form-row">
+              <label for="shortSourceNote">Nguồn tin (ghi trên video):</label>
+              <input type="text" id="shortSourceNote" placeholder="Nguồn: VnExpress..." maxlength="300" style="flex:1;min-width:160px"/>
+              <label for="shortTargetSec">Giây mục tiêu:</label>
+              <input type="number" id="shortTargetSec" value="${SHORT_MODE_META[shortMode].target}" min="10" max="90" style="width:74px"/>
+            </div>
+            <div class="short-form-row">
+              <button type="button" id="shortCreateBtn" class="btn-primary" onclick="createShortForm(event)">Tạo kịch bản</button>
+              <span style="font-size:11.5px;color:var(--fg-muted)">Kịch bản sync (10–30s) — chưa duyệt sẽ không render.</span>
+            </div>
+          </div>
+        `}
       </section>
 
       <section class="panel">
@@ -7470,13 +7635,13 @@ function renderShortStudioShell() {
                   ${s.lang === 'en' ? '<span class="pill pill-ghost mono">EN</span>' : ''}
                   ${s.duration_s > 0 ? `<span class="mono">${Number(s.duration_s).toFixed(1)}s</span>` : ''}
                   <span class="mono">${Number(s.word_count || 0)} từ</span>
-                  ${s.video_asset_id ? '<span class="pill pill-ok">MP4 9:16</span>' : ''}
+                  ${s.video_asset_id ? `<span class="pill pill-ok">MP4 9:16</span><button type="button" class="btn-xs" style="margin-left:auto" onclick="previewShortOnPhone('${esc(s.id)}', event)">▶ Xem</button>` : ''}
                 </div>
               </article>`).join('')}
           </div>
         ` : `
           <div style="text-align:center;padding:28px;color:var(--fg-muted);border:1px dashed var(--border-strong);border-radius:var(--r)">
-            Chưa có Short nào. Tạo kịch bản đầu tiên bằng bảng "Tạo Short mới" phía trên.
+            Chưa có Short nào. Tạo kịch bản AI hoặc Upload sản phẩm MP4 bằng bảng phía trên.
           </div>
         `}
       </section>
@@ -7487,18 +7652,115 @@ function renderShortStudioShell() {
         <div class="panel-header">
           <div>
             <h3 class="panel-title">Khung xem trước 9:16</h3>
-            <div class="panel-subtitle">Mở một Short từ danh sách để xem video dọc, ảnh scene và timeline từng câu.</div>
+            <div class="panel-subtitle">${shortCreateTab === 'upload' && shortUploadPreviewUrl ? 'Đang xem trước file MP4 vừa chọn trên máy.' : (shortQuickPreviewId ? `Đang phát: ${esc(shortQuickPreviewId)}` : 'Bấm "▶ Xem" trên thẻ Short hoặc chọn file MP4 để xem trước.')}</div>
           </div>
+          ${shortQuickPreviewId ? `<button type="button" class="btn-xs btn-primary" onclick="openShortDetailPage('${esc(shortQuickPreviewId)}')">Chi tiết</button>` : ''}
         </div>
-        <div class="phone-frame">
-          <div class="phone-empty">
-            <span class="empty-slot-badge">CHƯA CHỌN SHORT</span>
-            <div>Bấm vào một Short trong danh sách để xem trước tại đây.</div>
-          </div>
+        <div class="phone-frame" id="shortMainPhoneFrame">
+          ${shortCreateTab === 'upload' && shortUploadPreviewUrl
+            ? `<video controls autoplay muted loop playsinline src="${shortUploadPreviewUrl}"></video>`
+            : (shortQuickPreviewId
+                ? `<video controls autoplay playsinline src="/api/v1/shorts/${esc(shortQuickPreviewId)}/video"></video>`
+                : `<div class="phone-empty">
+                     <span class="empty-slot-badge">CHƯA CHỌN SHORT</span>
+                     <div>Bấm vào một Short trong danh sách hoặc chọn file MP4 để xem trước tại đây.</div>
+                   </div>`)}
         </div>
       </section>
     </div>
   </div>`;
+}
+
+function switchShortCreateTab(tab) {
+  shortCreateTab = tab === 'upload' ? 'upload' : 'ai';
+  renderShortStudioShell();
+}
+
+function onShortUploadFilePicked(file) {
+  if (!file) return;
+  if (shortUploadPreviewUrl) {
+    try { URL.revokeObjectURL(shortUploadPreviewUrl); } catch (_) {}
+  }
+  shortUploadFileObj = file;
+  shortUploadPreviewUrl = URL.createObjectURL(file);
+  renderShortStudioShell();
+}
+
+function handleShortUploadDrop(ev) {
+  ev.preventDefault();
+  ev.currentTarget?.classList.remove('is-dragover');
+  const file = ev.dataTransfer?.files?.[0];
+  if (file) onShortUploadFilePicked(file);
+}
+
+function previewShortOnPhone(shortId, ev) {
+  if (ev) ev.stopPropagation();
+  shortQuickPreviewId = shortId;
+  renderShortStudioShell();
+}
+
+async function submitShortUpload(btnEl) {
+  if (!shortUploadFileObj) {
+    showToast('Vui lòng chọn file MP4 9:16 trước khi upload', 'error');
+    return;
+  }
+  const title = (document.getElementById('shortUploadTitle')?.value || '').trim();
+  const sourceNote = (document.getElementById('shortUploadNote')?.value || '').trim();
+  const description = (document.getElementById('shortUploadDesc')?.value || '').trim();
+  const prev = btnEl?.textContent || '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:#fff"></span> Đang tải lên...';
+  }
+  try {
+    const fd = new FormData();
+    fd.append('file', shortUploadFileObj, shortUploadFileObj.name);
+    if (title) fd.append('title', title);
+    fd.append('mode', shortMode);
+    fd.append('lang', shortLang);
+    if (sourceNote) fd.append('source_note', sourceNote);
+    if (description) fd.append('description', description);
+    const r = await apiFetch('/api/v1/shorts/upload', { method: 'POST', body: fd, timeoutMs: 180000 });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Lỗi upload Short MP4'));
+    const created = await r.json();
+    if (shortUploadPreviewUrl) {
+      try { URL.revokeObjectURL(shortUploadPreviewUrl); } catch (_) {}
+    }
+    shortUploadFileObj = null;
+    shortUploadPreviewUrl = '';
+    shortQuickPreviewId = created.id;
+    shortsLoaded = false;
+    shortDetailsCache[created.id] = created;
+    showToast(`Đã upload Short ${created.id} (${Number(created.duration_s || 0).toFixed(1)}s) — Sẵn sàng!`, 'ok', 3500);
+    openShortDetailPage(created.id);
+  } catch (err) {
+    showToast(err.message || 'Lỗi upload Short MP4', 'error');
+  } finally {
+    if (btnEl && btnEl.isConnected) { btnEl.disabled = false; btnEl.textContent = prev || '📤 Upload & Xuất bản Short'; }
+  }
+}
+
+async function uploadExistingShortVideo(shortId, inputEl) {
+  const file = inputEl?.files?.[0];
+  if (!file) return;
+  showToast(`Đang upload ${file.name}...`, 'info', 4000);
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    const r = await apiFetch(`/api/v1/shorts/${encodeURIComponent(shortId)}/video`, {
+      method: 'POST', body: fd, timeoutMs: 180000
+    });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Lỗi upload video MP4'));
+    const updated = await r.json();
+    shortDetailsCache[shortId] = updated;
+    shortsLoaded = false;
+    renderShortDetailPage(updated);
+    showToast(`Đã cập nhật MP4 thành phẩm (${Number(updated.duration_s || 0).toFixed(1)}s)`, 'ok', 3000);
+  } catch (err) {
+    showToast(err.message || 'Lỗi upload video MP4', 'error');
+  } finally {
+    if (inputEl) inputEl.value = '';
+  }
 }
 
 async function openShortDetailPage(shortId, initialTab = '') {
@@ -7620,15 +7882,15 @@ function renderShortDetailPage(short) {
         <div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="pill pill-ok">MP4 9:16 SẴN SÀNG</span>
-            <span class="pill pill-ghost mono">${Number(short.duration_s || 0).toFixed(1)}s · ${scenes.length} scene</span>
+            <span class="pill pill-ghost mono">${Number(short.duration_s || 0).toFixed(1)}s · ${scenes.length ? `${scenes.length} scene` : 'Upload thủ công'}</span>
           </div>
-          <div style="font-size:12px;color:var(--fg-muted);margin-top:4px">Karaoke cháy chữ đã burn trực tiếp vào video.</div>
+          <div style="font-size:12px;color:var(--fg-muted);margin-top:4px">${scenes.length ? 'Karaoke cháy chữ đã burn trực tiếp vào video.' : 'Video thành phẩm được tải lên trực tiếp.'}</div>
         </div>
         <div class="short-publish-actions">
           <a class="btn btn-primary btn-sm" href="/api/v1/shorts/${esc(id)}/video?download=true" download>Tải MP4</a>
           <button type="button" class="btn-ok btn-sm" onclick="openShortPublishModal('${esc(id)}')">Gói đăng bài</button>
-          <a class="btn btn-sm" href="/api/v1/shorts/${esc(id)}/subtitles.ass" download>.ASS</a>
-          <a class="btn btn-sm" href="/api/v1/shorts/${esc(id)}/subtitles.srt" download>.SRT</a>
+          ${short.ass_asset_id ? `<a class="btn btn-sm" href="/api/v1/shorts/${esc(id)}/subtitles.ass" download>.ASS</a>` : ''}
+          ${short.srt_asset_id ? `<a class="btn btn-sm" href="/api/v1/shorts/${esc(id)}/subtitles.srt" download>.SRT</a>` : ''}
         </div>
       </div>
     </section>` : '';
@@ -7676,12 +7938,17 @@ function renderShortDetailPage(short) {
                <span class="empty-slot-badge">${esc((short.status_label || short.status).toUpperCase())}</span>
                <div>${short.status === 'producing'
                  ? 'Đang tổng hợp: voice → ảnh → ghép + QC. Trang sẽ tự cập nhật khi xong.'
-                 : 'Chưa có video. Duyệt kịch bản rồi bấm "Tạo Voice & Ảnh → Xuất MP4 9:16".'}</div>
+                 : 'Chưa có video. Tạo tự động hoặc upload file MP4 thành phẩm bên dưới.'}</div>
              </div>`}
       </div>
-      ${short.status === 'ready' || short.audio_asset_id ? `
+      <div class="short-detail-upload-bar">
+        <span style="font-size:11.5px;color:var(--fg-muted)">${short.status === 'ready' ? 'Thay thế bằng file MP4 khác:' : 'Hoặc upload trực tiếp MP4 9:16:'}</span>
+        <input type="file" id="shortDetailUploadInput" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" class="hidden" onchange="uploadExistingShortVideo('${esc(id)}', this)"/>
+        <button type="button" class="btn-xs btn-primary" onclick="document.getElementById('shortDetailUploadInput').click()">📤 Upload MP4</button>
+      </div>
+      ${short.audio_asset_id ? `
         <div style="margin-top:10px">
-          <div style="font-size:11.5px;font-weight:600;color:var(--fg-muted);margin-bottom:4px">Voice đọc (edge-tts VI)</div>
+          <div style="font-size:11.5px;font-weight:600;color:var(--fg-muted);margin-bottom:4px">Voice đọc (${esc((short.lang || 'vi').toUpperCase())})</div>
           <audio controls preload="none" src="/api/v1/shorts/${esc(id)}/audio" style="width:100%;height:36px"></audio>
         </div>` : ''}
     </section>

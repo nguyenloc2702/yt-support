@@ -1320,6 +1320,61 @@ def get_short_audio(short_id: str, download: bool = False, request: Request = No
                         content_disposition_type="attachment" if download else "inline")
 
 
+@app.post("/api/v1/shorts/upload")
+async def upload_new_short_video(request: Request):
+    """Tạo Short mới trực tiếp từ file MP4 thành phẩm (không cần AI tạo kịch bản)."""
+    auth.require(request, "ingest")
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(422, "multipart form must include 'file'")
+    raw_bytes = await upload.read()
+    title = str(form.get("title") or "").strip()
+    mode = str(form.get("mode") or "news").strip() or "news"
+    lang = str(form.get("lang") or "vi").strip() or "vi"
+    source_note = str(form.get("source_note") or "").strip()
+    description = str(form.get("description") or "").strip()
+    filename = getattr(upload, "filename", None) or "short.mp4"
+    try:
+        res = await run_in_threadpool(
+            shorts.create_from_upload,
+            title=title,
+            mode=mode,
+            lang=lang,
+            raw_bytes=raw_bytes,
+            filename=filename,
+            source_note=source_note,
+            description=description,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return JSONResponse(res, status_code=201)
+
+
+@app.post("/api/v1/shorts/{short_id}/video")
+async def upload_short_video(short_id: str, request: Request):
+    """Upload hoặc thay thế file MP4 thành phẩm cho một Short đã tồn tại."""
+    auth.require(request, "ingest")
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(422, "multipart form must include 'file'")
+    raw_bytes = await upload.read()
+    filename = getattr(upload, "filename", None) or "short.mp4"
+    try:
+        res = await run_in_threadpool(
+            shorts.upload_final_video,
+            short_id,
+            raw_bytes=raw_bytes,
+            filename=filename,
+        )
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return res
+
+
 @app.api_route("/api/v1/shorts/{short_id}/video", methods=["GET", "HEAD"])
 def get_short_video(short_id: str, download: bool = False, request: Request = None):
     auth.require(request, "read")

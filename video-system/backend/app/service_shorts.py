@@ -966,6 +966,112 @@ class ShortService:
         return {"short_id": short_id, "duration_sec": duration,
                 "video_url": f"/api/v1/shorts/{short_id}/video"}
 
+    # ------------------------------------------------------------------ manual upload
+    @staticmethod
+    def _probe_video_duration(path: Path) -> float:
+        try:
+            res = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(path),
+                ],
+                capture_output=True, text=True, timeout=15, check=True,
+            )
+            val = float((res.stdout or "").strip() or 0.0)
+            return round(max(0.0, val), 2)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def upload_final_video(self, short_id: str, raw_bytes: bytes,
+                           filename: str = "short.mp4",
+                           actor: str = "ui") -> dict:
+        """Upload trực tiếp file MP4 thành phẩm cho một Short đã tồn tại."""
+        row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
+        if not row:
+            raise KeyError(short_id)
+        if not raw_bytes:
+            raise ValueError("File video rỗng.")
+        ext = Path(filename or "short.mp4").suffix.lower()
+        if ext and ext not in {".mp4", ".mov", ".webm", ".mkv", ".m4v"}:
+            raise ValueError(f"Định dạng không hỗ trợ ({ext}). Chỉ nhận MP4/MOV/WEBM/MKV.")
+
+        objects = data_dir() / "objects" / "shorts" / short_id
+        objects.mkdir(parents=True, exist_ok=True)
+        final_path = objects / f"final_{short_id}.mp4"
+        final_path.write_bytes(raw_bytes)
+
+        duration = self._probe_video_duration(final_path)
+        video_ast = self._put_asset(
+            short_id, "video", f"shorts/{short_id}/final_{short_id}.mp4",
+            final_path, "video", duration_s=duration,
+            engine="manual-upload", meta={"filename": filename or "short.mp4"},
+        )
+
+        pub_ast = row["publish_md_asset_id"]
+        if not pub_ast:
+            script = json.loads(row["script_json"] or "{}")
+            lang = row["lang"] or "vi"
+            publish = _publish_markdown(script, duration, lang)
+            publish_path = objects / f"publish_{short_id}.md"
+            publish_path.write_text(publish, encoding="utf-8")
+            pub_ast = self._put_asset(
+                short_id, "json", f"shorts/{short_id}/publish_{short_id}.md",
+                publish_path, "json", engine="publish-pack",
+            )
+
+        self.store.execute(
+            "UPDATE shorts SET video_asset_id=?, publish_md_asset_id=?, duration_s=?, "
+            "error_detail=NULL, updated_at=? WHERE id=?",
+            (video_ast, pub_ast, duration, now(), short_id),
+        )
+        self._transition(short_id, domain.ShortStatus.READY.value)
+        self._event(short_id, "short.ready", actor, {
+            "duration_sec": duration,
+            "source": "manual-upload",
+            "filename": filename or "short.mp4",
+            "video_url": f"/api/v1/shorts/{short_id}/video",
+        })
+        return self.get(short_id)
+
+    def create_from_upload(self, title: str, mode: str = "news", lang: str = "vi",
+                           raw_bytes: bytes = b"", filename: str = "short.mp4",
+                           source_note: str = "", description: str = "",
+                           actor: str = "ui") -> dict:
+        """Tạo Short mới trực tiếp từ file MP4 thành phẩm (không cần gọi LLM)."""
+        if mode not in prompts.MODES:
+            raise ValueError(f"mode không hợp lệ: {mode} (chấp nhận: {', '.join(prompts.MODES)})")
+        if lang not in prompts.LANGS:
+            raise ValueError(f"lang không hợp lệ: {lang} (chấp nhận: {', '.join(prompts.LANGS)})")
+        if not raw_bytes:
+            raise ValueError("Thiếu file video (.mp4) để upload.")
+
+        clean_title = (title or "").strip()[:200] or Path(filename or "Short Video").stem[:200]
+        short_id = new_id("sho")
+        t = now()
+        script = {
+            "title": clean_title,
+            "hook": "",
+            "beats": [],
+            "closing": "",
+            "description": (description or "").strip(),
+            "source_note": (source_note or "").strip(),
+            "word_count": 0,
+        }
+        self.store.execute(
+            "INSERT INTO shorts (id, mode, lang, title, status, script_json, source_text, "
+            "source_note, source_link, target_seconds, duration_s, word_count, "
+            "error_detail, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (short_id, mode, lang, clean_title, domain.ShortStatus.SCRIPTED.value,
+             json.dumps(script, ensure_ascii=False), clean_title,
+             (source_note or "").strip(), None, None, 0.0, 0, None, t, t),
+        )
+        self._event(short_id, "short.created", actor, {
+            "mode": mode, "lang": lang, "title": clean_title, "source": "manual-upload",
+        })
+        return self.upload_final_video(short_id, raw_bytes=raw_bytes, filename=filename, actor=actor)
+
     # ------------------------------------------------------------------ misc
     def _put_asset(self, short_id: str, kind: str, storage_key: str, path: Path,
                    assets_kind: str, duration_s: float | None = None,

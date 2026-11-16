@@ -151,10 +151,12 @@ SHORT_TRANSITIONS: dict[ShortStatus, set[ShortStatus]] = {
     ShortStatus.SCRIPTED: {
         ShortStatus.PRODUCING, ShortStatus.SCRIPTED,  # self-loop: sửa/duyệt lại kịch bản
         ShortStatus.QUEUED,  # G.13: publish-job cho agent video ngoài
+        ShortStatus.READY,   # upload trực tiếp MP4 thành phẩm
         ShortStatus.FAILED, ShortStatus.CANCELLED,
     },
     ShortStatus.QUEUED: {
         ShortStatus.RENDERING, ShortStatus.SCRIPTED,  # self-loop: sửa kịch bản lại
+        ShortStatus.READY,
         ShortStatus.FAILED, ShortStatus.CANCELLED,
     },
     ShortStatus.RENDERING: {
@@ -163,8 +165,8 @@ SHORT_TRANSITIONS: dict[ShortStatus, set[ShortStatus]] = {
     ShortStatus.PRODUCING: {
         ShortStatus.READY, ShortStatus.SCRIPTED, ShortStatus.FAILED, ShortStatus.CANCELLED,
     },
-    ShortStatus.READY: {ShortStatus.PRODUCING, ShortStatus.CANCELLED},  # produce lại
-    ShortStatus.FAILED: {ShortStatus.SCRIPTED, ShortStatus.PRODUCING, ShortStatus.CANCELLED},
+    ShortStatus.READY: {ShortStatus.PRODUCING, ShortStatus.READY, ShortStatus.CANCELLED},  # produce lại hoặc thay MP4
+    ShortStatus.FAILED: {ShortStatus.SCRIPTED, ShortStatus.PRODUCING, ShortStatus.READY, ShortStatus.CANCELLED},
     ShortStatus.CANCELLED: set(),
 }
 
