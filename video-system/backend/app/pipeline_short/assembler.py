@@ -187,19 +187,54 @@ def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
                    "-vf", vf_clip, "-an", "-t", f"{dur:.3f}",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
                    "-pix_fmt", "yuv420p", str(clip)]
+            subprocess.run(cmd, check=True, timeout=300)
         else:
-            vf = _kenburns_filter(f"{short_id}|scene_{int(sc['seq'])}", dur, fps)
-            if img and Path(img).exists():
+            raw_imgs = [Path(p) for p in (sc.get("image_paths") or []) if p and Path(p).exists()]
+            if not raw_imgs and img and Path(img).exists():
+                raw_imgs = [Path(img)]
+            if len(raw_imgs) > 1 and dur >= 3.0:
+                # Chia đều scene cho 2-3 ảnh liên quan của tin (mỗi ảnh 1 kiểu zoompan khác nhau)
+                max_cuts = min(len(raw_imgs), max(1, int(dur // 1.8)))
+                imgs = raw_imgs[:max_cuts]
+                sub_clips: list[Path] = []
+                sub_dur_base = dur / len(imgs)
+                for si, im_src in enumerate(imgs):
+                    sd = round(dur - sub_dur_base * (len(imgs) - 1), 3) if si == len(imgs) - 1 else round(sub_dur_base, 3)
+                    sd = max(0.5, sd)
+                    sub_p = tmp / f"scene_{int(sc['seq']):03d}_sub_{si}.mp4"
+                    vf_sub = _kenburns_filter(f"{short_id}|scene_{int(sc['seq'])}|sub_{si}", sd, fps)
+                    try:
+                        im_prep = _prepare_scene_image(im_src, tmp, int(sc["seq"]) * 10 + si)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("prepare scene image %s failed: %s", im_src, exc)
+                        im_prep = im_src
+                    sub_cmd = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", f"{sd:.3f}",
+                               "-i", str(im_prep), "-vf", vf_sub, "-frames:v",
+                               str(max(1, int(round(sd * fps)))), "-an",
+                               "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
+                               "-pix_fmt", "yuv420p", str(sub_p)]
+                    subprocess.run(sub_cmd, check=True, timeout=300)
+                    sub_clips.append(sub_p)
+                sub_list = tmp / f"sub_concat_{int(sc['seq']):03d}.txt"
+                sub_list.write_text("\n".join(f"file '{p.resolve().as_posix()}'" for p in sub_clips), encoding="utf-8")
+                subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                                "-i", str(sub_list), "-c", "copy", str(clip)],
+                               check=True, timeout=300)
+            elif raw_imgs:
+                im_src = raw_imgs[0]
+                vf = _kenburns_filter(f"{short_id}|scene_{int(sc['seq'])}", dur, fps)
                 # G.11: ảnh ngang (ảnh gốc bài báo) → blur-pad dọc trước khi zoompan
                 try:
-                    img = _prepare_scene_image(Path(img), tmp, int(sc["seq"]))
+                    im_prep = _prepare_scene_image(im_src, tmp, int(sc["seq"]))
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("prepare scene image %s failed: %s", img, exc)
+                    logger.warning("prepare scene image %s failed: %s", im_src, exc)
+                    im_prep = im_src
                 cmd = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", f"{dur:.3f}",
-                       "-i", str(img), "-vf", vf, "-frames:v",
+                       "-i", str(im_prep), "-vf", vf, "-frames:v",
                        str(max(1, int(round(dur * fps)))), "-an",
                        "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
                        "-pix_fmt", "yuv420p", str(clip)]
+                subprocess.run(cmd, check=True, timeout=300)
             else:
                 # Không có ảnh → thẻ màu đặc (đúng luật: không im lặng, ghi rõ trong meta)
                 cmd = ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
@@ -207,7 +242,7 @@ def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
                        "-frames:v", str(max(1, int(round(dur * fps)))), "-an",
                        "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
                        "-pix_fmt", "yuv420p", str(clip)]
-        subprocess.run(cmd, check=True, timeout=300)
+                subprocess.run(cmd, check=True, timeout=300)
         norm_clips.append(clip)
 
     # 2) Concat
@@ -241,6 +276,8 @@ def assemble_short(short_id: str, scenes: list[dict], audio_path: str,
                 hook_end_sec=float(spec_ov.get("hook_end_sec") or 2.6),
                 crf=crf,
                 audio_rate=int(RENDER_SPEC_SHORT["audio"]["rate"]),
+                digest_spec=spec_ov.get("digest_spec"),
+                watermark_spec=spec_ov.get("watermark"),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("overlay_renderer fallback sang ASS (%s): %s", short_id, exc)

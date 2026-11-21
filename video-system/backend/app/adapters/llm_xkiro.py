@@ -20,7 +20,9 @@ import httpx
 logger = logging.getLogger("video_system.adapters.llm_xkiro")
 
 DEFAULT_BASE_URL = "https://api.xkiro.com/v1"
-DEFAULT_MODEL = "mistralai/mistral-large-4-0"
+DEFAULT_MODEL = "mistralai/mistral-large-2512"
+# Chuỗi fallback mặc định khi VIDEO_XKIRO_LLM_FALLBACK_MODELS unset/rỗng.
+DEFAULT_FALLBACK_MODELS = ["mistralai/mistral-medium-3.5", "mistralai/mistral-small-2603"]
 _TIMEOUT_S = 120.0
 
 
@@ -59,10 +61,10 @@ class XkiroLlmAdapter:
         self.base_url = (base_url or os.environ.get("VIDEO_XKIRO_BASE_URL")
                          or DEFAULT_BASE_URL).rstrip("/")
         self.model = model or os.environ.get("VIDEO_XKIRO_LLM_MODEL") or DEFAULT_MODEL
-        raw_fb = fallback_models or [
+        raw_fb = fallback_models if fallback_models is not None else [
             m.strip() for m in
             os.environ.get("VIDEO_XKIRO_LLM_FALLBACK_MODELS", "").split(",") if m.strip()
-        ]
+        ] or list(DEFAULT_FALLBACK_MODELS)
         self.models: list[str] = [self.model] + [m for m in raw_fb if m and m != self.model]
 
     def chat_json(self, system: str, user: str, schema: dict | None = None) -> dict:

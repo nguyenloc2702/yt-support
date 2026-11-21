@@ -11,9 +11,11 @@ import streamlit as st
 from config.settings import settings
 from core.database import init_db
 from pipeline.script_matcher import match_script_to_report
+from utils.auth import require_pin_login
 from utils.ui import inject_pro_css, render_sidebar_hardware_status
 
 st.set_page_config(page_title="Timeline Report", page_icon="🧭", layout="wide")
+require_pin_login()
 init_db()
 inject_pro_css()
 render_sidebar_hardware_status()

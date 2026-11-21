@@ -17,7 +17,7 @@ from typing import Any
 from . import domain, providers
 from .config import SHORT_CONFIG, RENDER_SPEC_SHORT, data_dir
 from .pipeline_short import assembler, bank, karaoke, prompts, tts_vi, skill_bundle_short
-from .pipeline_short import article_images, stock_media
+from .pipeline_short import article_images, stock_media, story_media
 from .store import Store, new_id, now
 
 logger = logging.getLogger("video_system.service_shorts")
@@ -75,7 +75,7 @@ class ShortService:
     def create(self, mode: str, source_text: str, source_note: str = "",
                source_link: str = "", target_seconds: float | None = None,
                title: str | None = None, lang: str = "vi",
-               actor: str = "api") -> dict:
+               actor: str = "api", extra_script_meta: dict | None = None) -> dict:
         if mode not in prompts.MODES:
             raise ValueError(f"mode không hợp lệ: {mode} (chấp nhận: {', '.join(prompts.MODES)})")
         if lang not in prompts.LANGS:
@@ -85,8 +85,8 @@ class ShortService:
             raise ValueError("Thiếu nội dung nguồn (source_text) — dán tin vắn hoặc chủ đề.")
         if len(source_text) > max_chars:
             raise ValueError(f"Nội dung nguồn {len(source_text)} ký tự vượt giới hạn {max_chars}.")
-        if target_seconds is not None and not (10 <= float(target_seconds) <= 90):
-            raise ValueError("target_seconds phải trong khoảng 10–90s.")
+        if target_seconds is not None and not (10 <= float(target_seconds) <= 180):
+            raise ValueError("target_seconds phải trong khoảng 10–180s.")
         source_link = (source_link or "").strip()
         if source_link and not source_link.lower().startswith(("http://", "https://")):
             raise ValueError("source_link phải là URL http(s) của bài báo.")
@@ -95,10 +95,14 @@ class ShortService:
         raw = llm.chat_json(
             prompts.system_prompt(mode, lang),
             prompts.user_prompt(mode, source_text, target_seconds, source_note, lang),
-            prompts.schema(),
+            prompts.schema(mode),
         )
         script = prompts.validate_script(mode, raw, source_note_fallback=source_note,
                                          lang=lang)
+        if extra_script_meta:
+            for k, v in extra_script_meta.items():
+                if v is not None and k not in {"hook", "beats", "closing", "word_count", "lang"}:
+                    script[k] = v
 
         short_id = new_id("sho")
         t = now()
@@ -199,7 +203,12 @@ class ShortService:
             beats = [str(b).strip() for b in (patch["beats"] or []) if str(b).strip()]
             if not beats:
                 raise ValueError("beats không được rỗng.")
-            script["beats"] = beats[:4]
+            max_beats = 15 if row["mode"] == "daily_digest" else 4
+            script["beats"] = beats[:max_beats]
+            if row["mode"] == "daily_digest" and isinstance(script.get("stories"), list):
+                for idx_s, st in enumerate(script["stories"]):
+                    if idx_s < len(script["beats"]) and isinstance(st, dict):
+                        st["narration"] = script["beats"][idx_s]
         mode = row["mode"]
         lang = row.get("lang") or "vi"
         validated = prompts.validate_script(mode, script,
@@ -231,7 +240,11 @@ class ShortService:
         texts = prompts.narration_texts(script)
         objects = tts_vi.objects_root(short_id)
 
-        voice = tts_vi.synthesize_short_voice(texts, objects, short_id, lang=lang)
+        mode = row.get("mode") or ""
+        mode_cfg = (SHORT_CONFIG.get("modes") or {}).get(mode) or {}
+        voice_override = row.get("voice") or mode_cfg.get("voice")
+        voice = tts_vi.synthesize_short_voice(texts, objects, short_id,
+                                              voice=voice_override, lang=lang)
         audio_ast = self._put_asset(short_id, "audio", voice["object_key"],
                                     Path(voice["audio_path"]), "audio",
                                     duration_s=voice["duration"],
@@ -329,10 +342,74 @@ class ShortService:
         fast = bool(img_cfg.get("fast_mode"))
         hero_n = int(img_cfg.get("hero_images") or 0) if (fast and image_gen) else 0
 
-        # 3a) Ảnh gốc bài báo (nếu có link) — ưu tiên cao nhất
+        # 3a) Ảnh gốc bài báo + ảnh liên quan chặt chẽ (Wikipedia/Wikimedia) cho từng tin daily_digest;
+        #     các mode đơn lẻ lấy ảnh từ source_link.
         article_paths: list[Path] = []
+        per_scene_article: dict[int, tuple[Path, str | None]] = {}
+        per_scene_multi: dict[int, dict] = {}  # seq -> {"paths": list[Path], "attribution": str, "asset_id": str}
+        story_links = script.get("story_links") or {}
+        stories_meta = list(script.get("stories") or [])
+        if mode == "daily_digest" and (isinstance(story_links, dict) and story_links or stories_meta):
+            seen_hashes: set[str] = set()
+            for sc in scenes:
+                seq = int(sc["seq_num"])
+                s_info = story_links.get(str(seq)) or story_links.get(seq) or {}
+                st_meta = stories_meta[seq - 2] if 2 <= seq <= len(stories_meta) + 1 else {}
+                link_u = str(s_info.get("link") or "").strip() if isinstance(s_info, dict) else ""
+                headline_hint = str(
+                    st_meta.get("headline")
+                    or (s_info.get("title") if isinstance(s_info, dict) else "")
+                    or sc["text"][:100]
+                ).strip()
+                q_list = list(st_meta.get("image_queries") or [])
+                if st_meta.get("search_keywords_en"):
+                    q_list.append(str(st_meta["search_keywords_en"]))
+                if not link_u and not q_list and seq in {1, len(scenes)}:
+                    # Hook/Outro lấy đại diện ảnh #1 hoặc tin cuối nếu không có query riêng
+                    continue
+                found_items = story_media.collect_story_visuals(
+                    article_link=link_u,
+                    headline=headline_hint,
+                    queries=q_list,
+                    out_dir=objects / "article_images" / f"s{seq:02d}",
+                    target_images=3 if 2 <= seq <= len(scenes) - 1 else 2,
+                    seen_hashes=seen_hashes,
+                )
+                if found_items:
+                    paths_i: list[Path] = []
+                    attrs_i: list[str] = []
+                    first_aid: str | None = None
+                    for idx_p, item_p in enumerate(found_items):
+                        fp = Path(item_p["path"])
+                        aid = self._put_asset(
+                            short_id, "image",
+                            f"shorts/{short_id}/article_images/s{seq:02d}_{idx_p + 1:02d}_{fp.name}",
+                            fp, "image", engine=str(item_p.get("source") or "article-original"),
+                            meta={"attribution": item_p.get("attribution")},
+                        )
+                        if first_aid is None:
+                            first_aid = aid
+                        paths_i.append(fp)
+                        if item_p.get("attribution"):
+                            attrs_i.append(str(item_p["attribution"]))
+                    per_scene_multi[seq] = {
+                        "paths": paths_i,
+                        "asset_id": first_aid,
+                        "attribution": "; ".join(dict.fromkeys(attrs_i))[:280],
+                    }
+                    per_scene_article[seq] = (paths_i[0], first_aid)
+            # Hook (seq=1) & Outro (cuối) mượn ảnh tin đầu/cuối nếu chưa có để giữ đồng bộ tin trong ngày
+            if 1 not in per_scene_multi and 2 in per_scene_multi:
+                per_scene_multi[1] = {**per_scene_multi[2], "paths": [per_scene_multi[2]["paths"][0]]}
+                per_scene_article[1] = per_scene_article[2]
+            last_seq = scenes[-1]["seq_num"] if scenes else 0
+            if last_seq and last_seq not in per_scene_multi and (last_seq - 1) in per_scene_multi:
+                prev_m = per_scene_multi[last_seq - 1]
+                per_scene_multi[last_seq] = {**prev_m, "paths": [prev_m["paths"][0]]}
+                per_scene_article[last_seq] = per_scene_article[last_seq - 1]
+
         source_link = (row.get("source_link") or "").strip()
-        if source_link:
+        if source_link and not per_scene_article:
             try:
                 article_paths = article_images.collect_article_images(
                     source_link, objects / "article_images",
@@ -353,18 +430,16 @@ class ShortService:
                 (f"shorts/{short_id}/article_images/%",))
         }
 
-        # 3b) Stock Pexels (ảnh + video b-roll) — cần VIDEO_PEXELS_API_KEY.
-        #     File cache dùng chung (sha1(url)) → copy vào objects của short
-        #     để asset model nhất quán (scene_image_path resolve được).
+        # 3b) Stock Pixabay/Pexels (ảnh + video b-roll) — tắt ở daily_digest để tránh ảnh stock lệch chủ đề tin
         stock_plan: dict[int, dict] = {}  # seq -> {path, kind, attribution, asset_id}
-        if stock_media.is_configured():
+        if stock_media.is_configured() and mode != "daily_digest":
             stock_dir = objects / "stock_media"
             stock_dir.mkdir(parents=True, exist_ok=True)
             kw_en_list = list(script.get("search_keywords_en") or [])
             used_stock_paths: set[str] = set()
             for sc in scenes:
                 seq = int(sc["seq_num"])
-                if seq <= len(article_paths):
+                if seq in per_scene_article or seq <= len(article_paths):
                     continue  # scene này đã có ảnh gốc bài báo
                 q_en = kw_en_list[seq - 1].strip() if seq - 1 < len(kw_en_list) else ""
                 q = q_en or stock_media.keywords_for_query(sc["text"])
@@ -372,7 +447,6 @@ class ShortService:
                     continue
                 got = None
                 try:
-                    # Ưu tiên video b-roll động trước, sau đó mới fallback ảnh tĩnh
                     got = stock_media.fetch_video(q) or stock_media.fetch_photo(q)
                     if got and str(got["path"]) in used_stock_paths:
                         alt_q = stock_media.keywords_for_query(sc["text"], max_words=3)
@@ -400,23 +474,30 @@ class ShortService:
         bank_pool = bank.list_bank_images()
         bank_plan = {}  # seq -> Path|None (chỉ scene KHÔNG dùng ảnh bài/stock)
         ai_plan = {}    # seq -> cần gen AI
+        ai_count = 0
         for sc in scenes:
             seq = int(sc["seq_num"])
-            if seq <= len(article_paths) or seq in stock_plan:
+            if seq in per_scene_article or seq <= len(article_paths) or seq in stock_plan:
                 continue  # scene này đã có visual từ nguồn ưu tiên cao hơn
-            gen_here = image_gen is not None and ((fast and seq <= hero_n) or not fast)
+            if mode == "daily_digest":
+                gen_here = image_gen is not None and ((fast and ai_count < hero_n) or not fast)
+            else:
+                gen_here = image_gen is not None and ((fast and seq <= hero_n) or not fast)
             if gen_here:
                 ai_plan[seq] = True
+                ai_count += 1
             else:
+                if mode == "daily_digest":
+                    # Luật: bắt buộc liên quan mới đưa dô — KHÔNG lấy random bank nếu lệch chủ đề tin
+                    continue
                 if not bank_pool:
-                    if not article_paths and not stock_plan:
+                    if not per_scene_article and not article_paths and not stock_plan and not ai_plan:
                         raise ValueError(
                             "Không có nguồn ảnh: không lấy được ảnh gốc từ bài báo "
                             "(kiểm tra source_link), chưa cấu hình adapter image-gen "
                             "(VIDEO_XKIRO_API_KEY), thiếu VIDEO_PEXELS_API_KEY và bank "
                             "ảnh trống tại data/shorts_bank/.")
                     if image_gen is None:
-                        # có nguồn thấp hơn nhưng không thể gen → thẻ màu
                         ai_plan.pop(seq, None)
                 else:
                     bank_plan[seq] = bank.assign_for(short_id, seq)
@@ -429,7 +510,15 @@ class ShortService:
             image_asset_id: str | None = None
             asset_kind, attribution = "image", None
             img_path, used_bank = None, 0
-            if seq <= len(article_paths):
+            if seq in per_scene_multi:
+                pm = per_scene_multi[seq]
+                img_path, image_asset_id = pm["paths"][0], pm["asset_id"]
+                attribution = pm.get("attribution") or None
+                used_bank = 0
+            elif seq in per_scene_article:
+                img_path, image_asset_id = per_scene_article[seq]
+                used_bank = 0
+            elif seq <= len(article_paths):
                 img_path, used_bank = article_paths[seq - 1], 0
                 image_asset_id = article_asset_ids.get(img_path.name)
             elif seq in stock_plan:
@@ -468,18 +557,64 @@ class ShortService:
             {"seq": int(sc["seq_num"]), "text": sc["text"],
              "start_sec": float(sc["start_sec"]), "end_sec": float(sc["end_sec"]),
              "image_path": image_paths.get(int(sc["seq_num"])),
+             "image_paths": (
+                 [str(p) for p in per_scene_multi[int(sc["seq_num"])]["paths"]]
+                 if int(sc["seq_num"]) in per_scene_multi
+                 else ([image_paths[int(sc["seq_num"])]] if image_paths.get(int(sc["seq_num"])) else [])
+             ),
              "clip_path": clip_paths.get(int(sc["seq_num"]))}
             for sc in scenes
         ]
         out_dir = objects / "exports"
         presets = SHORT_CONFIG.get("render_presets") or {}
-        preset = presets.get("en_default", "split_news_60") if lang == "en" else presets.get("vi_default", "viral_redpill")
-        overlay_spec = {
+        if mode == "daily_digest":
+            preset = "daily_digest"
+        else:
+            preset = presets.get("en_default", "split_news_60") if lang == "en" else presets.get("vi_default", "viral_redpill")
+        overlay_spec: dict[str, Any] = {
             "preset": preset,
             "hook_headline": str(script.get("title") or row.get("title") or "").strip(),
             "source_note": str(script.get("source_note") or row.get("source_note") or "").strip(),
-            "mood": "energetic" if (lang == "en" or mode == "decode") else "ominous",
+            "mood": "energetic" if (lang == "en" or mode in {"decode", "daily_digest"}) else "ominous",
         }
+        if mode == "daily_digest":
+            stories_meta = list(script.get("stories") or [])
+            digest_scenes: list[dict] = []
+            for sc in scenes:
+                seq = int(sc["seq_num"])
+                if seq == 1:
+                    s_idx = 0
+                    meta = {}
+                elif 2 <= seq <= len(stories_meta) + 1:
+                    s_idx = seq - 1
+                    meta = stories_meta[s_idx - 1]
+                else:
+                    s_idx = len(stories_meta) + 1
+                    meta = {}
+                digest_scenes.append({
+                    "seq": seq,
+                    "story_idx": s_idx,
+                    "start_sec": float(sc["start_sec"]),
+                    "end_sec": float(sc["end_sec"]),
+                    "category": meta.get("category", "WORLD"),
+                    "headline": meta.get("headline", ""),
+                    "hero_stat": meta.get("hero_stat", ""),
+                    "hero_sub": meta.get("hero_sub", ""),
+                })
+            overlay_spec["digest_spec"] = {
+                "brand_header": str(script.get("brand_header") or "@STICKSTO · DAILY BRIEF"),
+                "signature": str(script.get("signature") or "@StickSto"),
+                "total_stories": len(stories_meta) or max(1, len(scenes) - 2),
+                "scenes": digest_scenes,
+            }
+            overlay_spec["watermark"] = {
+                "text": str(script.get("signature") or "@StickSto"),
+                "opacity": 0.22,
+                "font_size": 36,
+            }
+            overlay_spec["whoosh_times"] = [
+                float(sc["start_sec"]) for sc in scenes[1:] if float(sc["start_sec"]) > 0.3
+            ]
         result = assembler.assemble_short(short_id, scene_render, voice["audio_path"],
                                           voice["words"], str(ass_path), out_dir,
                                           overlay_spec=overlay_spec)

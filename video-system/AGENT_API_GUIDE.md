@@ -1,12 +1,12 @@
 # Hướng Dẫn Toàn Diện Cho AI Agent Sản Xuất Video (External Video Agent API Guide)
 **Hệ thống Video AI — English Explainer Video Pipeline (`https://vidfac.gacdero.vn`)**
-*Version: 2.3 (Production Ready — All-in-One API + Shot Checklist + Skill + Visual Anchor Guide)*
+*Version: 3.0 (Production Ready — Stick-Hero in Epic World v3 + Macro-Shot 12–18s + All-in-One API)*
 
 ---
 
 ## 1. Thông Tin Kết Nối Production (Connection & Credentials)
 
-Bạn là **External Video & Image Generation Agent**. Nhiệm vụ của bạn là lấy các công việc (Job) trong hàng đợi `todo` từ hệ thống `https://vidfac.gacdero.vn`, kiểm tra bản thu âm `audio_en.wav` & kịch bản `script_en.json`, tạo ảnh Keyframe / Character Sheet và tạo các đoạn Video hoạt họa 2D theo đúng thời lượng từng phân cảnh, rồi đẩy ngược lên hệ thống.
+Bạn là **External Video & Image Generation Agent**. Nhiệm vụ của bạn là lấy các công việc (Job) trong hàng đợi `todo` từ hệ thống `https://vidfac.gacdero.vn`, kiểm tra bản thu âm `audio_en.wav` & kịch bản `script_en.json`, tạo ảnh Keyframe / Character Sheet và tạo các đoạn Video (Macro-Shot 12–18 giây/cảnh hoặc khớp theo từng shot `duration_sec`) theo đúng chuẩn **Stick-Hero in Epic Cinematic World (v3)**, rồi đẩy ngược lên hệ thống.
 
 - **Production Base URL:** `https://vidfac.gacdero.vn`
 - **API Key (Dùng cho mọi lệnh `POST` / `PATCH` / `DELETE`):**
@@ -35,10 +35,10 @@ Bạn là **External Video & Image Generation Agent**. Nhiệm vụ của bạn 
 [Bước 4: Nghe Audio & Gửi Feedback]     ──> Nếu tên riêng, năm, số liệu, cách đọc hay nhịp nghỉ chưa chuẩn -> POST /feedback
        │
        ▼
-[Bước 5: Vẽ & Upload Ảnh Keyframe]      ──> Dùng ảnh Reference làm ý tưởng (Visual Anchor) + Khuôn Crayon Vector v2 -> POST /images
+[Bước 5: Vẽ & Upload Ảnh Keyframe]      ──> Dùng ảnh Reference làm mỏ neo đại cảnh 3D + Nhân vật que Stick-Hero (v3) -> POST /images
        │
        ▼
-[Bước 6: Gen & Upload Video Tuần Tự]    ──> Gen video theo nhịp 30-40-30 khớp thời lượng Audio -> POST /videos (seq_num = 1, 2, 3...)
+[Bước 6: Gen & Upload Video Tuần Tự]    ──> Gen Macro-Shot (12–18s, slow push-in/pan) khớp Audio -> POST /videos (seq_num = 1, 2, 3...)
        │
        ▼
 [Bước 7: Kiểm tra đủ thời lượng & Ráp]  ──> Khi shortfall_sec == 0 (is_duration_sufficient == true) -> POST /confirm-assemble
@@ -149,57 +149,53 @@ curl -X POST "https://vidfac.gacdero.vn/api/v1/todos/itm_54095b4c9bea/feedback" 
 
 ---
 
-### Bước 5: Quy Tắc Vàng Khi Tạo Ảnh Keyframe & Video (Skill Bundle v2.1)
+### Bước 5: Quy Tắc Vàng Khi Tạo Ảnh Keyframe & Video (Skill Bundle v3.0 — Stick-Hero in Epic World)
 
-Khi tạo ảnh Keyframe và tạo Video cho từng shot (hoặc cụm shot gộp), bạn **BẮT BUỘC** tuân thủ bộ quy tắc **Crayon Capital Vector Mold v2**:
+Khi tạo ảnh Keyframe và tạo Video cho từng Macro-Shot (hoặc cụm shot gộp qua `covered_shot_indexes`), bạn **BẮT BUỘC** tuân thủ bộ quy tắc **v3 Hybrid Mold (Nhân vật que tối giản trong Đại cảnh 3D điện ảnh)**:
 
-#### 5.1. Khối `STYLE LOCKED` (Dán nguyên văn vào đầu mọi Prompt tạo ảnh/video)
+#### 5.1. Khối `STYLE LOCKED` v3 (Dán nguyên văn vào đầu mọi Prompt tạo ảnh/video)
 ```text
 STYLE LOCKED:
-Simple flat 2D cartoon explainer, clean sharp professional line art.
-Crisp, smooth, bold black outlines, clean vector edges.
-Flat colours, minimal shading: exactly one flat grey side shadow
-on the shaded side of a head or body, no gradient, no detailed shading.
-Characters are stick figures: oversized round heads, very small dot eyes,
-simple curved eyebrows, wide toothy grins OR shocked open mouths,
-a small oval or tube body, thin single-line stick arms and legs,
-hands as small plain blobs, no fingers, no detailed clothing folds.
-Main character: peach skin face, detailed hair, dark or coloured outfit,
-sharp and high contrast. Crowd characters: plain white faces,
-no skin tone, one flat grey side shadow, simple flat hair,
-repeated identical oval bodies, lower contrast than the main character.
-Muted-but-clear palette, slightly desaturated: dusty blue, muted navy,
-muted red, off-white, slate grey, warm earth tones.
-One accent colour per shot, muted red, reserved for the focal object,
-number, or stamp. Everything else stays muted so the accent punches.
-Bright, simple backgrounds, one clear scene, no clutter, still bright and readable.
+Hybrid cinematic editorial illustration (Stick-Hero in Epic Cinematic World).
+Environment: ultra-detailed, atmospheric semi-realistic 3D / cinema-grade environment
+with dramatic volumetric lighting, realistic textures (wet steel, ocean swells,
+deep space curvature, brushed metal, glowing glass), shallow depth of field,
+and rich mood lighting.
+One focal accent colour per shot (crimson red, glowing amber, or electric cyan)
+to anchor the viewer's eye cleanly against the atmospheric backdrop.
+Characters: clean minimalist 2D stick-figure characters (smooth peach-skin round
+head with bold dark outline, small expressive dot eyes, curved eyebrows,
+thin single-line stick arms and legs, small plain blob hands) keeping ONLY 2-3
+signature recognizable traits per key figure (distinctive hairstyle, jacket/suit
+colour, or glasses). Crowd characters use plain white round heads with minimal traits.
+Integration law: characters MUST receive subtle ambient rim-lighting on hair/edges
+and cast soft grounded shadows/reflections onto the floor so they feel naturally
+inside the epic cinematic world (never flat pasted stickers).
+Macro-Shot pacing: group 2-4 sentences into 12-18s macro-scenes with ONE slow
+continuous cinematic camera movement (slow push-in, gentle orbital pan, or tilt).
 Aspect ratio: 16:9, unless the format requires 9:16.
-Negative: NO crayon texture, NO grain, NO paper texture,
-NO rough sketchy wobbly lines, NO childish doodle texture,
-NO overly vivid candy colours, NO dark grey muddy look,
-no photorealism, no 3D render, no detailed shading, no gradient,
-no blurry, no extra limbs, no distorted hands,
-no crowded background, no tiny unreadable text, no garbled text,
-no realistic torso, shirt, or jacket with folds and buttons,
-no crowd character with the same skin tone and detail as the main character.
+Negative: NO flat empty 2D white-void backgrounds, NO childish crayon/doodle texture,
+NO distorted hands with fingers, NO photorealistic human anatomy on stick characters,
+NO garbled or unreadable text, NO cluttered HUD chaos, NO crowded bottom 20% subtitle zone.
 ```
 
 #### 5.2. Quy tắc sử dụng 10–20 tấm ảnh Reference (`reference_images`) làm Ý tưởng (Visual Anchor)
 - **Khi một shot có `reference_image_url` (hoặc nằm gần mốc `shot_index` của `reference_images`):**
-  1. Hãy mở tấm ảnh Reference đó ra quan sát: hình dáng thật của chiếc xe, cấu trúc viên pin, kiến trúc tòa nhà trụ sở, sàn giao dịch chứng khoán lịch sử, biểu đồ thực tế, hoặc đặc điểm ngoại hình/kính/tóc của nhân vật chính.
-  2. **Lấy đúng ý tưởng, bố cục và đặc trưng thực tế từ bức ảnh đó** để đưa vào cảnh vẽ giúp video sống động, thú vị và có chiều sâu thực tế.
-  3. **Tuyệt đối không chèn nguyên ảnh chụp thật (photorealistic)** vào video — hãy **chuyển thể (stylize / vectorize)** chủ thể trong bức ảnh đó sang nét vẽ 2D Vector của `STYLE LOCKED` (viền mực đen đậm, nhân vật chính mặt da đào `#E8A88A`, đám đông mặt trắng `#FFFFFF`, 1 điểm nhấn màu đỏ `#D93829`).
+  1. Hãy mở tấm ảnh Reference đó ra quan sát: hình dáng thật của tàu sân bay, tên lửa, chảo vệ tinh, tòa nhà trụ sở, sàn giao dịch chứng khoán, thiết bị thực tế, hoặc đặc điểm ngoại hình/kính/tóc của nhân vật chính.
+  2. **Dựng ĐẠI CẢNH 3D/tả thực hoành tráng bám sát chi tiết thực tế từ ảnh tham khảo** (ánh sáng khối, chiều sâu trường ảnh, bề mặt kim loại/nước biển/không gian) để khung hình choáng ngợp và thuyết phục.
+  3. **Nhân vật dẫn chuyện & đám đông giữ dạng que đặc trưng:** Không thay người dẫn chuyện thành người thật 3D; giữ đầu tròn da đào + chỉ 2–3 nét nhận diện (kiểu tóc, áo khoác, kính), đồng thời bắt buộc cho nhân vật **hứng viền sáng (*rim-light*) và đổ bóng xuống sàn** để hòa nhập hoàn toàn vào đại cảnh thật.
 
-#### 5.3. Quy tắc 4 loại Shot & Nhịp chuyển động Video `30-40-30`
+#### 5.3. Quy tắc 4 loại Shot & Nhịp Macro-Shot `12–18 giây`
 - **4 loại Shot:**
-  1. `scene` (Cảnh rộng / Cảnh kể): Khung hình 3 lớp (Tiền cảnh bị cắt viền mép khung -> Trung cảnh nhân vật chính da đào -> Hậu cảnh đơn giản lặp lại).
-  2. `quote` (Trích dẫn / Bong bóng suy nghĩ): Bong bóng mây trắng viền đen lớn ở trung tâm chứa nguyên văn câu punchline ngắn, mặt nhân vật nói là tiêu điểm thứ hai.
-  3. `crowd` (Đám đông / Phòng họp): Chỉ duy nhất nhân vật chính có mặt màu da đào và tóc chi tiết; toàn bộ đám đông xung quanh mặt trắng phẳng + 1 bóng xám bên cạnh.
-  4. `diagram` (Sơ đồ / Infographic): Chia 2 dải màu phẳng bằng đường kẻ ngang đen đậm, bên trái là silhouette vật lớn (chỉ 3–4 chi tiết bên trong), bên phải là con số/con dấu màu đỏ nhấn (`muted red`).
-- **Luật chuyển động Video `30-40-30` & Máy quay tĩnh (`Static Camera`):**
-  - **0% – 30% thời lượng clip:** Giữ nguyên bố cục mở đầu để mắt người xem kịp định hình.
-  - **30% – 70% thời lượng clip:** Thực hiện **duy nhất 1 chuyển động chậm, dứt khoát** (ví dụ: nhân vật đổi biểu cảm/vung tay, bong bóng chữ hiện ra, đường biểu đồ đi lên, con dấu đóng xuống).
-  - **70% – 100% thời lượng clip:** Giữ tĩnh khung hình cuối để người xem đọc kịp con số/chữ trước khi chuyển cảnh cắt cứng (`hard cut`).
+  1. `scene` (Đại cảnh điện ảnh): Góc rộng 24mm/35mm cho thấy sự choáng ngợp của công trình/bối cảnh 3D tả thực + nhân vật que đặc trưng nhỏ gọn ở tiền cảnh/trung cảnh có rim-light và bóng đổ.
+  2. `quote` (Trích dẫn / Câu hỏi chốt): Góc trung cận nhân vật que đặc trưng trên nền bối cảnh sâu có bokeh + hộp chữ/bong bóng suy nghĩ rõ nét chứa nguyên văn câu punchline ngắn.
+  3. `crowd` (Đám đông / Phòng điều khiển): Nhân vật chính mặt da đào nổi bật dưới ánh đèn chính giữa đám đông mặt trắng tối giản trong hội trường/phòng điều khiển tả thực.
+  4. `diagram` (Sơ đồ 3D / Infographic): Mô hình 3D chi tiết cao (Trái Đất, vệ tinh, chip, tàu) kết hợp đường vector phát sáng & 1 con số/nhãn lớn nổi bật.
+- **Luật chuyển động Video `Macro-Shot 12–18s` (nhịp 30-40-30 mượt mà):**
+  - **0% – 30% thời lượng clip:** Thiết lập bố cục đại cảnh rộng + thế đứng nhân vật que có rim-light.
+  - **30% – 70% thời lượng clip:** Thực hiện **1 chuyển động camera điện ảnh chậm liên tục** (`slow push-in`, `gentle orbital pan`, hoặc `tilt`) kết hợp hành động chính của cảnh (khói/sóng/tia laser/chữ hiện dần).
+  - **70% – 100% thời lượng clip:** Giữ nhịp ổn định để mắt người xem hấp thụ độ hoành tráng hoặc đọc kịp số liệu trước khi cắt cảnh (`hard cut`).
+  - *(Nếu job có nhiều shot ngắn cũ 4–6s, bạn vẫn có thể gom 2–3 shot liên tiếp bằng `covered_shot_indexes: [1, 2, 3]` thành 1 clip 12–18s liền mạch).*
 
 #### 5.4. API Upload Ảnh Keyframe / Character Sheet lên hệ thống
 - **Endpoint:** `POST https://vidfac.gacdero.vn/api/v1/todos/{item_id}/images`

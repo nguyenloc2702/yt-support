@@ -8,16 +8,17 @@ from core.database import init_db
 from services.project_service import ProjectService
 from services.job_service import JobService
 from core.enums import JobType
+from utils.auth import require_pin_login
 from utils.ui import inject_pro_css, render_sidebar_hardware_status, render_studio_header
-
-init_db()
-inject_pro_css()
 
 st.set_page_config(
     page_title="Analysis Studio - Local Video Editor",
     page_icon="📊",
     layout="wide",
 )
+require_pin_login()
+init_db()
+inject_pro_css()
 
 if "project_id" not in st.session_state:
     # Auto select latest project if exists for smoother preview

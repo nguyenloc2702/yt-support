@@ -515,3 +515,75 @@ def test_publish_short_immediate_scheduled_and_ui_hydration(client, ingest, read
     assert res2["captions_synced"] is True
     assert '"language": "vi"' in cap_langs[-1]
     assert "publishAt" in init_bodies[-1]["status"]
+
+
+def test_set_video_thumbnail_endpoint(client, ingest, read_key, yt_env, monkeypatch):
+    seen_thumbs: list[tuple[str, str, bytes]] = []
+    mode = {"status": 200}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/upload/youtube/v3/thumbnails/set":
+            if mode["status"] != 200:
+                return httpx.Response(mode["status"], json={"error": {"message": "forbidden"}})
+            seen_thumbs.append((
+                req.url.params["videoId"],
+                req.headers["Content-Type"],
+                req.content,
+            ))
+            return httpx.Response(200, json={"items": [{"default": {"url": "https://yt/thumb.jpg"}}]})
+        raise AssertionError(f"Unexpected request: {req.method} {req.url}")
+
+    yt = _setup_mock_youtube(monkeypatch, handler)
+    _connect_sample_channel(yt, app_main.store)
+    t = time.time()
+    app_main.store.execute(
+        "INSERT INTO youtube_uploads (id,item_id,target_type,channel_id,title,privacy_status,"
+        "upload_status,youtube_video_id,youtube_url,thumbnail_synced,captions_synced,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("ytu_thumb_1", "sho_t1", "short", "UC_TEST_123", "Test Short", "public",
+         "uploaded", "yt_vid_99", "https://www.youtube.com/watch?v=yt_vid_99", 0, 0, t, t),
+    )
+
+    admin_hdr = {"Authorization": "Bearer test-admin"}
+    jpg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+    # Ingest key lacks admin scope -> 403
+    r_unauth = client.post(
+        "/api/v1/youtube/videos/yt_vid_99/thumbnail",
+        headers=ingest,
+        files={"file": ("thumb.jpg", BytesIO(jpg_bytes), "image/jpeg")},
+    )
+    assert r_unauth.status_code == 403
+
+    # Non-image payload -> 422
+    r_bad = client.post(
+        "/api/v1/youtube/videos/yt_vid_99/thumbnail",
+        headers=admin_hdr,
+        files={"file": ("bad.txt", BytesIO(b"not an image"), "text/plain")},
+    )
+    assert r_bad.status_code == 422
+
+    # Valid JPEG upload -> 200 and updates youtube_uploads.thumbnail_synced
+    r_ok = client.post(
+        "/api/v1/youtube/videos/yt_vid_99/thumbnail",
+        headers=admin_hdr,
+        files={"file": ("thumb.jpg", BytesIO(jpg_bytes), "image/jpeg")},
+    )
+    assert r_ok.status_code == 200, r_ok.text
+    body = r_ok.json()
+    assert body["video_id"] == "yt_vid_99"
+    assert body["thumbnail_synced"] is True
+    assert body["thumbnails"]["default"]["url"] == "https://yt/thumb.jpg"
+    assert seen_thumbs == [("yt_vid_99", "image/jpeg", jpg_bytes)]
+
+    row = app_main.store.query_one("SELECT thumbnail_synced FROM youtube_uploads WHERE id='ytu_thumb_1'")
+    assert row["thumbnail_synced"] == 1
+
+    # Upstream 403 maps cleanly to 403
+    mode["status"] = 403
+    r_403 = client.post(
+        "/api/v1/youtube/videos/yt_vid_99/thumbnail",
+        headers=admin_hdr,
+        files={"file": ("thumb.jpg", BytesIO(jpg_bytes), "image/jpeg")},
+    )
+    assert r_403.status_code == 403

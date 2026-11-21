@@ -22,6 +22,7 @@ description: Kỹ năng sản xuất video hoạt họa giải thích, tiểu s�
 | [`style_bible_template.md`](style_bible_template.md) | **Khung mẫu Style Bible** | Template trống có sẵn công thức đo đạc để reverse-engineer bất kỳ kênh YouTube mẫu nào khác. |
 | [`style_bible_Crayon_Capital.md`](style_bible_Crayon_Capital.md) | **Style Bible tham chiếu** | Bộ thông số đo đạc thực tế từ kênh Crayon Capital (WPM 184.8, shot 5.0s, LUFS -18.3, nền đổi màu theo mood). |
 | [`pilot_comparison_Crayon_Capital.md`](pilot_comparison_Crayon_Capital.md) | **Giao thức thử nghiệm mù** | Kịch bản pilot 75 giây chủ đề Nvidia/Jensen Huang và ma trận so sánh 3 phiên bản A/B/C. |
+| [`skills/shot_generation/`](../shot_generation/SKILL.md) | **Khuôn mẫu Shot & Prompt (Chuyên sâu)** | Sườn 14 ô gen ảnh keyframe, prompt shot video 30-40-30, Style Lock và Character Sheet chuẩn Crayon Capital. |
 
 ---
 
@@ -37,6 +38,7 @@ description: Kỹ năng sản xuất video hoạt họa giải thích, tiểu s�
 8. **Nền chuyển động theo cảm xúc:** Sáng ngà khi bình thường, bảng đen chì khi khủng hoảng/biến cố.
 9. **Âm thanh chuẩn phát thanh:** Loudness -18 đến -20 LUFS, BGM -18dB dưới voice, SFX 6–12 lần/phút.
 10. **Callback bắt buộc:** Câu kết thúc video phải quay lại trả lời hoặc giải tỏa câu hỏi ở phần Hook mở đầu.
+11. **Ảnh tham khảo làm mỏ neo sáng tạo (Visual Idea Anchor & Stylization):** Khai thác 10-20 ảnh tư liệu thực tế đi kèm kịch bản (`reference_images`). Chỗ nào khớp với ảnh tư liệu (dáng siêu xe, cấu trúc pin, sàn giao dịch, nhân vật, trụ sở), Agent BẮT BUỘC lấy ảnh đó làm ý tưởng thị giác để sáng tạo bối cảnh, đạo cụ và động tác video nhìn cho cuốn hút, chân thực; đồng thời CHUYỂN THỂ 100% sang chuẩn vector Crayon Capital (người que da đào, nét mực đen đậm, 1 màu đỏ nhấn; TUYỆT ĐỐI KHÔNG dán ảnh chụp thô vào video).
 
 ---
 
@@ -46,7 +48,7 @@ description: Kỹ năng sản xuất video hoạt họa giải thích, tiểu s�
 graph TD
     A[Chủ đề mới] --> B[Bước 1-3: Soạn kịch bản theo UNIVERSAL_VIDEO_ALGORITHM.md]
     B --> C[Bước 4-5: Chia shot & Thiết kế âm thanh theo VIDEO_PRODUCTION_SKILL.md]
-    C --> D[Bước 6: Áp Style Prompt từ style_bible_Crayon_Capital.md]
+    C --> D[Bước 6: Thiết kế Prompt Keyframe & Shot theo skills/shot_generation]
     D --> E[Bước 7: Render & Lắp ráp video]
     E --> F[Bước 8: Kiểm duyệt 60 tiêu chí theo VIDEO_QA_CHECKLIST.md]
     F -->|Đạt 100% Critical| G[Xuất bản video hoàn chỉnh]

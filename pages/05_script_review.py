@@ -5,10 +5,12 @@ import streamlit as st
 from core.exceptions import AppError
 from core.logging_config import get_logger
 from services.script_service import ScriptService
+from utils.auth import require_pin_login
 
 logger = get_logger(__name__)
 
 st.set_page_config(page_title="Duyệt Script", page_icon="📝", layout="wide")
+require_pin_login()
 st.title("📝 Duyệt & Chỉnh sửa Script (AI viết lại)")
 
 service = ScriptService()

@@ -289,6 +289,90 @@ CREATE TABLE IF NOT EXISTS bgm_tracks (
   updated_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_bgm_mood ON bgm_tracks(mood, track_type, active);
+-- Instagram Reels publishing (Instagram API with Instagram Login)
+CREATE TABLE IF NOT EXISTS ig_accounts (
+  id TEXT PRIMARY KEY,
+  ig_user_id TEXT UNIQUE NOT NULL,
+  username TEXT,
+  account_type TEXT,
+  media_count INTEGER DEFAULT 0,
+  access_token_enc TEXT NOT NULL,
+  token_expires_at REAL,
+  status TEXT DEFAULT 'connected',   -- connected | disconnected | expired
+  is_default INTEGER DEFAULT 1,
+  connected_at REAL,
+  updated_at REAL
+);
+CREATE TABLE IF NOT EXISTS ig_publishes (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  target_type TEXT DEFAULT 'todo',   -- todo | short
+  account_id TEXT NOT NULL,
+  caption TEXT,
+  share_to_feed INTEGER DEFAULT 1,
+  is_ai_generated INTEGER DEFAULT 1,
+  affiliate_slug TEXT,
+  container_id TEXT,
+  ig_media_id TEXT,
+  permalink TEXT,
+  publish_at TEXT,
+  status TEXT DEFAULT 'queued',      -- queued | scheduled | creating | processing | published | failed | canceled
+  attempt_count INTEGER DEFAULT 0,
+  error_message TEXT,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_ig_publishes_item ON ig_publishes(item_id, created_at);
+CREATE TABLE IF NOT EXISTS ig_oauth_nonces (
+  nonce TEXT PRIMARY KEY,
+  expires_at REAL NOT NULL,
+  used_at REAL
+);
+-- Affiliate: products -> links (slug redirect) -> conversions (sync từ reporting API)
+CREATE TABLE IF NOT EXISTS affiliate_products (
+  id TEXT PRIMARY KEY,
+  network TEXT NOT NULL,             -- clickbank | ebay
+  label TEXT NOT NULL,
+  cb_promoter TEXT,                  -- ClickBank vendor nickname
+  ebay_item_url TEXT,
+  is_active INTEGER DEFAULT 1,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE TABLE IF NOT EXISTS affiliate_links (
+  id TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL,
+  item_id TEXT,
+  network TEXT NOT NULL,
+  deeplink TEXT NOT NULL,
+  slug TEXT UNIQUE NOT NULL,
+  subid TEXT,
+  clicks INTEGER DEFAULT 0,
+  last_click_at REAL,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_aff_links_item ON affiliate_links(item_id);
+CREATE TABLE IF NOT EXISTS affiliate_conversions (
+  id TEXT PRIMARY KEY,
+  network TEXT NOT NULL,
+  network_txn_id TEXT NOT NULL,
+  subid TEXT,
+  item_id TEXT,
+  product_label TEXT,
+  amount REAL DEFAULT 0.0,
+  currency TEXT DEFAULT 'USD',
+  status TEXT,                       -- pending | cleared | returned
+  event_date TEXT,
+  synced_at REAL,
+  UNIQUE(network, network_txn_id)
+);
+CREATE TABLE IF NOT EXISTS bio_pages (
+  handle TEXT PRIMARY KEY,
+  title TEXT,
+  items_json TEXT,
+  updated_at REAL
+);
 """
 
 _ITEM_MIGRATION_COLS = [

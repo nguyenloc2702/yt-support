@@ -26,5 +26,7 @@ pacing:
   news_max_scene_sec: 8.0
   decode_min_scene_sec: 3.0
   decode_max_scene_sec: 12.0
+  daily_digest_min_scene_sec: 1.5
+  daily_digest_max_scene_sec: 18.0
 qc:
   duration_tolerance_sec: 0.25

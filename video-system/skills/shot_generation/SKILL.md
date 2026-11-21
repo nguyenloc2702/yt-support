@@ -1,18 +1,21 @@
 ---
 name: shot-generation-expert
 description: >-
-  Kỹ năng và khuôn mẫu chuẩn v2 (Crayon Capital Vector Mold) để thiết kế prompt, tạo keyframe ảnh và gen shot video hoạt họa 2D / explainer.
-  Bao gồm sườn 14 ô vạn năng, phân loại 4 kiểu shot (cảnh rộng, trích dẫn, đám đông, sơ đồ), phân biệt nhân vật chính da đào vs quần chúng mặt trắng bóng xám,
-  khung hình 3 lớp cắt viền, 1 màu nhấn đỏ, timeline chuyển động 30-40-30 và checklist kiểm định nối shot.
+  Kỹ năng và khuôn mẫu chuẩn v3 (Stick-Hero in Epic Cinematic World) để thiết kế prompt, tạo keyframe ảnh và gen Macro-Shot 12–18 giây.
+  Kết hợp nhân vật người que giữ 2–3 nét đặc trưng (kiểu tóc, áo khoác, kính) có rim-light và bóng đổ trong đại cảnh 3D tả thực hoành tráng,
+  1 màu nhấn nổi bật, chuyển động camera chậm mượt theo nhịp 30-40-30.
 ---
 
-# SHOT GENERATION EXPERT SKILL (v2)
-## Kỹ năng thiết kế Prompt, Keyframe & Shot Video Explainer 2D Chuẩn Crayon Capital
+# SHOT GENERATION EXPERT SKILL (v3 — Hybrid Stick-Hero in Epic World)
+## Kỹ năng thiết kế Prompt, Keyframe & Macro-Shot Video Chuẩn StickSto (v3)
 
-> **Phiên bản:** `v2.0.0` *(Cập nhật 2026-11-03 theo 4 ảnh mẫu thực tế từ clip triệu view Crayon Capital `npoPedEq3hs`)*  
+> **Phiên bản:** `v3.0.0` *(Nâng cấp 2026-11-18: Kết hợp nhân vật que tối giản giữ 2-3 nét đặc trưng trong ĐẠI CẢNH 3D tả thực hoành tráng + Macro-Shot 12–18 giây/cảnh)*  
 > **Thư mục chuyên biệt:** `skills/shot_generation/`  
 > **Kỹ năng liên đới:** Kết nối trực tiếp với [`video_production`](../video_production/SKILL.md) (kịch bản, giọng đọc, âm thanh).  
-> **Đột phá v2:** Khắc phục triệt để 5 điểm yếu của v1: (1) Nhân vật người que: chính da đào vs quần chúng mặt trắng; (2) Khung 3 lớp có tiền cảnh cắt viền; (3) Shot trích dẫn câu đầy đủ làm punchline; (4) Shot sơ đồ vật lớn số đỏ; (5) Một mảng bóng xám phẳng đặc trưng.
+> **Đột phá v3:**  
+> 1. **Cảnh vật hoành tráng & thật hơn:** Đại cảnh 3D tả thực/điện ảnh (volumetric lighting, vật liệu thật, mây/sóng/không gian có chiều sâu) thay cho nền 2D phẳng trống.  
+> 2. **Nhân vật que đặc trưng hòa nhập ánh sáng (Stick-Hero + Rim-Light):** Giữ đầu tròn da đào, mắt chấm tròn, tay chân que mảnh và **chỉ giữ 2–3 nét nhận diện** (kiểu tóc, áo khoác/vest, kính); bắt buộc có *rim-light* và bóng đổ xuống sàn để không bị cảm giác dán sticker.  
+> 3. **Macro-Shot 12–18 giây (gom 2–4 câu thoại chung 1 bối cảnh lớn):** Giảm video 8–10 phút từ 80 shot vụn xuống **~30–38 Macro-Shot**, dùng 1 chuyển động camera chậm liên tục (*slow push-in / orbital pan / tilt*) để dễ gen video và giữ mạch kể mượt mà.
 
 ---
 
@@ -83,36 +86,31 @@ Lời thoại + timecode
 
 ---
 
-## 📋 Khối Style Lock chuẩn v2 — Dán nguyên văn vào mọi Prompt
+## 📋 Khối Style Lock chuẩn v3 — Hybrid Stick-Hero in Epic World
 
 ```text
 STYLE LOCKED:
-Simple flat 2D cartoon explainer, clean sharp professional line art.
-Crisp, smooth, bold black outlines, clean vector edges.
-Flat colours, minimal shading: exactly one flat grey side shadow
-on the shaded side of a head or body, no gradient, no detailed shading.
-Characters are stick figures: oversized round heads, very small dot eyes,
-simple curved eyebrows, wide toothy grins OR shocked open mouths,
-a small oval or tube body, thin single-line stick arms and legs,
-hands as small plain blobs, no fingers, no detailed clothing folds.
-Main character: peach skin face, detailed hair, dark or coloured outfit,
-sharp and high contrast. Crowd characters: plain white faces,
-no skin tone, one flat grey side shadow, simple flat hair,
-repeated identical oval bodies, lower contrast than the main character.
-Muted-but-clear palette, slightly desaturated: dusty blue, muted navy,
-muted red, off-white, slate grey, warm earth tones.
-One accent colour per shot, muted red, reserved for the focal object,
-number, or stamp. Everything else stays muted so the accent punches.
-Bright, simple backgrounds, one clear scene, no clutter, still bright and readable.
+Hybrid cinematic editorial illustration (Stick-Hero in Epic Cinematic World).
+Environment: ultra-detailed, atmospheric semi-realistic 3D / cinema-grade environment
+with dramatic volumetric lighting, realistic textures (wet steel, ocean swells,
+deep space curvature, brushed metal, glowing glass), shallow depth of field,
+and rich mood lighting.
+One focal accent colour per shot (crimson red, glowing amber, or electric cyan)
+to anchor the viewer's eye cleanly against the atmospheric backdrop.
+Characters: clean minimalist 2D stick-figure characters (smooth peach-skin round
+head with bold dark outline, small expressive dot eyes, curved eyebrows,
+thin single-line stick arms and legs, small plain blob hands) keeping ONLY 2-3
+signature recognizable traits per key figure (distinctive hairstyle, jacket/suit
+colour, or glasses). Crowd characters use plain white round heads with minimal traits.
+Integration law: characters MUST receive subtle ambient rim-lighting on hair/edges
+and cast soft grounded shadows/reflections onto the floor so they feel naturally
+inside the epic cinematic world (never flat pasted stickers).
+Macro-Shot pacing: group 2-4 sentences into 12-18s macro-scenes with ONE slow
+continuous cinematic camera movement (slow push-in, gentle orbital pan, or tilt).
 Aspect ratio: 16:9, unless the format requires 9:16.
-Negative: NO crayon texture, NO grain, NO paper texture,
-NO rough sketchy wobbly lines, NO childish doodle texture,
-NO overly vivid candy colours, NO dark grey muddy look,
-no photorealism, no 3D render, no detailed shading, no gradient,
-no blurry, no extra limbs, no distorted hands,
-no crowded background, no tiny unreadable text, no garbled text,
-no realistic torso, shirt, or jacket with folds and buttons,
-no crowd character with the same skin tone and detail as the main character.
+Negative: NO flat empty 2D white-void backgrounds, NO childish crayon/doodle texture,
+NO distorted hands with fingers, NO photorealistic human anatomy on stick characters,
+NO garbled or unreadable text, NO cluttered HUD chaos, NO crowded bottom 20% subtitle zone.
 ```
 
 ---

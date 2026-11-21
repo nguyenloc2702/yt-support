@@ -7,6 +7,7 @@ from core.schemas import ProjectCreate
 from core.enums import RightsType
 from core.exceptions import InvalidMediaError, DependencyNotFoundError
 from config.settings import settings
+from utils.auth import require_pin_login
 from utils.ui import inject_pro_css, render_sidebar_hardware_status, render_studio_header
 
 st.set_page_config(
@@ -14,6 +15,7 @@ st.set_page_config(
     page_icon="📁",
     layout="wide",
 )
+require_pin_login()
 
 init_db()
 inject_pro_css()

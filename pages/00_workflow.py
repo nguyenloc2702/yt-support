@@ -39,6 +39,7 @@ from services.settings_service import (
     get_vlm_model,
     is_vlm_enabled,
 )
+from utils.auth import require_pin_login
 from utils.ui import inject_pro_css, render_sidebar_hardware_status
 
 st.set_page_config(
@@ -46,6 +47,7 @@ st.set_page_config(
     page_icon="🎬",
     layout="wide",
 )
+require_pin_login()
 
 init_db()
 inject_pro_css()

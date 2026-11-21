@@ -12,97 +12,84 @@ from pathlib import Path
 from typing import Any
 
 STYLE_LOCK_V2 = """STYLE LOCKED:
-Simple flat 2D cartoon explainer, clean sharp professional line art.
-Crisp, smooth, bold black outlines, clean vector edges.
-Flat colours, minimal shading: exactly one flat grey side shadow
-on the shaded side of a head or body, no gradient, no detailed shading.
-Characters are stick figures: oversized round heads, very small dot eyes,
-simple curved eyebrows, wide toothy grins OR shocked open mouths,
-a small oval or tube body, thin single-line stick arms and legs,
-hands as small plain blobs, no fingers, no detailed clothing folds.
-Main character: peach skin face, detailed hair, dark or coloured outfit,
-sharp and high contrast. Crowd characters: plain white faces,
-no skin tone, one flat grey side shadow, simple flat hair,
-repeated identical oval bodies, lower contrast than the main character.
-Muted-but-clear palette, slightly desaturated: dusty blue, muted navy,
-muted red, off-white, slate grey, warm earth tones.
-One accent colour per shot, muted red, reserved for the focal object,
-number, or stamp. Everything else stays muted so the accent punches.
-Bright, simple backgrounds, one clear scene, no clutter, still bright and readable.
+Hybrid cinematic editorial illustration (Stick-Hero in Epic Cinematic World).
+Environment: ultra-detailed, atmospheric semi-realistic 3D / cinema-grade environment
+with dramatic volumetric lighting, realistic textures (wet steel, ocean swells,
+deep space curvature, brushed metal, glowing glass), shallow depth of field,
+and rich mood lighting.
+One focal accent colour per shot (crimson red, glowing amber, or electric cyan)
+to anchor the viewer's eye cleanly against the atmospheric backdrop.
+Characters: clean minimalist 2D stick-figure characters (smooth peach-skin round
+head with bold dark outline, small expressive dot eyes, curved eyebrows,
+thin single-line stick arms and legs, small plain blob hands) keeping ONLY 2-3
+signature recognizable traits per key figure (distinctive hairstyle, jacket/suit
+colour, or glasses). Crowd characters use plain white round heads with minimal traits.
+Integration law: characters MUST receive subtle ambient rim-lighting on hair/edges
+and cast soft grounded shadows/reflections onto the floor so they feel naturally
+inside the epic cinematic world (never flat pasted stickers).
+Macro-Shot pacing: group 2-4 sentences into 12-18s macro-scenes with ONE slow
+continuous cinematic camera movement (slow push-in, gentle orbital pan, or tilt).
 Aspect ratio: 16:9, unless the format requires 9:16.
-Negative: NO crayon texture, NO grain, NO paper texture,
-NO rough sketchy wobbly lines, NO childish doodle texture,
-NO overly vivid candy colours, NO dark grey muddy look,
-no photorealism, no 3D render, no detailed shading, no gradient,
-no blurry, no extra limbs, no distorted hands,
-no crowded background, no tiny unreadable text, no garbled text,
-no realistic torso, shirt, or jacket with folds and buttons,
-no crowd character with the same skin tone and detail as the main character."""
+Negative: NO flat empty 2D white-void backgrounds, NO childish crayon/doodle texture,
+NO distorted hands with fingers, NO photorealistic human anatomy on stick characters,
+NO garbled or unreadable text, NO cluttered HUD chaos, NO crowded bottom 20% subtitle zone."""
 
 SHOT_TYPES_V2: dict[str, dict[str, str]] = {
     "scene": {
-        "name": "1. Cảnh rộng / Cảnh kể (Scene Shot)",
-        "when_to_use": "Giới thiệu bối cảnh, tương phản kích thước, nhân vật làm việc",
-        "focal_point": "Một vật lớn hoặc một nhân vật chính (mặt da đào)",
-        "video_motion_30_40_30": "Chớp mắt, sáng dần, vật phụ chuyển động nhẹ; máy quay tĩnh (static camera)",
+        "name": "1. Đại cảnh điện ảnh / Cảnh kể (Epic Macro-Scene)",
+        "when_to_use": "Thiết lập quy mô, độ hoành tráng, tương phản nhân vật que nhỏ bé trước đại cảnh khổng lồ (12-18s)",
+        "focal_point": "Đại cảnh/công trình tả thực hoành tráng + nhân vật que đặc trưng có rim-light và bóng đổ tự nhiên",
+        "video_motion_30_40_30": "Slow continuous push-in / gentle orbital pan; nhân vật đổi biểu cảm nhẹ hoặc chỉ tay; môi trường có khói/sóng/ánh sáng chuyển động tự nhiên",
         "prompt_template": (
-            "[STYLE LOCKED], [CHARACTER chính: peach skin face, stick figure, dark suit], "
-            "[CROWD nếu có: white faces, grey side shadow, repeated oval bodies], "
-            "[CHỦ THỂ] is [HÀNH ĐỘNG 1 ĐỘNG TỪ], [BIỂU CẢM], "
-            "foreground: [VẬT/NGƯỜI BỊ CẮT VIỀN Ở MÉP KHUNG], "
-            "in [BỐI CẢNH, DÃY VẬT LẶP LẠI PHÍA SAU], [CỠ CẢNH], [GÓC MÁY], "
-            "one accent colour muted red on [VẬT TIÊU ĐIỂM]. Sharp, clean lines, no clutter."
+            "[STYLE LOCKED], [CAMERA & LENS: e.g. 24mm low-angle wide shot], "
+            "[EPIC ENVIRONMENT: rich semi-realistic 3D scene with volumetric lighting, atmospheric depth, textures], "
+            "[CHARACTER: minimalist peach-skin stick figure with ONLY signature hairstyle + outfit, catching ambient rim-light and casting floor shadow], "
+            "one glowing focal accent on [TIÊU ĐIỂM], slow continuous cinematic camera push-in, zero garbled text."
         ),
     },
     "quote": {
-        "name": "2. Trích dẫn / Bong bóng suy nghĩ (Quote / Thought Bubble)",
-        "when_to_use": "Lời thoại là câu nói trực tiếp, câu đùa, lời thú nhận, suy nghĩ",
-        "focal_point": "Câu chữ viết tay hoặc bong bóng mây trắng viền đen (giữ nguyên câu đầy đủ làm punchline), mặt người nói là thứ hai",
-        "video_motion_30_40_30": "0-30% giữ khung, 30-70% chữ/bong bóng hiện dần + miệng người nói mở ra, 70-100% giữ yên để đọc kịp chữ",
+        "name": "2. Trích dẫn / Câu hỏi chốt (Quote / Thought Bubble)",
+        "when_to_use": "Câu nói trực tiếp, nghịch lý gây sốc hoặc câu hỏi mở chốt nhịp",
+        "focal_point": "Câu chữ punchline rõ nét hoặc bong bóng suy nghĩ sạch sẽ đặt trên nền đại cảnh có độ sâu",
+        "video_motion_30_40_30": "0-30% giữ khung đại cảnh, 30-70% chữ/bong bóng hiện dần + nhân vật đổi biểu cảm, 70-100% giữ yên để đọc kịp",
         "prompt_template": (
-            "[STYLE LOCKED], [CHARACTER chính: peach skin face], [CROWD: white faces, flat worried], "
-            "[NGƯỜI NÓI] is [HÀNH ĐỘNG], [BIỂU CẢM KHỚP CÂU NÓI], "
-            "large white cloud thought bubble with thick black outline in centre foreground, "
-            "with black handwritten text inside: \"[QUOTE EXACT WORDS]\". "
-            "The quote is the focal point, speaker's face is second focal point."
+            "[STYLE LOCKED], close-medium cinematic shot of [CHARACTER: peach-skin stick figure with signature hair & jacket] "
+            "inside atmospheric [BỐI CẢNH SÂU CÓ BOKEH], crisp clean speech/thought callout with exact text: \"[QUOTE EXACT WORDS]\", "
+            "soft rim lighting matching background."
         ),
     },
     "crowd": {
-        "name": "3. Đám đông / Phòng họp (Crowd / Boardroom Shot)",
-        "when_to_use": "Nhiều người cùng họp, làm việc, xem, chờ đợi",
-        "focal_point": "Nhân vật chính là mặt da đào duy nhất có chi tiết; đám đông mặt trắng bóng xám làm nền",
-        "video_motion_30_40_30": "Nhân vật chính đổi biểu cảm nhẹ, đám đông gần như đứng yên",
+        "name": "3. Đám đông / Phòng họp (Crowd / Command Center)",
+        "when_to_use": "Phòng điều khiển, sàn giao dịch, đám đông kỹ sư hay hội trường lớn",
+        "focal_point": "Nhân vật chính mặt da đào nổi bật dưới ánh sáng chính giữa đám đông mặt trắng tối giản trong đại cảnh phòng họp/trung tâm công nghệ",
+        "video_motion_30_40_30": "Slow dolly pan nhẹ; màn hình/đèn nền nhấp nháy nhẹ; nhân vật chính nổi bật",
         "prompt_template": (
-            "[STYLE LOCKED], [MAIN CHARACTER: peach skin face, detailed hair, high contrast in centre], "
-            "surrounded by [CROWD: plain white faces, no skin tone, one flat grey side shadow, identical oval bodies], "
-            "foreground: silhouettes of heads cut by frame edge, in [BỐI CẢNH PHÒNG HỌP/VĂN PHÒNG]."
+            "[STYLE LOCKED], atmospheric wide shot of [HỘI TRƯỜNG / MISSION CONTROL TẢ THỰC], "
+            "[MAIN CHARACTER: peach-skin stick figure with signature hair/outfit under dramatic spotlight] "
+            "surrounded by minimalist white-head stick-figure crowd, volumetric light beams from screens."
         ),
     },
     "diagram": {
-        "name": "4. Sơ đồ / Infographic (Diagram Shot)",
-        "when_to_use": "Số liệu, thời gian, chi phí, so sánh, quy trình, tăng trưởng",
-        "focal_point": "Vật lớn silhouette (3-4 chi tiết trong) + con số/con dấu màu đỏ nhấn (muted red), đọc trái qua phải, trên xuống dưới",
-        "video_motion_30_40_30": "Đường biểu đồ đi lên / cột mọc lên / con dấu đóng xuống, giữ yên 30% cuối để đọc số",
+        "name": "4. Sơ đồ 3D / Infographic trên nền thật (3D Diorama Diagram)",
+        "when_to_use": "Số liệu, quỹ đạo vệ tinh, khoảng cách, cơ chế vật lý, so sánh quy mô",
+        "focal_point": "Mô hình 3D chi tiết cao (Trái Đất, vệ tinh, chip, tàu) kết hợp đường vector phát sáng & 1 con số/nhãn lớn nổi bật",
+        "video_motion_30_40_30": "Đường quỹ đạo/tia sáng chạy mượt từ A tới B; số liệu hiện lên dứt khoát; giữ yên 30% cuối để đọc",
         "prompt_template": (
-            "[STYLE LOCKED], two flat bands split by a thick black horizontal line, "
-            "top band pale blue, bottom band beige, reading order left to right, top to bottom. "
-            "Large silhouette icon on left, large muted red handwritten number/stamp on right: \"[NUMBER/TEXT]\". "
-            "No character, no room, no crowd. Sharp, clean lines, one idea."
+            "[STYLE LOCKED], dramatic 3D editorial visualization over [MÔ HÌNH TẢ THỰC: e.g. rim-lit Earth from orbit / cutaway mechanical hardware], "
+            "clean glowing vector trajectory lines and ONE large crisp focal readout: \"[NUMBER/LABEL]\". "
+            "Volumetric space/studio lighting, deep contrast, zero garbled text."
         ),
     },
 }
 
 GOLDEN_RULES_V2: list[str] = [
-    "1. Khóa trước, gen sau: Dán nguyên văn khối STYLE LOCKED và Character Sheet vào mọi prompt.",
-    "2. Người que — Chính da đào (peach skin face), Quần chúng mặt trắng (plain white faces + 1 mảng bóng xám phẳng).",
-    "3. Khung hình 3 lớp (Foreground cắt viền mép khung -> Midground nhân vật chính -> Background lặp lại đơn giản).",
-    "4. Một màu nhấn đỏ (muted red) mỗi shot dành riêng cho vật tiêu điểm, con số hoặc con dấu.",
-    "5. Chữ trích dẫn là Punchline — giữ nguyên câu ngắn đầy đủ trong bong bóng mây trắng hoặc chữ viết tay.",
-    "6. Vẽ vật lớn — nhận diện bằng đường viền ngoài (silhouette) chiếm >= 1/3 khung hình, bên trong chỉ 3-4 chi tiết.",
-    "7. Tỉ lệ khung hình 16:9 (1280x720) — tuyệt đối không crop làm mất đầu/vai.",
-    "8. Timeline video 30-40-30 & Máy đứng yên (static camera): 0-30% mở -> 30-70% 1 chuyển động chậm -> 70-100% giữ yên.",
-    "9. Nối shot bằng cắt cứng (hard cut), cho phép gộp nhiều câu kịch bản liên tiếp vào 1 video tuần tự.",
-    "10. Ảnh tham khảo làm mỏ neo sáng tạo (Visual Idea Anchor): Khi shot có ảnh tư liệu tham khảo (`reference_image_url` hoặc từ danh sách 10-20 ảnh xuyên suốt script), Agent BẮT BUỘC quan sát chi tiết đặc thù của vật thể/bối cảnh/công nghệ/nhân vật trong ảnh tham khảo để làm ý tưởng sáng tạo cho cảnh quay, sau đó CHUYỂN HÓA (stylize) sang chuẩn phong cách vector Crayon Capital (nét mực đen đậm, người que, 1 màu đỏ nhấn, tuyệt đối không dán ảnh thật) giúp video chân thực và lôi cuốn.",
+    "1. Stick-Hero in Epic World (v3): Nhân vật giữ form que tối giản (chỉ giữ 2-3 nét đặc trưng như kiểu tóc, áo khoác, kính), nhưng đặt trong ĐẠI CẢNH 3D/tả thực hoành tráng có chiều sâu, vật liệu thật và ánh sáng điện ảnh.",
+    "2. Quy tắc hòa nhập ánh sáng: Nhân vật que BẮT BUỘC có viền sáng môi trường (rim-light) và bóng đổ/phản chiếu xuống mặt đất để không bị cảm giác dán sticker.",
+    "3. Macro-Shot 12–18 giây: Gom 2–4 câu thoại chung một ý lớn thành 1 Macro-Scene (~35–45 từ/shot, ~30–38 cảnh cho video 8–10 phút) để dễ gen video và giữ nhịp xem mượt mà.",
+    "4. Công thức 6 ô cho mỗi prompt: Camera & Lens -> Hero Subject & Material -> Visual Metaphor/Overlay -> Lighting & 1 Accent -> Slow Continuous Camera Motion -> Negative/Clean bottom 20%.",
+    "5. Một màu nhấn chủ đạo (cam lửa / đỏ / xanh cyan) mỗi cảnh để dẫn mắt người xem ngay lập tức.",
+    "6. Tỉ lệ khung hình 16:9 (1280x720), giữ vùng 20% đáy khung thoáng sạch cho phụ đề.",
+    "7. Ảnh tham khảo làm mỏ neo chân thực: Quan sát chi tiết đặc thù từ `reference_images` (dáng tên lửa, chảo Starlink, boong tàu) để dựng đúng bối cảnh 3D tả thực hoành tráng, vẫn đặt nhân vật que StickSto làm người dẫn chuyện.",
 ]
 
 
@@ -117,23 +104,25 @@ def _skills_root() -> Path:
 def get_skill_summary(item_id: str | None = None) -> dict[str, Any]:
     """Compact structured skill specification embedded directly in every TODO response."""
     return {
-        "skill_name": "shot-generation-expert-v2 + video-production-expert-v1",
-        "version": "2.1.0",
-        "mold": "Crayon Capital Vector Mold v2 (with Reference Image Visual Anchor)",
+        "skill_name": "shot-generation-expert-v3 + video-production-expert-v1",
+        "version": "3.0.0",
+        "mold": "Stick-Hero in Epic Cinematic World (v3 Hybrid Mold + 12-18s Macro-Shots)",
         "style_lock_v2": STYLE_LOCK_V2,
+        "style_lock_v3": STYLE_LOCK_V2,
         "golden_rules": GOLDEN_RULES_V2,
         "reference_image_rule": {
-            "principle": "Ground each scene with authentic real-world reference photos collected across the script (10-20 reference images).",
-            "action": "Inspect reference photo details (car shape, battery layout, headquarters, trading floor, executive appearance) and use as the creative visual anchor for that scene.",
-            "fusion_law": "STYLIZATION MANDATE: Never paste raw photos directly into the animation. Always translate real-world reference shapes into clean Crayon Capital 2D vector style (bold black outlines, stick figures with peach skin for protagonist or white faces for crowd, 1 muted red accent, 3-layer composition).",
-            "motion_coordination": "Follow the 30-40-30 timeline so viewers instantly recognize the stylized real-world reference subject.",
+            "principle": "Ground each macro-scene with authentic real-world reference photos collected across the script (10-20 reference images).",
+            "action": "Inspect reference photo details (rocket body, Starlink dish, carrier deck, hardware, lighting) and build an epic, detailed semi-realistic 3D environment around them.",
+            "fusion_law": "HYBRID STICK-HERO MANDATE: Keep environments epic, atmospheric, and richly detailed (volumetric lighting, realistic materials, depth of field) while keeping foreground narrators/characters as clean minimalist stick figures with ONLY 2-3 signature traits (hairstyle, jacket/suit, glasses) catching rim-light and casting floor shadows.",
+            "motion_coordination": "Group 2-4 sentences into 12-18s macro-shots with ONE smooth continuous cinematic camera movement (slow push-in, orbital pan, or tilt).",
         },
         "shot_types": SHOT_TYPES_V2,
         "video_timeline_law": {
-            "0_to_30_pct": "Establish frame & hold initial pose so viewer registers composition",
-            "30_to_70_pct": "Execute exactly ONE slow deliberate motion (or text/bubble reveal for quote/diagram shots)",
-            "70_to_100_pct": "Hold final frame steady so viewer can read numbers/quotes before hard cut",
-            "camera": "static camera (no shaky pan/zoom)",
+            "macro_shot_target_sec": "12-18s per macro-scene (35-45 words)",
+            "0_to_30_pct": "Establish epic wide composition & rim-lit stick-hero stance",
+            "30_to_70_pct": "Execute ONE slow continuous cinematic camera push-in/pan + primary subject action or graphic progression",
+            "70_to_100_pct": "Hold/settle cleanly so viewer absorbs scale or reads focal numbers before cut",
+            "camera": "Slow smooth cinematic push-in / orbital pan / tilt (no frantic cuts)",
         },
         "full_skills_url": f"/api/v1/todos/{item_id}/skills" if item_id else "/api/v1/skills",
         "agent_guide_url": "/api/v1/agent-guide",
@@ -142,17 +131,13 @@ def get_skill_summary(item_id: str | None = None) -> dict[str, Any]:
 
 
 def get_full_skill_bundle(item_id: str | None = None) -> dict[str, Any]:
-    """Full skill bundle including raw Markdown contents of all skill documents."""
+    """Full skill bundle including raw Markdown contents of v3-aligned skill documents."""
     root = _skills_root()
     files_map: dict[str, str] = {}
     for rel in [
         "shot_generation/SKILL.md",
-        "shot_generation/CRAYON_EXPLAINER_MOLD.md",
-        "shot_generation/UNIVERSAL_SHOT_FRAMEWORK.md",
         "video_production/SKILL.md",
         "video_production/UNIVERSAL_VIDEO_ALGORITHM.md",
-        "video_production/VIDEO_PRODUCTION_SKILL.md",
-        "video_production/style_bible_Crayon_Capital.md",
         "video_production/VIDEO_QA_CHECKLIST.md",
     ]:
         p = root / rel

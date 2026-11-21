@@ -120,7 +120,7 @@ XKIRO_TTS_MAX_CHARS = 1800  # gateway hard limit is 2000 chars per speech reques
 TARGET_NARRATION_WPM = 205.0
 MIN_NARRATION_WPM = 195.0
 MAX_NARRATION_WPM = 214.0
-EN_TARGET_NARRATION_WPM = 160.0
+EN_TARGET_NARRATION_WPM = 150.0
 EN_MIN_NARRATION_WPM = 120.0
 EN_MAX_NARRATION_WPM = 175.0
 MIN_ATEMPO = 0.75
@@ -133,8 +133,9 @@ MIN_WORDS_FOR_RATE_FIT = 8
 # after every sentence AND every newline (measured 48-50% silence on the
 # owner's rejected audio), so narration is synthesized per sentence and joined
 # with these fixed breaths: 0.35s inside a paragraph, 0.6s at a line break.
-FULL_NARRATION_PAUSE_SEC = 0.40
-PARAGRAPH_NARRATION_PAUSE_SEC = 0.65
+FULL_NARRATION_PAUSE_SEC = 0.48
+PARAGRAPH_NARRATION_PAUSE_SEC = 0.72
+
 
 
 def _wpm_band(voice_id: str) -> tuple[float, float, float]:

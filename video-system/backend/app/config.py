@@ -141,3 +141,56 @@ def youtube_upload_chunk_bytes() -> int:
     mb = max(1, min(16, mb))
     return mb * 1024 * 1024
 
+
+# -- Instagram Reels (Instagram API with Instagram Login) ---------------------
+
+def instagram_app_id() -> str:
+    return os.environ.get("INSTAGRAM_APP_ID", "").strip()
+
+
+def instagram_app_secret() -> str:
+    return os.environ.get("INSTAGRAM_APP_SECRET", "").strip()
+
+
+def ig_token_encryption_key() -> str:
+    return os.environ.get("IG_TOKEN_ENCRYPTION_KEY", "").strip()
+
+
+def ig_publish_wait_minutes() -> int:
+    """Số phút tối đa poll container trước khi mark failed."""
+    raw = os.environ.get("IG_PUBLISH_WAIT_MIN", "8").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        v = 8
+    return max(2, min(60, v))
+
+
+# -- Affiliate networks --------------------------------------------------------
+
+def clickbank_nickname() -> str:
+    return os.environ.get("CLICKBANK_NICKNAME", "").strip()
+
+
+def clickbank_api_key() -> str:
+    return os.environ.get("CLICKBANK_API_KEY", "").strip()
+
+
+def clickbank_api_base() -> str:
+    """Endpoint Reporting API — env-override nếu spec đổi."""
+    return os.environ.get("CLICKBANK_API_BASE", "https://api.clickbank.com/rest/1.3").rstrip("/")
+
+
+def ebay_campaign_id() -> str:
+    return os.environ.get("EBAY_CAMPAIGN_ID", "").strip()
+
+
+def ebay_dev_key() -> str:
+    return os.environ.get("EBAY_DEV_KEY", "").strip()
+
+
+def epn_tdr_url() -> str:
+    """EPN Transaction Detail Report endpoint — env-override (xác minh khi có account thật)."""
+    return os.environ.get("EPN_TDR_URL", "https://api.epn.ebay.com/tdr/v1/transactions").rstrip("/")
+
+

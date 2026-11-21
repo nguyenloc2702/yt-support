@@ -19,6 +19,16 @@ modes:
     images_per_scene: 1
     fast_mode: false            # gen ảnh cho mọi scene
     hero_images: 0
+  daily_digest:
+    target_seconds: 165         # 12–15 tin (~2m30s–2m55s, dưới ngưỡng 180s Shorts)
+    voice: "en-US-BrianMultilingualNeural"  # giọng Creator Mỹ tự nhiên, tách riêng với video dài
+    min_words: 220
+    max_words: 480
+    min_words_en: 220
+    max_words_en: 465
+    images_per_scene: 1
+    fast_mode: true
+    hero_images: 8              # dự phòng AI-gen khi bài báo/Wikimedia không có ảnh khớp
 tts_vi:
   default_voice: "vi-VN-HoaiMyNeural"
   fallback_voice: "vi-VN-HoaiMyNeural"
@@ -42,6 +52,6 @@ bgm:
   bed_target_lufs: -38.0
   bgm_dir: "assets/music/bgm"   # tương đối repo root; thiếu → bỏ BGM (honest)
 limits:
-  max_source_chars: 6000
-  max_scenes: 12
-  produce_timeout_sec: 600
+  max_source_chars: 14000
+  max_scenes: 18
+  produce_timeout_sec: 900

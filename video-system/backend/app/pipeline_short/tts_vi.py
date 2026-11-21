@@ -154,6 +154,40 @@ def _norm_tok(s: str) -> str:
     return re.sub(r"[^0-9A-Za-zÀ-ỹ]", "", s.lower())
 
 
+def normalize_en_tts_text(text: str) -> str:
+    """Chuẩn hóa câu thoại EN cho TTS để đọc tên riêng/ký hiệu/viết tắt chuẩn xác."""
+    import re
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"@?StickSto\b", "Stick Sto", t, flags=re.IGNORECASE)
+    for pat, rep in (
+        (r"\bU\.S\.A\.", "USA"),
+        (r"\bU\.S\.", "US"),
+        (r"\bU\.K\.", "UK"),
+        (r"\bU\.N\.", "UN"),
+        (r"\bE\.U\.", "EU"),
+        (r"\bvs\.", "versus"),
+        (r"\bkm/h\b", "kilometers per hour"),
+    ):
+        t = re.sub(pat, rep, t, flags=re.IGNORECASE)
+    t = re.sub(r"\$(\d+(?:\.\d+)?)\s*(?:T|tn|trillion)\b", r"\1 trillion dollars", t, flags=re.IGNORECASE)
+    t = re.sub(r"\$(\d+(?:\.\d+)?)\s*(?:B|bn|billion)\b", r"\1 billion dollars", t, flags=re.IGNORECASE)
+    t = re.sub(r"\$(\d+(?:\.\d+)?)\s*(?:M|mn|million)\b", r"\1 million dollars", t, flags=re.IGNORECASE)
+    t = re.sub(r"€(\d+(?:\.\d+)?)\s*(?:T|tn|trillion)\b", r"\1 trillion euros", t, flags=re.IGNORECASE)
+    t = re.sub(r"€(\d+(?:\.\d+)?)\s*(?:B|bn|billion)\b", r"\1 billion euros", t, flags=re.IGNORECASE)
+    t = re.sub(r"€(\d+(?:\.\d+)?)\s*(?:M|mn|million)\b", r"\1 million euros", t, flags=re.IGNORECASE)
+    t = re.sub(r"£(\d+(?:\.\d+)?)\s*(?:B|bn|billion)\b", r"\1 billion pounds", t, flags=re.IGNORECASE)
+    t = re.sub(r"£(\d+(?:\.\d+)?)\s*(?:M|mn|million)\b", r"\1 million pounds", t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)%", r"\1 percent", t)
+    t = re.sub(r"\bQ1\b", "first quarter", t)
+    t = re.sub(r"\bQ2\b", "second quarter", t)
+    t = re.sub(r"\bQ3\b", "third quarter", t)
+    t = re.sub(r"\bQ4\b", "fourth quarter", t)
+    t = t.replace("—", ", ").replace("–", ", ")
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def _assign_cues_from_words(texts: list[str], words: list[dict], total_dur: float) -> list[dict]:
     """Chia word timeline 1-call về từng cue theo token alignment."""
     import re
@@ -186,8 +220,12 @@ def _assign_cues_from_words(texts: list[str], words: list[dict], total_dur: floa
 
     spans: list[dict] = []
     span_start = 0.0
+    prev_wi = 0
     for ci, text in enumerate(texts):
         end_wi = cue_end_idx[ci]
+        for wi in range(prev_wi, min(len(words), end_wi + 1)):
+            words[wi]["cue_idx"] = ci
+        prev_wi = end_wi + 1
         if ci < len(texts) - 1 and end_wi + 1 < len(words):
             span_end = round((words[end_wi]["end"] + words[end_wi + 1]["start"]) / 2.0, 3)
         else:
@@ -211,6 +249,7 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
     rate = cfg["rate"]
     pause = float(cfg.get("inter_scene_pause_sec", 0.14))
     wps = float(cfg.get("words_per_sec_estimate", 2.6))
+    tts_texts = [normalize_en_tts_text(t) if lang == "en" else t for t in texts]
 
     work = out_dir / "audio"
     work.mkdir(parents=True, exist_ok=True)
@@ -220,9 +259,9 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
     # Đường nhanh ổn định (production): gọi 1 lần duy nhất cho toàn bộ kịch bản
     # để tránh rate-limit Microsoft + giữ nhịp đọc tự nhiên. Bỏ qua nếu test
     # monkeypatch `_edge_stream_cue`.
-    if not offline and len(texts) > 1 and _edge_stream_cue is _DEFAULT_EDGE_STREAM_CUE:
+    if not offline and len(tts_texts) > 1 and _edge_stream_cue is _DEFAULT_EDGE_STREAM_CUE:
         import asyncio
-        full_text = " ".join(t.strip() for t in texts if t.strip())
+        full_text = " ".join(t.strip() for t in tts_texts if t.strip())
         full_mp3 = work / "full_tts.tmp.mp3"
         full_raw = work / "full_raw.tmp.wav"
         for try_voice in (chosen_voice, fallback_voice):
@@ -241,7 +280,7 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
                             ws = max(0.0, round(w["start"] - trim_s, 3))
                             we = min(trimmed_dur, max(ws + 0.05, round(w["end"] - trim_s, 3)))
                             words_out.append({"text": w["text"], "start": ws, "end": we})
-                    cue_spans = _assign_cues_from_words(texts, words_out, trimmed_dur)
+                    cue_spans = _assign_cues_from_words(tts_texts, words_out, trimmed_dur)
                     return {
                         "audio_path": str(final_wav),
                         "duration": round(trimmed_dur, 3),
@@ -262,7 +301,7 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
     cue_paths: list[Path] = []
     cue_start = 0.0
 
-    for idx, text in enumerate(texts):
+    for idx, text in enumerate(tts_texts):
         cue_wav = work / f"cue_{idx:02d}.wav"
         cue_words: list[dict] = []
         got_audio = False
@@ -293,14 +332,15 @@ def synthesize_short_voice(texts: list[str], out_dir: Path, short_id: str,
 
         cue_dur = _wav_duration(cue_wav)
         if not cue_words:
-            cue_words = _cue_words_offline(text, cue_start, cue_dur)
+            cue_words = [{**w, "cue_idx": idx} for w in _cue_words_offline(text, cue_start, cue_dur)]
         else:
             # edge-tts word offset có thể chệch đầu cue → scale vào duration thật
             scale = cue_dur / max(0.05, cue_words[-1]["end"]) if cue_words else 1.0
             cue_words = [
                 {"text": w["text"],
                  "start": round(cue_start + w["start"] * scale, 3),
-                 "end": round(cue_start + w["end"] * scale, 3)}
+                 "end": round(cue_start + w["end"] * scale, 3),
+                 "cue_idx": idx}
                 for w in cue_words
             ]
         words.extend(cue_words)

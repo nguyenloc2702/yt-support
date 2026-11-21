@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import domain
@@ -35,6 +35,8 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
 from .service_assembler import AssemblerService, ShortfallWarningError, ThumbnailMissingError
 from .service_news import (dismiss_news, list_news, push_selected as push_selected_news,
                            run_once as news_run_once, start_news_scheduler)
+from .service_digest import (get_digest_status, run_daily_digest,
+                             start_digest_scheduler)
 from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sync_item_to_gdrive
 
 from .service_batches import BatchService
@@ -46,6 +48,15 @@ from .service_shots import ShotService
 from .service_shorts import ShortService, ShortfallError
 from .service_todos import TodoService
 from .service_youtube import YouTubeConflictError, YouTubeError, YouTubeService
+from .service_instagram import InstagramConflictError, InstagramError, InstagramService
+from .service_affiliate import (
+    AffiliateError,
+    AffiliateService,
+    set_affiliate_service,
+    start_affiliate_sync_scheduler,
+)
+from .schemas import (AffiliateProductCreate, AffiliateProductPatch, BioPageUpdate,
+                      InstagramPublishRequest)
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
 
@@ -78,6 +89,9 @@ else:
 
 shorts = ShortService(store, webhooks)
 youtube = YouTubeService(store, webhooks)
+instagram = InstagramService(store, webhooks)
+affiliate = AffiliateService(store, webhooks)
+set_affiliate_service(affiliate)
 bgm_service = BgmService(store)
 readme_service = ReadMeService()
 
@@ -86,20 +100,29 @@ readme_service = ReadMeService()
 def _start_news_scheduler() -> None:
     # Phụ lục G.10 — hộp tin nóng: chỉ bật khi VIDEO_NEWS_SYNC_ENABLED=1.
     start_news_scheduler(store)
+    start_digest_scheduler(store, shorts)
     youtube.startup_sweep()
+    instagram.startup_sweep()
+    start_affiliate_sync_scheduler(store, webhooks)
 
 # -- Web PIN gate (chặn mọi request không có session/bearer hợp lệ) -----------
 # Mở: health, 3 endpoint auth/*, OPTIONS (preflight), "/favicon.ico", và "/" (shell HTML chứa
 # màn hình khóa — dữ liệu vẫn nằm sau API được bảo vệ).
+# Ngoại lệ prefix: /b/{slug} + /bio/{handle} (trang công khai cho bio TikTok/IG),
+# /api/v1/instagram/media/ (signed URL để IG pull video), callback OAuth IG.
 _WEB_OPEN_PATHS = {"/", "/favicon.ico", "/api/v1/health", "/api/v1/auth/login",
                    "/api/v1/auth/session", "/api/v1/auth/logout",
-                   "/api/v1/youtube/auth/callback"}
+                   "/api/v1/youtube/auth/callback",
+                   "/api/v1/instagram/auth/callback"}
+_WEB_OPEN_PREFIXES = ("/b/", "/bio/", "/api/v1/instagram/media/")
 
 
 @app.middleware("http")
 async def pin_gate(request: Request, call_next):
     path = request.url.path
     if request.method == "OPTIONS" or path in _WEB_OPEN_PATHS:
+        return await call_next(request)
+    if any(path.startswith(p) for p in _WEB_OPEN_PREFIXES):
         return await call_next(request)
     if webauth.request_allowed(request):
         return await call_next(request)
@@ -1638,6 +1661,32 @@ def news_push_selected(news_id: str, request: Request = None):
         raise HTTPException(422, str(e))
 
 
+@app.get("/api/v1/shorts/daily-digest/status")
+def daily_digest_status(request: Request = None):
+    """Trạng thái lịch chạy Daily Digest EN (@StickSto · 06:30 America/New_York)."""
+    auth.require(request, "read")
+    return get_digest_status(store)
+
+
+@app.post("/api/v1/shorts/daily-digest/run")
+def daily_digest_run(send_telegram: bool = True, sync_first: bool = True,
+                     request: Request = None):
+    """Chạy ngay 1 bản Daily World Brief EN (12-15 tin → Render MP4 → gửi Telegram)."""
+    auth.require(request, "ingest")
+    try:
+        return run_daily_digest(
+            store, shorts,
+            sync_first=sync_first,
+            send_telegram=send_telegram,
+            force=True,
+            actor="api",
+        )
+    except AdapterNotConfigured as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 # -- YouTube Channel OAuth & Publishing ----------------------------------------
 
 def _yt_error_response(exc: YouTubeError) -> JSONResponse:
@@ -1718,6 +1767,29 @@ def youtube_patch_video(video_id: str, body: YouTubeVideoPatchRequest, request: 
         return _yt_error_response(exc)
 
 
+@app.post("/api/v1/youtube/videos/{video_id}/thumbnail")
+async def youtube_set_video_thumbnail(video_id: str, request: Request):
+    """Upload or replace custom thumbnail (JPEG/PNG <= 2MB) for an existing YouTube video or Short."""
+    auth.require(request, "admin")
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(422, "multipart form must include 'file'")
+    raw_bytes = await upload.read()
+    ctype = getattr(upload, "content_type", None)
+    filename = getattr(upload, "filename", None)
+    try:
+        return await run_in_threadpool(
+            youtube.set_video_thumbnail,
+            video_id,
+            raw_bytes,
+            content_type=ctype,
+            filename=filename,
+        )
+    except YouTubeError as exc:
+        return _yt_error_response(exc)
+
+
 def _run_yt_publish(publish_fn, target_id: str, body: YouTubePublishRequest) -> JSONResponse:
     try:
         res = publish_fn(
@@ -1773,6 +1845,262 @@ def youtube_cancel_upload(upload_id: str, request: Request = None):
         return youtube.cancel_upload(upload_id)
     except YouTubeError as exc:
         return _yt_error_response(exc)
+
+
+# -- Instagram Reels publishing (Instagram API with Instagram Login) -----------
+
+def _ig_error_response(exc: InstagramError) -> JSONResponse:
+    payload: dict = {"error": exc.code, "message": exc.message, "detail": exc.message}
+    if isinstance(exc, InstagramConflictError) and exc.publish_id:
+        payload["publish_id"] = exc.publish_id
+    return JSONResponse(payload, status_code=exc.status_code)
+
+
+@app.get("/api/v1/instagram/status")
+def instagram_status(request: Request = None):
+    auth.require(request, "read")
+    return instagram.get_status()
+
+
+@app.get("/api/v1/instagram/auth/start")
+def instagram_auth_start(request: Request = None):
+    auth.require(request, "read")
+    try:
+        return {"auth_url": instagram.make_auth_url()}
+    except InstagramError as exc:
+        return _ig_error_response(exc)
+
+
+@app.get("/api/v1/instagram/auth/callback")
+def instagram_auth_callback(code: str = "", state: str = "", error: str = ""):
+    import urllib.parse as _up
+    if error:
+        return RedirectResponse(f"/#/publish?ig=error&reason={_up.quote(error)}", status_code=302)
+    if not code or not state:
+        return RedirectResponse("/#/publish?ig=error&reason=missing_code_or_state", status_code=302)
+    try:
+        instagram.handle_callback(code, state)
+        return RedirectResponse("/#/publish?ig=connected", status_code=302)
+    except InstagramError as exc:
+        return RedirectResponse(f"/#/publish?ig=error&reason={_up.quote(exc.message)}", status_code=302)
+
+
+@app.delete("/api/v1/instagram/account")
+def instagram_disconnect_account(request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return instagram.disconnect_account()
+    except InstagramError as exc:
+        return _ig_error_response(exc)
+
+
+@app.get("/api/v1/instagram/media/{item_id}")
+def instagram_media_file(item_id: str, token: str = "", target_type: str = "todo"):
+    """Signed URL công khai cho Instagram pull video (HMAC + expiry 24h)."""
+    if not instagram.verify_signed_media_token(item_id, target_type, token):
+        raise HTTPException(403, "Signed URL không hợp lệ hoặc đã hết hạn.")
+    exists, video_path = instagram._resolve_video_path(target_type, item_id)  # noqa: SLF001 — endpoint nội bộ
+    if not exists:
+        raise HTTPException(404, "Không tìm thấy job/short.")
+    if not video_path or not video_path.exists():
+        raise HTTPException(404, "File video không tồn tại.")
+    return FileResponse(video_path, media_type="video/mp4")
+
+
+def _run_ig_publish(target_type: str, target_id: str, body: InstagramPublishRequest) -> JSONResponse:
+    try:
+        res = instagram.publish(
+            target_type,
+            target_id,
+            caption=body.caption,
+            affiliate_product_id=body.affiliate_product_id,
+            publish_at=body.publish_at,
+            share_to_feed=body.share_to_feed,
+            is_ai_generated=body.is_ai_generated,
+        )
+        status = 200 if res.get("already_published") else 202
+        return JSONResponse(res, status_code=status)
+    except InstagramError as exc:
+        return _ig_error_response(exc)
+
+
+@app.post("/api/v1/todos/{item_id}/instagram/publish")
+def instagram_publish_todo(item_id: str, body: InstagramPublishRequest, request: Request = None):
+    auth.require(request, "admin")
+    return _run_ig_publish("todo", item_id, body)
+
+
+@app.post("/api/v1/shorts/{short_id}/instagram/publish")
+def instagram_publish_short(short_id: str, body: InstagramPublishRequest, request: Request = None):
+    auth.require(request, "admin")
+    return _run_ig_publish("short", short_id, body)
+
+
+@app.get("/api/v1/instagram/publishes")
+def instagram_list_publishes(limit: int = 50, request: Request = None):
+    auth.require(request, "read")
+    return instagram.list_publishes(limit=limit)
+
+
+@app.get("/api/v1/instagram/publishes/{publish_id}")
+def instagram_get_publish(publish_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return instagram.get_publish(publish_id)
+    except InstagramError as exc:
+        return _ig_error_response(exc)
+
+
+@app.post("/api/v1/instagram/publishes/{publish_id}/retry")
+def instagram_retry_publish(publish_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return instagram.retry_publish(publish_id)
+    except InstagramError as exc:
+        return _ig_error_response(exc)
+
+
+@app.post("/api/v1/instagram/publishes/{publish_id}/cancel")
+def instagram_cancel_publish(publish_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return instagram.cancel_publish(publish_id)
+    except InstagramError as exc:
+        return _ig_error_response(exc)
+
+
+# -- Affiliate (deeplink + bio page + sync doanh thu) ---------------------------
+
+def _aff_error_response(exc: AffiliateError) -> JSONResponse:
+    return JSONResponse(
+        {"error": exc.code, "message": exc.message, "detail": exc.message},
+        status_code=exc.status_code,
+    )
+
+
+@app.get("/api/v1/affiliate/products")
+def affiliate_list_products(request: Request = None):
+    auth.require(request, "read")
+    return {"products": affiliate.list_products()}
+
+
+@app.post("/api/v1/affiliate/products")
+def affiliate_create_product(body: AffiliateProductCreate, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return affiliate.create_product(
+            network=body.network,
+            label=body.label,
+            cb_promoter=body.cb_promoter,
+            ebay_item_url=body.ebay_item_url,
+            is_active=body.is_active,
+        )
+    except AffiliateError as exc:
+        return _aff_error_response(exc)
+
+
+@app.patch("/api/v1/affiliate/products/{product_id}")
+def affiliate_patch_product(product_id: str, body: AffiliateProductPatch, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return affiliate.update_product(
+            product_id,
+            label=body.label,
+            cb_promoter=body.cb_promoter,
+            ebay_item_url=body.ebay_item_url,
+            is_active=body.is_active,
+        )
+    except AffiliateError as exc:
+        return _aff_error_response(exc)
+
+
+@app.delete("/api/v1/affiliate/products/{product_id}")
+def affiliate_delete_product(product_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return affiliate.delete_product(product_id)
+    except AffiliateError as exc:
+        return _aff_error_response(exc)
+
+
+@app.get("/api/v1/affiliate/links")
+def affiliate_list_links(item_id: str = "", limit: int = 100, request: Request = None):
+    auth.require(request, "read")
+    return {"links": affiliate.list_links(item_id=item_id or None, limit=limit)}
+
+
+@app.post("/api/v1/affiliate/links")
+def affiliate_attach_link(body: dict, request: Request = None):
+    """Body: {item_id, product_id} — sinh deeplink + slug /b/{slug} cho job."""
+    auth.require(request, "admin")
+    item_id = (body or {}).get("item_id") or ""
+    product_id = (body or {}).get("product_id") or ""
+    if not item_id or not product_id:
+        raise HTTPException(422, "Cần item_id và product_id")
+    try:
+        return affiliate.attach_product(item_id, product_id)
+    except AffiliateError as exc:
+        return _aff_error_response(exc)
+
+
+@app.get("/api/v1/affiliate/conversions")
+def affiliate_list_conversions(limit: int = 100, request: Request = None):
+    auth.require(request, "read")
+    return {"conversions": affiliate.list_conversions(limit=limit)}
+
+
+@app.post("/api/v1/affiliate/sync")
+def affiliate_sync_now(request: Request = None):
+    """Bấm sync thủ công ngoài cron 6h."""
+    auth.require(request, "admin")
+    return {"results": affiliate.sync_all()}
+
+
+@app.get("/api/v1/bio/pages/{handle}")
+def bio_get_page(handle: str, request: Request = None):
+    auth.require(request, "read")
+    return affiliate.get_bio_page(handle)
+
+
+@app.put("/api/v1/bio/pages/{handle}")
+def bio_put_page(handle: str, body: BioPageUpdate, request: Request = None):
+    auth.require(request, "admin")
+    return affiliate.set_bio_page(handle, title=body.title, items=body.items)
+
+
+# -- Public: bio page + slug redirect (cho bio TikTok/IG/YT) --------------------
+
+@app.get("/b/{slug}")
+def affiliate_redirect(slug: str, request: Request = None):
+    try:
+        info = affiliate.record_click(slug, referer=request.headers.get("referer", "") or "",
+                                      user_agent=request.headers.get("user-agent", "") or "")
+    except AffiliateError as exc:
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;text-align:center;padding:60px'>"
+            f"<h2>Link không tồn tại</h2></body></html>",
+            status_code=exc.status_code,
+        )
+    return RedirectResponse(info["deeplink"], status_code=301)
+
+
+@app.get("/bio/{handle}")
+def bio_page(handle: str, request: Request = None):
+    page = affiliate.get_bio_page(handle)
+    items = affiliate.render_bio_items(handle)
+    rows = "".join(
+        f"<a href='{it['url']}' style='display:block;margin:10px auto;padding:14px 18px;max-width:420px;"
+        f"border:1px solid #e5e5e5;border-radius:12px;text-decoration:none;color:#111;font-weight:600'>"
+        f"{it['label']}</a>"
+        for it in items
+    ) or "<p style='color:#888'>Chưa có link nào.</p>"
+    title = page.get("title") or f"@{handle}"
+    return HTMLResponse(
+        f"<html><head><meta charset='utf-8'><title>{title}</title>"
+        f"<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
+        f"<body style='font-family:-apple-system,sans-serif;background:#fafafa;padding:24px;text-align:center'>"
+        f"<h2 style='margin:18px 0'>{title}</h2>{rows}</body></html>"
+    )
 
 
 # -- BGM / Background Music Collection -----------------------------------------

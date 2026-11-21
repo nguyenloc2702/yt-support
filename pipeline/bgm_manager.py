@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BGM_DIR = Path("assets/music/bgm")
 
 # Default volume levels (dB)
-DEFAULT_BGM_VOLUME = -20.0  # -18 to -22 dB under voice
+DEFAULT_BGM_VOLUME = -16.5  # -16.5 dB ducked under voice
 VOICE_VOLUME = 0.0  # Full volume
 
 # Mood to BGM file mapping (default assets)
@@ -115,8 +115,8 @@ MUSIC_BREAK_S = 10.0
 
 # Every cue is levelled to this integrated loudness so a hot master cannot sit
 # on top of the narration. Our TTS narration measures about -20 LUFS, so the
-# bed lands ~18 dB underneath it.
-BED_TARGET_LUFS = -38.0
+# bed lands ~14.5 dB underneath it.
+BED_TARGET_LUFS = -34.5
 LOUDNESS_FILE = "LOUDNESS.json"
 
 

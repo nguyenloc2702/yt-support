@@ -6,10 +6,26 @@ auto_push: false            # G.11: KHÔNG tự đẩy Telegram hàng loạt —
 max_items_per_push: 10      # tối đa tin bắn 1 kỳ Telegram (khi auto_push bật)
 queries: []                 # Đã tắt nguồn tin nội địa VN (2026-11-14) — dùng 100% tin quốc tế
 feeds: []                   # Mọi short VI & EN đều lấy từ feeds_en + queries_en bên dưới
-# Mảng quốc tế (100% nguồn RSS chính thống nước ngoài, link bài là link thật).
+# Mảng quốc tế (100% nguồn RSS chính thống nước ngoài + Google News EN Top Headlines).
 feeds_en:
+  - name: "Google News World"
+    url: "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en"
+  - name: "Google News US"
+    url: "https://news.google.com/rss/headlines/section/topic/NATION?hl=en-US&gl=US&ceid=US:en"
+  - name: "Google News Business"
+    url: "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en"
+  - name: "Google News Tech"
+    url: "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en"
+  - name: "Google News Science"
+    url: "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=en-US&gl=US&ceid=US:en"
+  - name: "Google News Sports"
+    url: "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en"
+  - name: "BBC World"
+    url: "https://feeds.bbci.co.uk/news/world/rss.xml"
   - name: "BBC Business"
     url: "https://feeds.bbci.co.uk/news/business/rss.xml"
+  - name: "BBC Sport"
+    url: "https://feeds.bbci.co.uk/sport/rss.xml"
   - name: "CNBC"
     url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"
   - name: "Al Jazeera"
@@ -19,21 +35,45 @@ feeds_en:
   - name: "NPR Business"
     url: "https://feeds.npr.org/1006/rss.xml"
 queries_en:                 # Google News RSS bản EN (hl=en, gl=US)
-  - "global economy news"
-  - "stock market today"
-  - "business finance news"
-  - "global shipping trade news"
-  - "tech company business news"
+  - "breaking major deal billions today"
+  - "geopolitics summit sanctions military"
+  - "AI tech breakthrough regulation"
+  - "global markets oil central bank"
 exclude_keywords:           # tiêu đề chứa từ nào dưới đây → bỏ (an toàn nền tảng, G.1)
   - "tử vong"
   - "máu me"
   - "hiếp dâm"
   - "chính trị"
-exclude_keywords_en:
-  - "politics"
-  - "election"
-  - "dead"
-  - "killed"
+exclude_keywords_en:        # chặn tin bạo lực nặng + bài opinion/review/podcast/tạp văn nhạt
+  - "gore"
+  - "graphic video"
+  - "suicide"
+  - "sexual assault"
+  - "live updates"
+  - "review –"
+  - "review:"
+  - "opinion"
+  - "podcast"
+  - "crossword"
+  - "horoscope"
+  - "greetings from"
+  - "i want to know if"
+  - "thoughts and"
+  - "letters:"
+daily_digest:
+  enabled: true
+  timezone: "America/New_York"
+  run_at: "07:00"              # 7:00 sáng giờ Mỹ (gom tin đúng khung 7h sáng hôm trước -> 7h sáng hôm nay)
+  voice: "en-US-BrianMultilingualNeural"
+  min_stories: 12
+  max_stories: 15
+  lookback_hours: 24
+  window_anchor_hour: 7        # khung 07:00 hôm trước -> 07:00 hôm nay theo timezone trên
+  dedupe_lookback_hours: 72
+  brand_header: "@STICKSTO · DAILY BRIEF"
+  signature: "@StickSto"
+  watermark_opacity: 0.22
+  send_video_to_telegram: true
 telegram:
   parse_mode: "HTML"
   disable_web_page_preview: false

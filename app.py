@@ -7,6 +7,7 @@ from config.settings import settings
 from core.database import init_db
 from core.logging_config import get_logger
 from services.project_service import ProjectService
+from utils.auth import require_pin_login, render_lock_button
 from utils.ui import (
     inject_pro_css,
     render_sidebar_hardware_status,
@@ -42,6 +43,7 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    require_pin_login()
     startup_check()
     inject_pro_css()
 
@@ -49,14 +51,16 @@ def main():
     st.sidebar.markdown(
         """
         <div class="pro-sidebar-brand">
-            <div class="brand-name"><span class="brand-logo">🎬</span> Video Studio</div>
-            <div class="brand-sub">AI Rough-Cut Editor · v2.4</div>
+            <div class="brand-name"><span class="brand-logo" aria-hidden="true">VS</span> Video Studio</div>
+            <div class="brand-sub">Production workspace · v2.4</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if st.sidebar.button("🎬 Workflow 5 bước", use_container_width=True, type="primary"):
+    render_lock_button()
+
+    if st.sidebar.button("Workflow 5 bước", use_container_width=True, type="primary"):
         st.switch_page("pages/00_workflow.py")
 
     # Sidebar Footer
@@ -73,8 +77,8 @@ def main():
     # Welcome
     st.markdown(
         """
-        ### 🎬 AI Rough-Cut Video Studio
-        Biên tập video tự động cục bộ — Whisper, PySceneDetect, Audio Ducking & EBU R128.
+        ### AI Rough-Cut Video Studio
+        Không gian điều phối production cục bộ — Whisper, PySceneDetect, Audio Ducking & EBU R128.
         Chọn một công cụ bên thanh bên trái để bắt đầu.
         """
     )
@@ -84,7 +88,7 @@ def main():
     service = ProjectService()
     projects = service.list_projects()
     
-    st.subheader("📁 Dự án gần đây")
+    st.subheader("Dự án gần đây")
 
     if not projects:
         st.info("Chưa có dự án nào. Bấm '+ Tạo dự án mới' ở Sidebar để bắt đầu.")
@@ -92,7 +96,7 @@ def main():
         for p in projects[:5]:
             c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
             with c1:
-                st.markdown(f"**🎬 {p.name}**")
+                st.markdown(f"**{p.name}**")
                 if p.source_filename:
                     st.caption(f"Nguồn: `{p.source_filename}`")
             with c2:

@@ -9,20 +9,21 @@ from config.settings import settings
 from core.database import init_db
 from services.audio_delivery_service import AudioDeliveryService
 from services.project_service import ProjectService
+from utils.auth import require_pin_login
 from utils.ui import (
     inject_pro_css,
     render_sidebar_hardware_status,
     render_studio_header,
 )
 
-init_db()
-inject_pro_css()
-
 st.set_page_config(
     page_title="Audio Delivery - Local Video Editor",
     page_icon="🎧",
     layout="wide",
 )
+require_pin_login()
+init_db()
+inject_pro_css()
 
 # ---------------------------------------------------------------------------
 # Project resolution

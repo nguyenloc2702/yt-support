@@ -676,6 +676,112 @@ class YouTubeService:
                 "privacy_status": u_st.get("privacyStatus"),
             }
 
+    @staticmethod
+    def _detect_thumbnail_content_type(
+        thumb_bytes: bytes,
+        *,
+        content_type: str | None = None,
+        filename: str | None = None,
+    ) -> str:
+        """Validate thumbnail bytes (JPEG/PNG <= 2MB) and return normalized Content-Type."""
+        if not thumb_bytes:
+            raise YouTubeError("File thumbnail rỗng.", status_code=422, code="empty_thumbnail")
+        if len(thumb_bytes) > 2 * 1024 * 1024:
+            raise YouTubeError(
+                "Thumbnail vượt quá giới hạn 2 MB của YouTube.",
+                status_code=422,
+                code="thumbnail_too_large",
+            )
+        if thumb_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if thumb_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        ct = (content_type or "").split(";")[0].strip().lower()
+        if ct in ("image/jpeg", "image/jpg"):
+            return "image/jpeg"
+        if ct == "image/png":
+            return "image/png"
+        ext = Path(filename).suffix.lower() if filename else ""
+        if ext in (".jpg", ".jpeg"):
+            return "image/jpeg"
+        if ext == ".png":
+            return "image/png"
+        raise YouTubeError(
+            "Thumbnail phải là ảnh JPEG hoặc PNG hợp lệ.",
+            status_code=422,
+            code="invalid_thumbnail",
+        )
+
+    def _post_thumbnail(
+        self,
+        client: httpx.Client,
+        headers: dict[str, str],
+        video_id: str,
+        thumb_bytes: bytes,
+        content_type: str,
+    ) -> tuple[bool, dict[str, Any] | None, str | None, int]:
+        """Call YouTube thumbnails.set with up to 3 retries on transient errors."""
+        last_status = 502
+        for attempt in range(3):
+            tr = client.post(
+                f"{YT_UPLOAD_BASE}/thumbnails/set",
+                params={"videoId": video_id},
+                headers={**headers, "Content-Type": content_type},
+                content=thumb_bytes,
+            )
+            last_status = tr.status_code
+            if tr.status_code in (200, 201):
+                self.quota.add("thumbnails.set")
+                return True, tr.json(), None, 200
+            if tr.status_code == 403:
+                return (
+                    False,
+                    None,
+                    "Không set được thumbnail (kênh cần xác minh số điện thoại trên YouTube Studio).",
+                    403,
+                )
+            if tr.status_code == 404:
+                return False, None, f"Không tìm thấy video {video_id} trên YouTube.", 404
+            if tr.status_code < 500 and tr.status_code != 429:
+                return False, None, f"Set thumbnail thất bại: HTTP {tr.status_code} {tr.text}", 400
+            if attempt < 2:
+                self._sleep(self._poll_interval_sec)
+        return False, None, f"Set thumbnail thất bại: HTTP {last_status}", 502
+
+    def set_video_thumbnail(
+        self,
+        video_id: str,
+        thumb_bytes: bytes,
+        *,
+        content_type: str | None = None,
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload or replace the custom thumbnail for an existing YouTube video or Short."""
+        ctype = self._detect_thumbnail_content_type(
+            thumb_bytes,
+            content_type=content_type,
+            filename=filename,
+        )
+        _, token = self.tokens.get_valid_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        with self._http_factory() as client:
+            ok, payload, err_msg, err_status = self._post_thumbnail(
+                client, headers, video_id, thumb_bytes, ctype
+            )
+        if not ok:
+            raise YouTubeError(err_msg or "Set thumbnail thất bại.", status_code=err_status)
+
+        self.store.execute(
+            "UPDATE youtube_uploads SET thumbnail_synced=1, updated_at=? WHERE youtube_video_id=?",
+            (now(), video_id),
+        )
+        items = (payload or {}).get("items") or []
+        return {
+            "video_id": video_id,
+            "thumbnail_synced": True,
+            "thumbnails": items[0] if items else {},
+        }
+
     # -- Publish Pipeline ----------------------------------------------------
 
     @staticmethod
@@ -1216,24 +1322,13 @@ class YouTubeService:
                 if thumb_path:
                     thumb_bytes = thumb_path.read_bytes()
                     ctype = "image/jpeg" if thumb_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-                    for attempt in range(3):
-                        tr = client.post(
-                            f"{YT_UPLOAD_BASE}/thumbnails/set",
-                            params={"videoId": video_id},
-                            headers={**headers, "Content-Type": ctype},
-                            content=thumb_bytes,
-                        )
-                        if tr.status_code in (200, 201):
-                            self.quota.add("thumbnails.set")
-                            thumb_synced = 1
-                            break
-                        if tr.status_code == 403:
-                            warnings.append("Không set được thumbnail (kênh cần xác minh số điện thoại trên YouTube Studio).")
-                            break
-                        if attempt < 2:
-                            self._sleep(self._poll_interval_sec)
-                        else:
-                            warnings.append(f"Set thumbnail thất bại: HTTP {tr.status_code}")
+                    ok_thumb, _, err_thumb, _ = self._post_thumbnail(
+                        client, headers, video_id, thumb_bytes, ctype
+                    )
+                    if ok_thumb:
+                        thumb_synced = 1
+                    elif err_thumb:
+                        warnings.append(err_thumb)
 
                 # Optional captions (.srt)
                 cap_synced = 0

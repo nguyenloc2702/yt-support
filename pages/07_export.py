@@ -20,6 +20,7 @@ from services.job_service import JobService
 from services.project_service import ProjectService
 from services.render_config_service import RenderConfigService
 from services.render_service import RenderService
+from utils.auth import require_pin_login
 from utils.audio import db_to_percent, percent_to_db
 from utils.json_io import read_json
 from utils.ui import (
@@ -28,14 +29,14 @@ from utils.ui import (
     render_studio_header,
 )
 
-init_db()
-inject_pro_css()
-
 st.set_page_config(
     page_title="Xuất bản - Local Video Editor",
     page_icon="🎬",
     layout="wide",
 )
+require_pin_login()
+init_db()
+inject_pro_css()
 
 if "project_id" not in st.session_state:
     proj_svc = ProjectService()

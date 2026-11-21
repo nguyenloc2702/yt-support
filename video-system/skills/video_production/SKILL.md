@@ -34,11 +34,11 @@ description: Kỹ năng sản xuất video hoạt họa giải thích, tiểu s�
 4. **Tốc độ nói (WPM):** 160 – 200 từ/phút (chuẩn đàm thoại tự nhiên, không đều đều).
 5. **Khoảng lặng kịch tính:** $\ge$ 8 lần/phút (ngắt 600–700ms trước câu chốt hạ hoặc sự thật sốc).
 6. **Ẩn dụ 3 tầng:** Khái niệm trừu tượng $\to$ Đồ vật đời thường $\to$ Hành động có xung đột.
-7. **Thời lượng shot:** 4.0 – 7.0 giây (trung bình 5.0s), luôn có sub-beat visual change mỗi 2–3s.
-8. **Nền chuyển động theo cảm xúc:** Sáng ngà khi bình thường, bảng đen chì khi khủng hoảng/biến cố.
+7. **Thời lượng Macro-Shot:** 12 – 18 giây/cảnh (gom 2–4 câu thoại chung 1 bối cảnh lớn; hoặc gộp nhiều shot ngắn qua `covered_shot_indexes`) với 1 chuyển động camera chậm mượt (`slow push-in / orbital pan / tilt`).
+8. **Bối cảnh đại cảnh hoành tráng:** Đại cảnh 3D/tả thực có ánh sáng khối (`volumetric lighting`), vật liệu thật và chiều sâu trường ảnh; giữ vùng 20% đáy khung thoáng sạch cho phụ đề.
 9. **Âm thanh chuẩn phát thanh:** Loudness -18 đến -20 LUFS, BGM -18dB dưới voice, SFX 6–12 lần/phút.
 10. **Callback bắt buộc:** Câu kết thúc video phải quay lại trả lời hoặc giải tỏa câu hỏi ở phần Hook mở đầu.
-11. **Ảnh tham khảo làm mỏ neo sáng tạo (Visual Idea Anchor & Stylization):** Khai thác 10-20 ảnh tư liệu thực tế đi kèm kịch bản (`reference_images`). Chỗ nào khớp với ảnh tư liệu (dáng siêu xe, cấu trúc pin, sàn giao dịch, nhân vật, trụ sở), Agent BẮT BUỘC lấy ảnh đó làm ý tưởng thị giác để sáng tạo bối cảnh, đạo cụ và động tác video nhìn cho cuốn hút, chân thực; đồng thời CHUYỂN THỂ 100% sang chuẩn vector Crayon Capital (người que da đào, nét mực đen đậm, 1 màu đỏ nhấn; TUYỆT ĐỐI KHÔNG dán ảnh chụp thô vào video).
+11. **Ảnh tham khảo làm mỏ neo đại cảnh & Nhân vật que Stick-Hero (v3 Hybrid Mold):** Khai thác 10-20 ảnh tư liệu thực tế đi kèm kịch bản (`reference_images`). Dùng chi tiết thật trong ảnh (dáng tàu sân bay, tên lửa, chảo Starlink, trụ sở, sàn giao dịch) để dựng **đại cảnh 3D/tả thực hoành tráng**, còn nhân vật dẫn chuyện và đám đông giữ dạng **người que tối giản StickSto** (chỉ giữ 2–3 nét nhận diện: kiểu tóc, áo khoác, kính) có *rim-light* và bóng đổ hòa nhập vào bối cảnh.
 
 ---
 

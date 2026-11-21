@@ -4,89 +4,67 @@ from pathlib import Path
 import streamlit as st
 
 THEME_KEY = "ui_theme"
-DEFAULT_THEME = "dark"
+DEFAULT_THEME = "light"
 
-# CSS variable blocks per theme. Light is a clean SaaS look (white cards,
-# teal accent, soft shadows); dark keeps the previous studio feel but aligned
-# to the same layout metrics.
+# Single light design lock shared with video-system/config/DESIGN.md.
+# Keep legacy variable names as aliases so existing pages remain compatible.
 _THEME_VARIABLES = {
     "light": """
     :root {
-      --bg-app: #f7f8fa;
-      --bg-sidebar: #ffffff;
-      --bg-card: #ffffff;
-      --bg-inset: #f2f4f7;
-      --border-subtle: #eceef2;
-      --border-card: #e4e7ec;
+      --bg: #FAFAF9;
+      --surface: #FFFFFF;
+      --fg: #1C1917;
+      --fg-muted: #78716C;
+      --border: #E7E5E4;
+      --accent: #2563EB;
+      --accent-fg: #FFFFFF;
+      --ok: #16A34A;
+      --run: #D97706;
+      --held: #DC2626;
+      --ghost: #78716C;
 
-      --text-main: #101828;
-      --text-body: #344054;
-      --text-muted: #667085;
-      --text-subtle: #98a2b3;
-
-      --accent: #0d9488;
-      --accent-hover: #0f766e;
-      --accent-soft: #f0fdfa;
-      --accent-ring: rgba(13, 148, 136, 0.25);
-
-      --scroll-thumb: #d0d5dd;
-      --scroll-thumb-hover: #98a2b3;
-    }
-    """,
-    "dark": """
-    :root {
-      --bg-app: #0b0f19;
-      --bg-sidebar: #0e131f;
-      --bg-card: #131a29;
-      --bg-inset: #0f1624;
-      --border-subtle: #1e293b;
-      --border-card: #232f48;
-
-      --text-main: #f1f5f9;
-      --text-body: #cbd5e1;
-      --text-muted: #94a3b8;
-      --text-subtle: #64748b;
-
-      --accent: #14b8a6;
-      --accent-hover: #0d9488;
-      --accent-soft: rgba(20, 184, 166, 0.12);
-      --accent-ring: rgba(20, 184, 166, 0.35);
-
-      --scroll-thumb: #334155;
-      --scroll-thumb-hover: #64748b;
+      --bg-app: var(--bg);
+      --bg-sidebar: var(--surface);
+      --bg-card: var(--surface);
+      --bg-inset: #F5F5F4;
+      --border-subtle: var(--border);
+      --border-card: var(--border);
+      --text-main: var(--fg);
+      --text-body: #44403C;
+      --text-muted: var(--fg-muted);
+      --text-subtle: #A8A29E;
+      --accent-hover: #1D4ED8;
+      --accent-soft: #EFF6FF;
+      --accent-ring: rgba(37, 99, 235, 0.22);
+      --scroll-thumb: #D6D3D1;
+      --scroll-thumb-hover: #A8A29E;
     }
     """,
 }
 
 
 def get_theme() -> str:
-    return st.session_state.get(THEME_KEY, DEFAULT_THEME)
+    return "light"
 
 
 def set_theme(theme: str) -> None:
-    if theme in _THEME_VARIABLES:
-        st.session_state[THEME_KEY] = theme
+    # Design lock is intentionally light-only; retained for compatibility.
+    st.session_state[THEME_KEY] = "light"
 
 
 def inject_pro_css() -> None:
-    """Inject theme variables + the shared stylesheet."""
-    theme = get_theme()
+    """Inject the light-only production design tokens and shared stylesheet."""
     css_path = Path("assets/style.css")
     css_content = css_path.read_text(encoding="utf-8") if css_path.exists() else ""
     st.markdown(
-        f"<style>{_THEME_VARIABLES.get(theme, _THEME_VARIABLES[DEFAULT_THEME])}"
-        f"{css_content}</style>",
+        f"<style>{_THEME_VARIABLES['light']}{css_content}</style>",
         unsafe_allow_html=True,
     )
 
 
 def render_theme_toggle() -> None:
-    """Light/dark switch in the sidebar. Call after inject_pro_css()."""
-    theme = get_theme()
-    label = "🌙 Chế độ tối" if theme == "light" else "☀️ Chế độ sáng"
-    if st.sidebar.button(label, use_container_width=True, key="theme_toggle_btn"):
-        set_theme("dark" if theme == "light" else "light")
-        st.rerun()
+    """Deprecated compatibility no-op; production UI is light-only."""
+    return None
 
 
 def render_studio_header(project_name: str = "Dự án",

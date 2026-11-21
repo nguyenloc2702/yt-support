@@ -8,6 +8,7 @@ import pytest
 
 from pipeline.automated_factory import AutomatedFactory
 from services.job_queue import JobQueueManager
+from services.script_factory import POLISH_MODEL
 
 
 @pytest.fixture
@@ -706,7 +707,9 @@ def test_repolish_script_rewrites_the_plan_and_reopens_gate1(test_factory, mock_
     # The active language plan (VI here) is rewritten too, and so is the review file.
     assert json.loads((proj / "shots_plan.json").read_text(encoding="utf-8")) == after
     review = (proj / f"kich_ban_VI_{job_id}.txt").read_text(encoding="utf-8")
-    assert "EDITOR VĂN PHONG BÊN NGOÀI (xKiro openai/gpt-5.6-terra): ĐÃ CHỐT BẢN NÀY" in review
+    assert (
+        f"EDITOR VĂN PHONG BÊN NGOÀI (xKiro {POLISH_MODEL}): ĐÃ CHỐT BẢN NÀY" in review
+    )
     assert "cảnh 4 kể lại cảnh 2" in review
 
     asm = ApprovalStateMachine(proj, job_id)

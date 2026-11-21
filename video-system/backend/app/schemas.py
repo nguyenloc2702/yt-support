@@ -289,17 +289,17 @@ class ShotChecklistBatchUpdate(BaseModel):
 # --- Short Studio (Phụ lục G) ------------------------------------------------
 
 class ShortCreate(BaseModel):
-    mode: str = Field(pattern="^(news|decode)$",
-                      description="news = Tin nóng 25-40s; decode = Giải mã tiền bạc 40-60s")
+    mode: str = Field(pattern="^(news|decode|daily_digest)$",
+                      description="news = Tin nóng 25-40s; decode = Giải mã tiền bạc 40-60s; daily_digest = Điểm tin quốc tế 12-15 tin (<180s)")
     lang: str = Field(default="vi", pattern="^(vi|en)$",
                       description="vi = tiếng Việt; en = mảng quốc tế (voice + prompt EN)")
-    source_text: str = Field(min_length=1, max_length=6000,
+    source_text: str = Field(min_length=1, max_length=14000,
                              description="Tin vắn dán vào hoặc chủ đề")
     source_note: str | None = Field(default=None, max_length=300,
                                     description="Nguồn tin ghi trên video (mode news)")
     source_link: str | None = Field(default=None, max_length=1000,
                                     description="Link bài báo — lấy ảnh gốc minh họa (G.11)")
-    target_seconds: float | None = Field(default=None, ge=10, le=90)
+    target_seconds: float | None = Field(default=None, ge=10, le=180)
     title: str | None = Field(default=None, max_length=200)
     voice: str | None = Field(default=None, max_length=100,
                               description="Edge-TTS voice override (mặc định theo lang)")
@@ -308,8 +308,42 @@ class ShortCreate(BaseModel):
 class ShortScriptUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     hook: str | None = Field(default=None, max_length=500)
-    beats: list[str] | None = Field(default=None, max_length=4)
+    beats: list[str] | None = Field(default=None, max_length=15)
     closing: str | None = Field(default=None, max_length=500)
     description: str | None = Field(default=None, max_length=1000)
     source_note: str | None = Field(default=None, max_length=300)
 
+
+
+# --- Instagram Reels + Affiliate (plan ke_hoach_instagram_reels_affiliate_v1) --
+
+class InstagramPublishRequest(BaseModel):
+    caption: str = Field(default="", max_length=2200, description="Caption gốc; hệ thống tự chèn #ad + CTA")
+    affiliate_product_id: str | None = Field(default=None, max_length=64, description="Sản phẩm affiliate gắn vào job (auto slug /b/{slug})")
+    publish_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC/offset, phải ở tương lai; hệ thống tự đăng đúng giờ (scheduler 1 phút/lần)",
+    )
+    share_to_feed: bool = Field(default=True)
+    is_ai_generated: bool = Field(default=True, description="Khai báo AI-generated (policy Meta)")
+
+
+class AffiliateProductCreate(BaseModel):
+    network: str = Field(pattern="^(clickbank|ebay)$")
+    label: str = Field(min_length=1, max_length=120)
+    cb_promoter: str = Field(default="", max_length=64)
+    ebay_item_url: str = Field(default="", max_length=1000)
+    is_active: bool = Field(default=True)
+
+
+class AffiliateProductPatch(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    cb_promoter: str | None = Field(default=None, max_length=64)
+    ebay_item_url: str | None = Field(default=None, max_length=1000)
+    is_active: bool | None = Field(default=None)
+
+
+class BioPageUpdate(BaseModel):
+    title: str = Field(default="", max_length=120)
+    items: list[dict] = Field(default_factory=list, max_length=30,
+                              description="[{label, slug}] — slug từ affiliate_links")

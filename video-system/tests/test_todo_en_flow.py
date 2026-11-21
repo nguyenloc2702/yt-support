@@ -288,9 +288,11 @@ def test_skill_bundle_and_image_roundtrip(client, ingest, read_key, fast_offline
     r_skills = client.get(pkg["skills_url"], headers=read_key)
     assert r_skills.status_code == 200
     skills_data = r_skills.json()
+    assert skills_data["version"] == "3.0.0"
     assert "shot_generation/SKILL.md" in skills_data["documents"]
-    assert "shot_generation/UNIVERSAL_SHOT_FRAMEWORK.md" in skills_data["documents"]
+    assert "video_production/UNIVERSAL_VIDEO_ALGORITHM.md" in skills_data["documents"]
     assert "video_production/SKILL.md" in skills_data["documents"]
+    assert "shot_generation/CRAYON_EXPLAINER_MOLD.md" not in skills_data["documents"]
 
     # 3. Build a minimal valid 1280x720 PNG header + payload and push back as Keyframe #1
     def _minimal_png(w: int = 1280, h: int = 720) -> bytes:

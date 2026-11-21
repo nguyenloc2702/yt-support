@@ -35,9 +35,12 @@ from services.settings_service import (
     verify_provider_connection,
 )
 
+from utils.auth import require_pin_login
+
 logger = get_logger(__name__)
 
 st.set_page_config(page_title="Settings", page_icon="⚙️", layout="wide")
+require_pin_login()
 st.title("⚙️ Cài đặt AI & Nhà Cung Cấp")
 st.caption(
     "Cấu hình nhà cung cấp AI linh hoạt (OpenAI, Google Gemini, OpenRouter, Ollama local, Custom/xKiro). "
