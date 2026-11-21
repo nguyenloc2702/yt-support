@@ -35,6 +35,7 @@ from .pipeline_en.audio_generator_en import (
 )
 from .pipeline_en.script_generator_en import (
     build_en_shots_from_transcript_segments,
+    build_visual_prompt,
     normalize_english_text,
     split_script_text_into_shots,
 )
@@ -93,7 +94,16 @@ class TodoService:
                         continue
                     vp = str(s.get("visual_prompt") or s.get("visual_prompt_clean") or "").strip()
                     if not vp:
-                        vp = f"Clean 2D flat vector documentary illustration (1280x720) for scene #{i}/{total}: {narr}"
+                        vp = build_visual_prompt(
+                            {
+                                "shot_type": str(s.get("shot_type") or "scene"),
+                                "beat_type": s.get("beat_type"),
+                                "narration": narr,
+                                "on_screen_text": s.get("on_screen_text"),
+                            },
+                            i,
+                            total,
+                        )
                     raw_shots.append({
                         "index": int(s.get("index") or i),
                         "shot_type": str(s.get("shot_type") or "scene"),
@@ -101,6 +111,8 @@ class TodoService:
                         "visual_prompt": vp,
                         "on_screen_text": s.get("on_screen_text"),
                         "on_screen_type": s.get("on_screen_type"),
+                        "beat_type": str(s.get("beat_type") or "").strip().lower() or None,
+                        "voice": str(s.get("voice") or "").strip().lower() or None,
                     })
                 if not raw_shots:
                     raise ValueError("No valid English narration found in shots")
@@ -1524,7 +1536,21 @@ class TodoService:
                 doc = json.loads(script_file.read_text(encoding="utf-8"))
                 todo_now = self.get_todo(item_id)
                 doc["reference_images"] = todo_now.get("reference_images", [])
-                doc["shots"] = todo_now.get("shots", doc.get("shots", []))
+                # Overlay the DB shot view (checklist fields) ON TOP of the generated
+                # shots instead of replacing them, so generator-only fields such as
+                # beat_type / voice / visual_brief survive the round-trip.
+                db_shots = todo_now.get("shots", [])
+                if isinstance(doc.get("shots"), list) and db_shots:
+                    db_by_index = {
+                        s.get("index"): s for s in db_shots if isinstance(s, dict) and s.get("index")
+                    }
+                    doc["shots"] = [
+                        {**s_doc, **db_by_index.get(s_doc.get("index"), {})}
+                        if isinstance(s_doc, dict) else s_doc
+                        for s_doc in doc["shots"]
+                    ]
+                else:
+                    doc["shots"] = db_shots or doc.get("shots", [])
                 script_file.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
 
                 new_sha = sha256_file(script_file)

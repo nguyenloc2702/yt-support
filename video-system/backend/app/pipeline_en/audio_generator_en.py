@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -279,6 +280,8 @@ def _synthesize_shot_wav(text: str, out_wav: Path, voice: str, rate: str) -> flo
     """Synthesize one English shot to WAV (24kHz mono PCM) and return its exact duration."""
     import time
 
+    # A trailing dash makes Edge-TTS return no audio at all
+    text = re.sub(r"[\u2013\u2014\s-]+$", "", text.strip()) or text.strip()
     words = len(text.split())
     wps = float(AUDIO_CONFIG.get("tts_en", {}).get("words_per_sec_estimate", 2.85))
     est_seconds = max(1.8, round(words / wps, 2))
@@ -286,7 +289,7 @@ def _synthesize_shot_wav(text: str, out_wav: Path, voice: str, rate: str) -> flo
     use_offline = os.environ.get("VIDEO_OFFLINE_TTS", "").strip() in {"1", "true", "yes"}
     if not use_offline and _has_ffmpeg():
         tmp_mp3 = out_wav.with_suffix(".tmp.mp3")
-        for attempt in range(4):
+        for attempt in range(6):
             try:
                 asyncio.run(_edge_tts_to_file(text, tmp_mp3, voice=voice, rate=rate))
                 if tmp_mp3.exists() and tmp_mp3.stat().st_size > 200:
@@ -298,13 +301,16 @@ def _synthesize_shot_wav(text: str, out_wav: Path, voice: str, rate: str) -> flo
                     ]
                     subprocess.run(cmd, check=True, timeout=30)
                     tmp_mp3.unlink(missing_ok=True)
+                    (out_wav.parent / (out_wav.stem + ".tts_failed")).unlink(missing_ok=True)
                     return probe_media_duration(out_wav)
             except Exception as exc:
                 tmp_mp3.unlink(missing_ok=True)
-                if attempt < 3:
-                    time.sleep(0.6 * (attempt + 1))
+                if attempt < 5:
+                    time.sleep(min(6.0, 1.0 * (attempt + 1)))
                 else:
-                    logger.warning("edge-tts failed after 4 attempts for '%s': %s", text[:50], exc)
+                    logger.warning("edge-tts failed after %d attempts for '%s': %s", attempt + 1, text[:50], exc)
+    # Fallback tone: mark the shot so the sequential rescue pass can retry it later
+    (out_wav.parent / (out_wav.stem + ".tts_failed")).write_text("edge-tts exhausted", encoding="utf-8")
 
     _write_synthetic_speech_wav(out_wav, est_seconds)
     return probe_media_duration(out_wav)
@@ -749,6 +755,11 @@ def synthesize_en_todo_package(
 
     tts_cfg = AUDIO_CONFIG.get("tts_en", {})
     chosen_voice = voice or tts_cfg.get("default_voice", "en-US-AndrewMultilingualNeural")
+    # Second narrator for dialogue skits (beat voice "character_2"); env override wins.
+    dialog_voice = (
+        os.environ.get("VIDEO_EN_VOICE_2", "").strip()
+        or tts_cfg.get("dialog_voice", "en-US-EmmaMultilingualNeural")
+    )
     rate = tts_cfg.get("rate", "+8%")
     inter_pause = float(tts_cfg.get("inter_shot_pause_sec", 0.25))
 
@@ -760,13 +771,31 @@ def synthesize_en_todo_package(
             pos, s = item_pair
             idx = int(s.get("index") or s.get("index_num") or (pos + 1))
             wpath = tmp_dir / f"shot_{idx:04d}.wav"
-            _synthesize_shot_wav(str(s["narration"]), wpath, voice=chosen_voice, rate=rate)
+            voice_role = str(s.get("voice") or "narrator").strip().lower()
+            use_voice = dialog_voice if voice_role == "character_2" else chosen_voice
+            _synthesize_shot_wav(str(s["narration"]), wpath, voice=use_voice, rate=rate)
             return pos, wpath
 
         max_workers = 1 if os.environ.get("VIDEO_OFFLINE_TTS", "").strip() in {"1", "true", "yes"} else 5
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             for pos, wpath in pool.map(_synth_one, enumerate(shots)):
                 shot_wavs[pos] = wpath
+
+        # Sequential rescue pass: concurrent edge-tts sessions occasionally get
+        # throttled into "No audio was received" (random, not text-specific).
+        # Retry every marked fallback tone one-by-one without concurrency.
+        use_offline = os.environ.get("VIDEO_OFFLINE_TTS", "").strip() in {"1", "true", "yes"}
+        if not use_offline:
+            for pos, wpath in enumerate(shot_wavs):
+                marker = wpath.parent / (wpath.stem + ".tts_failed")
+                if not marker.exists():
+                    continue
+                s = shots[pos]
+                voice_role = str(s.get("voice") or "narrator").strip().lower()
+                use_voice = dialog_voice if voice_role == "character_2" else chosen_voice
+                logger.info("edge-tts rescue pass for shot %s", s.get("index"))
+                _synthesize_shot_wav(str(s["narration"]), wpath, voice=use_voice, rate=rate)
+                marker.unlink(missing_ok=True)
 
         audio_path = out_dir / "audio_en.wav"
         total_dur, windows = _concat_wav_segments(

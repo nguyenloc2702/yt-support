@@ -3,6 +3,8 @@ version: 2
 tts_en:
   default_voice: "en-US-AndrewMultilingualNeural"
   fallback_voice: "en-US-ChristopherNeural"
+  # Giọng thứ hai cho các beat dialog (shot.voice = "character_2") — skit đối thoại 2 voice
+  dialog_voice: "en-US-EmmaMultilingualNeural"
   rate: "+8%"
   atempo: 1.08
   words_per_sec_estimate: 2.85
