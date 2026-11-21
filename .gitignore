@@ -58,3 +58,13 @@ kich_ban_*.txt
 *.db
 dbg_out.txt
 test_shot*.jpg
+
+# 3-way cleanup 2026-11-21: archive & heavy data (never imported by live code)
+/_archive/
+/bgm_finds/
+/products/
+/tmp_*/
+/verification_artifacts/
+/demo_*/
+/.agents/
+/.workbuddy-ai/
