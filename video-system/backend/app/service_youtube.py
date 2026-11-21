@@ -35,6 +35,10 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 YT_API_BASE = "https://www.googleapis.com/youtube/v3"
+
+# FTC disclosure — owner chịu trách nhiệm pháp lý affiliate (plans/README.md
+# 2026-11-21), nên dòng này là bắt buộc, không phải tùy chọn.
+AFFILIATE_DISCLOSURE = "We may earn a commission from links in this description."
 YT_UPLOAD_BASE = "https://www.googleapis.com/upload/youtube/v3"
 
 YT_SCOPES = [
@@ -1002,13 +1006,32 @@ class YouTubeService:
             item_id=item_id,
             video_path=final_mp4,
             title=title,
-            description=description,
+            description=(description or "") + self._affiliate_description_block(item_id),
             tags=tags,
             privacy_status=privacy_status,
             publish_at=publish_at,
             upload_captions=upload_captions,
             category_id=category_id,
             run_async=run_async,
+        )
+
+    def _affiliate_description_block(self, item_id: str) -> str:
+        """Job có link affiliate thì mô tả YouTube phải có #ad + slug + disclosure.
+        Không có link / lỗi đọc DB thì trả chuỗi rỗng — không chặn publish."""
+        try:
+            link = self.store.query_one(
+                "SELECT slug FROM affiliate_links WHERE item_id=? ORDER BY created_at DESC LIMIT 1",
+                (item_id,),
+            )
+        except Exception:
+            logger.exception("affiliate description block lookup failed for %s", item_id)
+            return ""
+        slug = (link or {}).get("slug") or ""
+        if not slug:
+            return ""
+        return (
+            f"\n\n#ad {public_base_url()}/b/{slug}\n"
+            f"{AFFILIATE_DISCLOSURE}"
         )
 
     def publish_short(
@@ -1037,7 +1060,7 @@ class YouTubeService:
             item_id=short_id,
             video_path=final_mp4,
             title=title,
-            description=description,
+            description=(description or "") + self._affiliate_description_block(short_id),
             tags=tags,
             privacy_status=privacy_status,
             publish_at=publish_at,

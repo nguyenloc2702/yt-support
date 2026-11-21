@@ -36,7 +36,7 @@ EVENTS = {
     "youtube.upload.completed", "youtube.upload.failed",
     "instagram.account.connected", "instagram.account.disconnected",
     "instagram.publish.completed", "instagram.publish.failed",
-    "affiliate.link.clicked", "affiliate.conversion.synced",
+    "affiliate.link.attached", "affiliate.link.clicked", "affiliate.conversion.synced",
 }
 
 

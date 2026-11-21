@@ -2105,11 +2105,15 @@ def bio_page(handle: str, request: Request = None):
         for it in items
     ) or "<p style='color:#888'>Chưa có link nào.</p>"
     title = html.escape(page.get("title") or f"@{handle}")
+    # FTC disclosure cố định — trang công khai cho TikTok/IG bio (bắt buộc, xem
+    # plans/README.md quyết định owner 2026-11-21).
+    disclosure = ("<p style='font-size:11px;color:#999;margin-top:18px'>"
+                  "We may earn a commission from links on this page.</p>")
     return HTMLResponse(
         f"<html><head><meta charset='utf-8'><title>{title}</title>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
         f"<body style='font-family:-apple-system,sans-serif;background:#fafafa;padding:24px;text-align:center'>"
-        f"<h2 style='margin:18px 0'>{title}</h2>{rows}</body></html>"
+        f"<h2 style='margin:18px 0'>{title}</h2>{rows}{disclosure}</body></html>"
     )
 
 

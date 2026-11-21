@@ -599,3 +599,41 @@ def test_bio_page_escapes_html(client, admin, aff_env, monkeypatch):
     assert "<b>Store</b>" not in r_html.text
     assert "&lt;b&gt;Store&lt;/b&gt;" in r_html.text
 
+
+def test_bio_page_has_ftc_disclosure(client, admin, aff_env, monkeypatch):
+    """Owner đã ký chịu trách nhiệm pháp lý affiliate — disclosure phải luôn có
+    trên trang bio công khai, kể cả khi trang trống link."""
+    _setup_mock_aff(monkeypatch, lambda req: (_ for _ in ()).throw(AssertionError("no http")))
+    app_main.store.execute("DELETE FROM bio_pages")
+
+    r_html = client.get("/bio/main")
+    assert r_html.status_code == 200
+    assert "We may earn a commission from links on this page." in r_html.text
+
+
+def test_events_whitelist_includes_affiliate_attach():
+    """Bug cũ: event affiliate.link.attached lưu DB nhưng subscriber mặc định
+    (sorted(EVENTS)) không bao giờ nhận vì thiếu trong EVENTS whitelist."""
+    from backend.app.webhooks import EVENTS
+    assert "affiliate.link.attached" in EVENTS
+
+
+def test_youtube_description_appends_affiliate_block(aff_env, monkeypatch):
+    """Job có link affiliate → description YouTube phải có #ad + slug + disclosure.
+    Không có link → chuỗi rỗng, không phá description gốc."""
+    svc = _setup_mock_aff(monkeypatch, lambda req: (_ for _ in ()).throw(AssertionError("no http")))
+    app_main.store.execute("DELETE FROM affiliate_links")
+    app_main.store.execute("DELETE FROM affiliate_products")
+    _create_sample_todo_video()
+    yt = app_main.youtube
+
+    # chưa có link -> không thêm gì
+    assert yt._affiliate_description_block(ITEM_ID) == ""
+
+    link = _attach_clickbank_product(svc, ITEM_ID)
+    block = yt._affiliate_description_block(ITEM_ID)
+    assert "#ad" in block
+    assert f"/b/{link['slug']}" in block
+    assert "We may earn a commission" in block
+    assert block.startswith("\n\n")  # xuống dòng sạch, không dính vào mô tả gốc
+

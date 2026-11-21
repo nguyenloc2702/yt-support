@@ -11,6 +11,19 @@
 > 3. **Pháp lý payout (W-8BEN, thuế, FTC): owner tự ký và chịu trách nhiệm.**
 >    Hệ quả: dòng disclosure "We may earn a commission…" trên bio page +
 >    YouTube description là bắt buộc (P1), không phải tùy chọn.
+> 4. **(Cập nhật cùng ngày) Mô hình vận hành: WEB QUẢN TRỊ LÀ GIAO DIỆN DUY NHẤT —
+>    phần còn lại owner tự thao tác tay.** Hệ quả cắt giảm/điều chỉnh:
+>    - Web admin (SPA Short Studio) đã đủ quản affiliate: CRUD sản phẩm, gắn
+>      link vào job, bảng Links+Clicks, bảng Doanh thu (status + hoa hồng),
+>      nút sync thủ công, bio editor → KHÔNG xây thêm dashboard mới.
+>    - ĐÃ LÀM theo scope này: disclosure bio + YouTube (`#ad` + slug + dòng
+>      commission tự thêm khi publish), EVENTS whitelist
+>      `affiliate.link.attached`.
+>    - DỜI VỀ BACKLOG: `affiliate_clicks` log chi tiết, link health cron,
+>      report endpoint rollup, IG insights job, pull YouTube retention —
+>      owner tự xem số ở dashboard mạng (ClickBank/eBay/IG/YT) khi cần.
+>    - Lưu ý giữ lại: sync cron 6h vẫn chạy (nó là thứ ghi số vào bảng Doanh
+>      thu của web admin — không phải tính năng analytics dư thừa).
 
 > **Quy tắc sống của thư mục này** (chốt 3 bên PO–BA–Dev 2026-11-21):
 > `plans/` chỉ chứa plan **đang sống**. Plan hoàn thành / bỏ rơi / shelved →
