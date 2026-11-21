@@ -2086,7 +2086,9 @@ def affiliate_redirect(slug: str, request: Request = None):
         )
     # 302, không 301: redirect vĩnh viễn bị browser cache thì click lặp lại
     # không hit server (undercount) và đổi deeplink trên slug cũ không có hiệu lực.
-    return RedirectResponse(info["deeplink"], status_code=302)
+    # no-store vì một số proxy vẫn cache cả 302.
+    return RedirectResponse(info["deeplink"], status_code=302,
+                            headers={"Cache-Control": "no-store"})
 
 
 @app.get("/bio/{handle}")

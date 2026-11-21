@@ -352,29 +352,34 @@ class AffiliateService:
             )
             item_id = link.get("item_id") if link else None
         new_amount = float(entry.get("amount") or 0.0)
+        new_currency = entry.get("currency") or "USD"
         existing = self.store.query_one(
-            "SELECT id,status,amount,item_id,product_label FROM affiliate_conversions "
+            "SELECT id,status,amount,currency,item_id FROM affiliate_conversions "
             "WHERE network=? AND network_txn_id=?",
             (entry["network"], entry["network_txn_id"]),
         )
         if existing:
+            # product_label cố tình KHÔNG nằm trong detection lẫn UPDATE: label
+            # chỉ là cosmetic và nguồn sync không có ORDER BY ổn định (CB
+            # fallback products[0]) — đưa vào detection sẽ flap mỗi lần sync.
             changed = (
                 (existing["status"] or "") != (entry.get("status") or "")
                 or abs(float(existing["amount"] or 0.0) - new_amount) > 1e-9
+                or (existing["currency"] or "USD") != new_currency
                 or (existing["item_id"] or None) != (item_id or None)
             )
             if changed:
                 self.store.execute(
-                    "UPDATE affiliate_conversions SET status=?, amount=?, item_id=?, "
-                    "product_label=?, synced_at=? WHERE network=? AND network_txn_id=?",
+                    "UPDATE affiliate_conversions SET status=?, amount=?, currency=?, "
+                    "item_id=?, synced_at=? WHERE network=? AND network_txn_id=?",
                     (
-                        entry.get("status"), new_amount, item_id, entry.get("product_label"), now(),
+                        entry.get("status"), new_amount, new_currency, item_id, now(),
                         entry["network"], entry["network_txn_id"],
                     ),
                 )
                 logger.info(
-                    "affiliate conversion updated: %s/%s status=%s amount=%s",
-                    entry["network"], entry["network_txn_id"], entry.get("status"), new_amount,
+                    "affiliate conversion updated: %s/%s status=%s amount=%s currency=%s",
+                    entry["network"], entry["network_txn_id"], entry.get("status"), new_amount, new_currency,
                 )
             return False
         self.store.execute(
@@ -384,7 +389,7 @@ class AffiliateService:
             (
                 new_id("acv"), entry["network"], entry["network_txn_id"], subid or None,
                 item_id, entry.get("product_label"), new_amount,
-                entry.get("currency") or "USD", entry.get("status"), entry.get("event_date"), now(),
+                new_currency, entry.get("status"), entry.get("event_date"), now(),
             ),
         )
         return True
