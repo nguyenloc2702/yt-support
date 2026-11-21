@@ -276,39 +276,6 @@ def probe_youtube_title(url: str, timeout: int = 15) -> str:
     return ""
 
 
-def download_subtitles_fast(url: str, output_dir: Path) -> Optional[List[Dict[str, Any]]]:
-    """
-    Fast subtitle downloader using yt-dlp --skip-download.
-    Fetches auto/manual subtitles (.vtt/.srt) in ~2-5s without downloading video.
-    """
-    if not url or not check_ytdlp():
-        return None
-    validate_youtube_url(url.strip())
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_template = str(output_dir / "download.%(ext)s")
-
-    cmd = [
-        _ytdlp_path(),
-        "--skip-download",
-        "--ignore-errors",
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-langs", "en,vi,en.*,vi.*",
-        "--sub-format", "vtt/srt/best",
-        *_js_runtime_args(),
-        "-o", out_template,
-        url.strip(),
-    ]
-    try:
-        subprocess.run(cmd, capture_output=True, timeout=30)
-    except Exception as e:
-        logger.warning("yt-dlp fast subtitle extraction failed for %s: %s", url, e)
-
-    from pipeline.automated_factory import try_extract_subtitles
-    return try_extract_subtitles(output_dir)
-
-
 def download_audio_fast(url: str, output_dir: Path) -> Path:
     """Fast audio-only downloader using yt-dlp (used when video has no subtitles)."""
     if not url or not check_ytdlp():
