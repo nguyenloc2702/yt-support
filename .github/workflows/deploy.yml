@@ -150,4 +150,19 @@ jobs:
             docker compose -f docker-compose.prod.yml ps
             docker image prune -af --filter "label=app=support-video-worker" || true
             df -h /
+
+            echo "=== Syncing & restarting video-system backend (vidfac) ==="
+            # The EN video API (vidfac.gacdero.vn, systemd unit "video-system") runs
+            # from /opt/video-system — sync the backend code and restart, otherwise
+            # pushes never reach the running process.
+            if [ -d /opt/video-system ]; then
+              rsync -a /opt/support-video-edit/video-system/backend/ /opt/video-system/backend/
+              systemctl restart video-system || true
+              sleep 3
+              systemctl is-active video-system || true
+              curl -s -m 5 http://127.0.0.1:8090/api/v1/health || true
+            else
+              echo "video-system runtime dir not present on this VPS — skipping"
+            fi
+
             echo "Deployment completed successfully!"
