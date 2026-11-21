@@ -5,6 +5,7 @@ Every mutation writes events; matching webhooks are dispatched.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -2083,20 +2084,25 @@ def affiliate_redirect(slug: str, request: Request = None):
             f"<h2>Link không tồn tại</h2></body></html>",
             status_code=exc.status_code,
         )
-    return RedirectResponse(info["deeplink"], status_code=301)
+    # 302, không 301: redirect vĩnh viễn bị browser cache thì click lặp lại
+    # không hit server (undercount) và đổi deeplink trên slug cũ không có hiệu lực.
+    return RedirectResponse(info["deeplink"], status_code=302)
 
 
 @app.get("/bio/{handle}")
 def bio_page(handle: str, request: Request = None):
+    # Public page: mọi label/title/url do admin nhập nhưng render cho stranger —
+    # escape toàn bộ để stored XSS không chạm tới người xem bio TikTok/IG.
     page = affiliate.get_bio_page(handle)
     items = affiliate.render_bio_items(handle)
     rows = "".join(
-        f"<a href='{it['url']}' style='display:block;margin:10px auto;padding:14px 18px;max-width:420px;"
+        f"<a href='{html.escape(it['url'], quote=True)}' "
+        f"style='display:block;margin:10px auto;padding:14px 18px;max-width:420px;"
         f"border:1px solid #e5e5e5;border-radius:12px;text-decoration:none;color:#111;font-weight:600'>"
-        f"{it['label']}</a>"
+        f"{html.escape(it['label'])}</a>"
         for it in items
     ) or "<p style='color:#888'>Chưa có link nào.</p>"
-    title = page.get("title") or f"@{handle}"
+    title = html.escape(page.get("title") or f"@{handle}")
     return HTMLResponse(
         f"<html><head><meta charset='utf-8'><title>{title}</title>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'></head>"

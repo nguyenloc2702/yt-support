@@ -1,5 +1,17 @@
 # plans/ — Bảng điều hành
 
+> **Quyết định owner 2026-11-21 (phiên đánh giá affiliate):**
+> 1. **Chiến lược chọn sản phẩm affiliate: hoa hồng cao trước** (ClickBank
+>    marketplace lọc commission 50–75%; eBay EPN 1–4% chỉ là kênh phụ) — kèm 2
+>    bộ lọc bắt buộc: tỉ lệ refund thấp + niche không vi phạm policy TikTok/IG
+>    (health claims, crypto, get-rich-quick → bị ban kênh).
+> 2. **KPI giai đoạn đầu: KHÔNG chạy ritual tuần** — bảng KPI 3 số dời xuống
+>    backlog. Giữ nguyên đường ống đo (affiliate_clicks, IG insights job, pull
+>    retention) trong P1 để khi cần nhìn số thì số có sẵn.
+> 3. **Pháp lý payout (W-8BEN, thuế, FTC): owner tự ký và chịu trách nhiệm.**
+>    Hệ quả: dòng disclosure "We may earn a commission…" trên bio page +
+>    YouTube description là bắt buộc (P1), không phải tùy chọn.
+
 > **Quy tắc sống của thư mục này** (chốt 3 bên PO–BA–Dev 2026-11-21):
 > `plans/` chỉ chứa plan **đang sống**. Plan hoàn thành / bỏ rơi / shelved →
 > `plans/archive/` (tìm lại bằng git history + bảng dưới). Feature ngoài lõi

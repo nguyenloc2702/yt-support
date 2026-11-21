@@ -447,7 +447,7 @@ def test_affiliate_attach_redirect_click(client, admin, read_key, aff_env, monke
     assert link2["id"] == link["id"]
 
     r = client.get(f"/b/{link['slug']}", follow_redirects=False)
-    assert r.status_code == 301
+    assert r.status_code == 302  # 302, không 301 — 301 bị browser cache: undercount + khóa slug
     assert r.headers["location"] == link["deeplink"]
     row = app_main.store.query_one("SELECT clicks FROM affiliate_links WHERE id=?", (link["id"],))
     assert row["clicks"] == 1
@@ -537,3 +537,65 @@ def test_sync_skipped_without_keys(client, monkeypatch):
     svc = AffiliateService(app_main.store, app_main.webhooks)
     assert svc.sync_clickbank()["skipped"]
     assert svc.sync_ebay()["skipped"]
+
+
+def test_conversion_status_updates_on_resync(client, aff_env, monkeypatch):
+    """Bug P0 cũ: _upsert_conversion chỉ INSERT — refund (RETURNED) không bao giờ
+    net lại, doanh thu overstated vĩnh viễn. Giờ resync phải UPDATE status/amount."""
+    svc = _setup_mock_aff(monkeypatch, lambda req: (_ for _ in ()).throw(AssertionError("no http")))
+    _create_sample_todo_video()
+    link = _attach_clickbank_product(svc, ITEM_ID)
+    subid = link["subid"]
+    monkeypatch.setenv("CLICKBANK_API_KEY", "cb-api-key")
+
+    def make_xml(status: str, amount: str) -> str:
+        return f"""<?xml version="1.0"?>
+        <transactions>
+          <transaction><transid>TX1</transid><tid>{subid}</tid><amount>{amount}</amount><currency>USD</currency><status>{status}</status><transdate>2026-11-18</transdate></transaction>
+        </transactions>"""
+
+    captured_xml = {"v": make_xml("PENDING", "48.52")}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=captured_xml["v"])
+
+    svc2 = AffiliateService(
+        app_main.store, app_main.webhooks,
+        http_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler), timeout=30.0))
+    monkeypatch.setattr("backend.app.service_affiliate.clickbank_api_base", lambda: "https://mock-cb.test")
+
+    res1 = svc2.sync_clickbank(days=7)
+    assert res1["new"] == 1
+    row = app_main.store.query_one(
+        "SELECT * FROM affiliate_conversions WHERE network='clickbank' AND network_txn_id='TX1'")
+    assert row["status"] == "pending"  # sync chuẩn hóa về lowercase
+
+    # Refund thật: cùng txn, status RETURNED, amount 0 — sync lại phải UPDATE chứ không bỏ qua
+    captured_xml["v"] = make_xml("RETURNED", "0.00")
+    res2 = svc2.sync_clickbank(days=7)
+    assert res2["new"] == 0  # không tạo row mới
+    row2 = app_main.store.query_one(
+        "SELECT * FROM affiliate_conversions WHERE network='clickbank' AND network_txn_id='TX1'")
+    assert row2["status"] == "returned"
+    assert abs(row2["amount"] - 0.0) < 0.01
+
+
+def test_bio_page_escapes_html(client, admin, aff_env, monkeypatch):
+    """Bug P0 cũ: label/title chèn thô vào HTML public — stored XSS."""
+    svc = _setup_mock_aff(monkeypatch, lambda req: (_ for _ in ()).throw(AssertionError("no http")))
+    app_main.store.execute("DELETE FROM affiliate_links")
+    app_main.store.execute("DELETE FROM affiliate_products")
+    link = _attach_clickbank_product(svc, ITEM_ID)
+    evil_label = "<script>alert(1)</script>"
+    r_put = client.put("/api/v1/bio/pages/main", headers=admin,
+                       json={"title": "<b>Store</b>",
+                             "items": [{"label": evil_label, "slug": link["slug"]}]})
+    assert r_put.status_code == 200
+
+    r_html = client.get("/bio/main")
+    assert r_html.status_code == 200
+    assert "<script>alert(1)</script>" not in r_html.text  # không thực thi
+    assert "&lt;script&gt;" in r_html.text  # render dạng text
+    assert "<b>Store</b>" not in r_html.text
+    assert "&lt;b&gt;Store&lt;/b&gt;" in r_html.text
+

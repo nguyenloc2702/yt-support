@@ -341,7 +341,9 @@ class AffiliateService:
         return [dict(r) for r in rows]
 
     def _upsert_conversion(self, entry: dict[str, Any]) -> bool:
-        """entry: {network, network_txn_id, subid, item_id, product_label, amount, currency, status, event_date}. Returns True nếu là mới."""
+        """entry: {network, network_txn_id, subid, item_id, product_label, amount, currency, status, event_date}.
+        Returns True nếu là mới. Row đã có nhưng status/amount đổi (CLEARED->RETURNED, refund...)
+        thì UPDATE — doanh thu phải net lại, không được đóng băng ở pending."""
         subid = entry.get("subid") or ""
         item_id = entry.get("item_id")
         if not item_id and subid:
@@ -349,11 +351,31 @@ class AffiliateService:
                 "SELECT item_id FROM affiliate_links WHERE subid=? LIMIT 1", (subid,)
             )
             item_id = link.get("item_id") if link else None
+        new_amount = float(entry.get("amount") or 0.0)
         existing = self.store.query_one(
-            "SELECT id FROM affiliate_conversions WHERE network=? AND network_txn_id=?",
+            "SELECT id,status,amount,item_id,product_label FROM affiliate_conversions "
+            "WHERE network=? AND network_txn_id=?",
             (entry["network"], entry["network_txn_id"]),
         )
         if existing:
+            changed = (
+                (existing["status"] or "") != (entry.get("status") or "")
+                or abs(float(existing["amount"] or 0.0) - new_amount) > 1e-9
+                or (existing["item_id"] or None) != (item_id or None)
+            )
+            if changed:
+                self.store.execute(
+                    "UPDATE affiliate_conversions SET status=?, amount=?, item_id=?, "
+                    "product_label=?, synced_at=? WHERE network=? AND network_txn_id=?",
+                    (
+                        entry.get("status"), new_amount, item_id, entry.get("product_label"), now(),
+                        entry["network"], entry["network_txn_id"],
+                    ),
+                )
+                logger.info(
+                    "affiliate conversion updated: %s/%s status=%s amount=%s",
+                    entry["network"], entry["network_txn_id"], entry.get("status"), new_amount,
+                )
             return False
         self.store.execute(
             "INSERT OR IGNORE INTO affiliate_conversions "
@@ -361,7 +383,7 @@ class AffiliateService:
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 new_id("acv"), entry["network"], entry["network_txn_id"], subid or None,
-                item_id, entry.get("product_label"), float(entry.get("amount") or 0.0),
+                item_id, entry.get("product_label"), new_amount,
                 entry.get("currency") or "USD", entry.get("status"), entry.get("event_date"), now(),
             ),
         )

@@ -39,14 +39,18 @@ def test_agent_guide_endpoint_and_files(client, read_key):
     assert "text/markdown" in res_raw.headers.get("content-type", "")
     assert "External Video Agent API Guide" in res_raw.text
 
-    # 3. File existence across repositories
+    # 3. File existence — MỘT guide chuẩn duy nhất (chốt 3 bên 2026-11-21:
+    #    root guide v2.3 stale đã bị xóa, guide server là nguồn duy nhất).
     guide_sys = Path(r"C:\app\work\video-system\AGENT_API_GUIDE.md")
     assert guide_sys.exists()
     assert guide_sys.stat().st_size > 5000
 
-    guide_support = Path(r"C:\app\work\support-video-edit\AGENT_API_GUIDE.md")
-    assert guide_support.exists()
-    assert guide_support.stat().st_size > 5000
+    guide_repo = Path(r"C:\app\work\support-video-edit\video-system\AGENT_API_GUIDE.md")
+    assert guide_repo.exists(), "canonical guide phải nằm trong repo video-system/"
+    assert guide_repo.stat().st_size > 5000
+
+    stale_root = Path(r"C:\app\work\support-video-edit\AGENT_API_GUIDE.md")
+    assert not stale_root.exists(), "root guide v2.3 phải đã bị xóa (chỉ còn 1 guide chuẩn)"
 
 
 def test_storage_health_and_endpoint(client, read_key):
