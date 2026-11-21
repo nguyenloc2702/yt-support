@@ -1220,8 +1220,10 @@ def get_agent_guide(format: str | None = None, request: Request = None):
     auth.require(request, "read")
     guide_path = Path(__file__).resolve().parents[2] / "AGENT_API_GUIDE.md"
     if not guide_path.exists():
-        guide_path = Path("AGENT_API_GUIDE.md")
-    content = guide_path.read_text(encoding="utf-8") if guide_path.exists() else "# External Agent API Guide\n"
+        # Fail loud: serving a placeholder silently let external agents run on
+        # a stale standard. Missing guide is an ops error, not an empty doc.
+        raise HTTPException(status_code=404, detail="Agent guide file missing on server")
+    content = guide_path.read_text(encoding="utf-8")
 
     accept = request.headers.get("accept", "") if request else ""
     fmt_lower = (format or "").strip().lower()
