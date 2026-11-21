@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS shots (
   index_num INTEGER, shot_type TEXT, narration TEXT,
   audio_start_sec REAL, audio_end_sec REAL, visual_prompt TEXT,
   on_screen_text TEXT, on_screen_type TEXT,
+  beat_type TEXT, voice TEXT, generator TEXT,
   keyframe_asset_id TEXT, keyframe_hash TEXT,
   video_asset_id TEXT, render_engine TEXT, seed TEXT,
   character_ids TEXT,
@@ -400,6 +401,9 @@ _SHOT_MIGRATION_COLS = [
     ("agent_checked", "INTEGER DEFAULT 0"),
     ("generated_duration_sec", "REAL DEFAULT 0.0"),
     ("agent_note", "TEXT"),
+    ("beat_type", "TEXT"),
+    ("voice", "TEXT"),
+    ("generator", "TEXT"),
 ]
 
 _SHORTS_MIGRATION_COLS = [

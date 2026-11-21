@@ -74,6 +74,12 @@ daily_digest:
   signature: "@StickSto"
   watermark_opacity: 0.22
   send_video_to_telegram: true
+  # Tự upload YouTube ngay khi render xong — publish_at = now + delay để có
+  # khung ~45 phút hủy/sửa trước khi video tự public (cần kênh OAuth đã connect)
+  youtube_auto_publish:
+    enabled: true
+    privacy_status: "private"
+    publish_delay_minutes: 45
 telegram:
   parse_mode: "HTML"
   disable_web_page_preview: false

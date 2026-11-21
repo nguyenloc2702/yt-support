@@ -66,6 +66,8 @@ SHOT_TYPES = ("scene", "quote", "crowd", "diagram")
 VOICES = ("narrator", "character_2")
 ON_SCREEN_TYPES = ("big_number", "handwritten_label", "stamp", "speech_bubble", "none")
 
+ENGINE_VERSION = "story-architect-v2.1"
+
 TRANSCRIPT_MAX_CHARS = 24_000      # ~6k words ≈ 20+ minutes of source narration
 WORDS_PER_SEC = 2.65               # English documentary narration pace
 WORDS_PER_SHOT = 38                # 12-18s macro-shot ≈ 25-45 words
@@ -153,6 +155,18 @@ def _llm_config() -> tuple[str | None, str, str, list[str]]:
         m.strip() for m in (os.environ.get("VIDEO_XKIRO_LLM_FALLBACK_MODELS") or "").split(",") if m.strip()
     ] or (["mistralai/mistral-medium-3.5", "mistralai/mistral-small-2603"] if xkiro_key else [])
     return api_key, base_url, model, fallbacks
+
+
+def llm_status() -> dict[str, Any]:
+    """Ops visibility: which engine/gateway this process would use right now."""
+    api_key, base_url, model, fallbacks = _llm_config()
+    return {
+        "engine": ENGINE_VERSION,
+        "llm_key_present": bool(api_key),
+        "llm_gateway": base_url,
+        "llm_model": model,
+        "llm_fallback_models": fallbacks,
+    }
 
 
 _JSON_LIST_KEYS = ("shots", "expanded", "chapters", "dialogue_skits", "metaphors", "open_loops")
@@ -515,6 +529,7 @@ def _normalize_llm_shot(s: dict[str, Any], pos: int, total: int) -> dict[str, An
         "beat_type": beat,
         "voice": voice,
         "chapter": chapter,
+        "generator": "story_architect",
         "on_screen_text": ost,
         "on_screen_type": ost_type,
         "visual_brief": brief,
@@ -783,6 +798,7 @@ def split_script_text_into_shots(
             "narration": norm_narr,
             "beat_type": beat,
             "voice": voice,
+            "generator": "fallback",
             "on_screen_text": ost,
             "on_screen_type": ost_type or ("none" if ost is None else ost_type),
             "visual_brief": "",

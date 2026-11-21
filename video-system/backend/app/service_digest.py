@@ -16,7 +16,8 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -335,8 +336,9 @@ def run_daily_digest(
     send_telegram: bool = True,
     force: bool = False,
     actor: str = "digest-scheduler",
+    youtube_svc=None,
 ) -> dict:
-    """Chạy trọn 1 chu kỳ Daily Digest EN (bán tự động): Sync → Chọn 12–15 tin → Render → Telegram."""
+    """Chạy trọn 1 chu kỳ Daily Digest EN (bán tự động): Sync → Chọn 12–15 tin → Render → Telegram → (tuỳ chọn) YouTube."""
     cfg = _digest_cfg()
     tz_name = str(cfg.get("timezone") or "America/New_York")
     ny_now = datetime.now(ZoneInfo(tz_name))
@@ -352,6 +354,7 @@ def run_daily_digest(
             store, shorts_svc,
             cfg=cfg, ny_now=ny_now, ny_date=ny_date,
             sync_first=sync_first, send_telegram=send_telegram, actor=actor,
+            youtube_svc=youtube_svc,
         )
     except Exception as exc:
         _record_event(store, "digest.failed", actor, {"ny_date": ny_date, "error": str(exc)})
@@ -368,6 +371,7 @@ def _run_daily_digest_inner(
     sync_first: bool,
     send_telegram: bool,
     actor: str,
+    youtube_svc=None,
 ) -> dict:
     sync_res = service_news.run_once(store) if sync_first else {"skipped": True}
     recent_titles = recent_covered_titles(store)
@@ -464,6 +468,30 @@ def _run_daily_digest_inner(
     if send_telegram:
         tg_res = _notify_telegram_digest(final_short, vid_path)
 
+    # Auto-publish lên YouTube (config gate `daily_digest.youtube_auto_publish`).
+    # Upload ngay với privacy_status cấu hình; có publish_at = now + delay để có
+    # khung thời gian hủy/sửa trước khi video public. Lỗi publish KHÔNG làm hỏng digest.
+    yt_res: dict[str, Any] = {"auto_publish": False}
+    yt_cfg = cfg.get("youtube_auto_publish") or {}
+    if yt_cfg.get("enabled") and youtube_svc is not None:
+        try:
+            delay_min = int(yt_cfg.get("publish_delay_minutes", 45))
+            publish_at = (datetime.now(timezone.utc) + timedelta(minutes=delay_min)).isoformat()
+            up = youtube_svc.publish_short(
+                short["id"],
+                title=str(final_short["title"])[:100],
+                description=str((final_short.get("script") or {}).get("description") or ""),
+                privacy_status=str(yt_cfg.get("privacy_status") or "private"),
+                publish_at=publish_at,
+            )
+            yt_res = {
+                "auto_publish": True,
+                "upload_id": up.get("upload_id"),
+                "publish_at": publish_at,
+            }
+        except Exception as exc:  # noqa: BLE001
+            yt_res = {"auto_publish": False, "error": str(exc)[:220]}
+
     payload = {
         "ny_date": ny_date,
         "short_id": short["id"],
@@ -472,6 +500,7 @@ def _run_daily_digest_inner(
         "duration_s": produced.get("duration") or final_short.get("duration_s"),
         "sync": sync_res,
         "telegram": tg_res,
+        "youtube": yt_res,
     }
     _record_event(store, "digest.completed", actor, payload)
     return {"short": final_short, **payload}
@@ -516,7 +545,7 @@ def get_digest_status(store: Store) -> dict:
     }
 
 
-def start_digest_scheduler(store: Store, shorts_svc) -> threading.Thread | None:
+def start_digest_scheduler(store: Store, shorts_svc, *, youtube_svc=None) -> threading.Thread | None:
     """Khởi chạy scheduler nền 06:30 AM giờ Mỹ khi VIDEO_DAILY_DIGEST_ENABLED=1."""
     if os.environ.get("VIDEO_DAILY_DIGEST_ENABLED", "").strip() != "1":
         logger.info("daily digest scheduler disabled (set VIDEO_DAILY_DIGEST_ENABLED=1 để bật)")
@@ -534,7 +563,8 @@ def start_digest_scheduler(store: Store, shorts_svc) -> threading.Thread | None:
                 if (ny_now.hour, ny_now.minute) >= (target_h, target_m):
                     if not _already_ran_for_ny_date(store, ny_date):
                         logger.info("Starting scheduled daily digest for %s (%s)", ny_date, tz_name)
-                        run_daily_digest(store, shorts_svc, force=False, actor="digest-scheduler")
+                        run_daily_digest(store, shorts_svc, force=False, actor="digest-scheduler",
+                                         youtube_svc=youtube_svc)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("daily digest scheduler error: %s", exc)
             time.sleep(30)

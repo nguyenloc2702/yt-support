@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from . import domain
 from .auth import SESSION_COOKIE, SESSION_TTL_SEC, Auth, webauth
 from .config import db_path, data_dir, RENDER_SPEC, AUDIO_CONFIG, REPO_ROOT
+from .pipeline_en.script_generator_en import llm_status
 from .providers import AdapterNotConfigured, registry
 from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
                       CharacterSheetCreate,
@@ -101,7 +102,7 @@ readme_service = ReadMeService()
 def _start_news_scheduler() -> None:
     # Phụ lục G.10 — hộp tin nóng: chỉ bật khi VIDEO_NEWS_SYNC_ENABLED=1.
     start_news_scheduler(store)
-    start_digest_scheduler(store, shorts)
+    start_digest_scheduler(store, shorts, youtube_svc=youtube)
     youtube.startup_sweep()
     instagram.startup_sweep()
     start_affiliate_sync_scheduler(store, webhooks)
@@ -185,10 +186,13 @@ def _idempotent(request: Request, payload: dict, status_code: int = 200):
 @app.get("/api/v1/health")
 def health():
     db_ok = store.query_one("SELECT 1 AS ok")["ok"] == 1
+    llm = llm_status()
     return {"status": "ok" if db_ok else "degraded", "db": db_ok,
             "style_lock": RENDER_SPEC["version"],
             "audio_loudness_lufs": AUDIO_CONFIG["master"]["loudness_lufs"],
-            "auth_configured": not auth.keys == {}}
+            "auth_configured": not auth.keys == {},
+            "engine": llm["engine"],
+            "llm": llm}
 
 
 @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
@@ -1683,6 +1687,7 @@ def daily_digest_run(send_telegram: bool = True, sync_first: bool = True,
             send_telegram=send_telegram,
             force=True,
             actor="api",
+            youtube_svc=youtube,
         )
     except AdapterNotConfigured as e:
         raise HTTPException(503, str(e))

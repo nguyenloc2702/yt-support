@@ -296,12 +296,14 @@ class TodoService:
                 conn.execute(
                     "INSERT INTO shots (id,item_id,script_version,index_num,shot_type,"
                     "narration,audio_start_sec,audio_end_sec,visual_prompt,"
-                    "on_screen_text,on_screen_type,status,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "on_screen_text,on_screen_type,beat_type,voice,generator,"
+                    "status,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         new_id("shot"), item_id, 1, s["index"], s["shot_type"],
                         s["narration"], s["audio_start_sec"], s["audio_end_sec"],
                         s["visual_prompt"], s.get("on_screen_text"), s.get("on_screen_type"),
+                        s.get("beat_type"), s.get("voice"), s.get("generator"),
                         domain.ShotStatus.PENDING.value, t, t,
                     ),
                 )
@@ -752,7 +754,8 @@ class TodoService:
         shots_by_item: dict[str, list[dict[str, Any]]] = {iid: [] for iid in item_ids}
         for sr in self.store.query(
             f"SELECT item_id, index_num, shot_type, narration, visual_prompt, on_screen_text, "
-            f"on_screen_type, audio_start_sec, audio_end_sec, "
+            f"on_screen_type, beat_type, voice, generator, "
+            f"audio_start_sec, audio_end_sec, "
             f"agent_checked, generated_duration_sec, agent_note "
             f"FROM shots WHERE item_id IN ({ph}) AND status != 'superseded' ORDER BY index_num ASC",
             tuple(item_ids),
@@ -854,7 +857,8 @@ class TodoService:
         else:
             shots_rows = self.store.query(
                 "SELECT index_num, shot_type, narration, visual_prompt, on_screen_text, "
-                "on_screen_type, audio_start_sec, audio_end_sec, "
+                "on_screen_type, beat_type, voice, generator, "
+                "audio_start_sec, audio_end_sec, "
                 "agent_checked, generated_duration_sec, agent_note "
                 "FROM shots WHERE item_id=? AND status != 'superseded' ORDER BY index_num ASC",
                 (item_id,),
@@ -1000,6 +1004,9 @@ class TodoService:
                 "visual_prompt": s["visual_prompt"],
                 "on_screen_text": s.get("on_screen_text"),
                 "on_screen_type": s.get("on_screen_type"),
+                "beat_type": s.get("beat_type"),
+                "voice": s.get("voice"),
+                "generator": s.get("generator"),
                 "audio_start_sec": start_s,
                 "audio_end_sec": end_s,
                 "duration_sec": expected_dur,
