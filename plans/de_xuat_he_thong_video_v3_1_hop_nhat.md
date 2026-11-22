@@ -745,3 +745,29 @@ Bước migration khi Giai đoạn 1 + 2 xong:
 (b) phụ lục B render spec có khớp workflow BYD/BlackRock thật không (fps 24,
 1280x720, margin 40px), (c) §4.A3 quy tắc sửa scene — phương án dịch chuyển
 + STALE có chấp nhận được không, (d) §7 scope key có đủ phân quyền thật không.*
+
+---
+
+## Phụ lục H — Daily Brief submission flow (3 bên 2026-11-22, PR kèm commit)
+
+**Quyết định:** Daily Brief chuyển sang human-in-the-loop theo yêu cầu owner.
+
+- **16:00 giờ VN** (timezone `Asia/Ho_Chi_Minh`, `run_at: "16:00"`): Telegram gửi
+  tin đòi nội dung kèm hướng dẫn submit.
+- **Owner submit** `POST /api/v1/digest/submit` (scope `ingest`): list 8–15 tin
+  đã chốt, mỗi tin: headline, link bài gốc, summary, thumbnail_url, images[].
+  Ảnh được tải về `objects/digest_submissions/{date}/s{seq:02d}/` (seq = story
+  index + 2, produce ưu tiên owner-images trước scrape).
+- **Build**: LLM viết script từ list chốt (bypass select_candidates) → **critic
+  pass** — 1 call LLM reviewer độc lập kiểm số liệu khớp nguồn / tin trùng /
+  unsupported claim / weak hook — fail → regen 1 lần với feedback; fail lần 2 →
+  dừng + báo Telegram, KHÔNG render.
+- **Preview** → Telegram (MP4 + lệnh chốt) → **/approve <short_id>** (long-polling
+  bot, whitelist chat_id) → upload YouTube `privacy_status` theo config (mặc định
+  public — human gate đã có). `/reject` → về rejected, nộp lại được.
+- **Fallback**: không submit đến 18:00 → tự chọn tin RSS, vẫn dừng ở preview.
+- **Auto-publish legacy bị bypass** khi `submission_flow.enabled=true` (gate
+  service_digest, giữ key để rollback 1 dòng).
+- State machine `digest_submissions`: requested → submitted → building → built
+  → approved | rejected | failed.
+- Tests: `video-system/tests/test_digest_submission_flow.py` (11 case).

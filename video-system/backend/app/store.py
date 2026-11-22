@@ -374,6 +374,16 @@ CREATE TABLE IF NOT EXISTS bio_pages (
   items_json TEXT,
   updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS digest_submissions (
+  id TEXT PRIMARY KEY,
+  date TEXT UNIQUE,                 -- YYYY-MM-DD theo timezone của digest (1 kỳ/ngày)
+  status TEXT NOT NULL,             -- requested | submitted | building | built | approved | rejected | failed
+  stories_json TEXT,                -- list tin đã chốt (payload submit, đã normalize)
+  short_id TEXT,                    -- short render cho kỳ này
+  critic_issues_json TEXT,          -- issue cuối của critic (nếu fail)
+  created_at REAL,
+  updated_at REAL
+);
 """
 
 _ITEM_MIGRATION_COLS = [

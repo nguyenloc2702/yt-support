@@ -62,22 +62,37 @@ exclude_keywords_en:        # chặn tin bạo lực nặng + bài opinion/revie
   - "letters:"
 daily_digest:
   enabled: true
-  timezone: "America/New_York"
-  run_at: "07:00"              # 7:00 sáng giờ Mỹ (gom tin đúng khung 7h sáng hôm trước -> 7h sáng hôm nay)
+  timezone: "Asia/Ho_Chi_Minh"
+  run_at: "16:00"              # 16:00 giờ VN: Telegram đòi nội dung → owner submit → render → chốt → mới đăng
   voice: "en-US-BrianMultilingualNeural"
   min_stories: 12
   max_stories: 15
   lookback_hours: 24
-  window_anchor_hour: 7        # khung 07:00 hôm trước -> 07:00 hôm nay theo timezone trên
+  window_anchor_hour: 16       # khung 16:00 hôm trước -> 16:00 hôm nay theo timezone trên
   dedupe_lookback_hours: 72
   brand_header: "@STICKSTO · DAILY BRIEF"
   signature: "@StickSto"
   watermark_opacity: 0.22
   send_video_to_telegram: true
-  # Tự upload YouTube ngay khi render xong — publish_at = now + delay để có
-  # khung ~45 phút hủy/sửa trước khi video tự public (cần kênh OAuth đã connect)
-  youtube_auto_publish:
+  # Flow "người chốt nội dung": 16:00 VN bot đòi nội dung qua Telegram kèm
+  # endpoint submit; owner POST list tin đã chốt (kèm link bài + ảnh +
+  # thumbnail); hệ thu thập media -> render template hiện tại -> gửi ngược
+  # Telegram preview -> /approve mới đăng YouTube. Không submit đến deadline
+  # thì fallback tự chọn tin RSS — nhưng VẪN phải /approve mới đăng.
+  submission_flow:
     enabled: true
+    min_stories: 8
+    max_stories: 15
+    max_images_per_story: 4
+    deadline_hour: "18:00"       # sau giờ này chưa submit -> fallback tự chọn tin RSS
+    reminder_hour: "17:15"       # nhắc chưa submit (nếu chưa có bản nộp)
+    critic:
+      enabled: true              # AI rà soát độc lập sau khi LLM viết script
+      max_attempts: 2            # fail -> gen lại tối đa 1 lần; fail lần 2 -> dừng + báo Telegram
+    approve:
+      privacy_status: "public"   # đã qua human gate (owner xem MP4 rồi chốt) -> đăng public ngay
+  youtube_auto_publish:
+    enabled: true                # legacy: bị BYPASS khi submission_flow.enabled=true (gate trong service_digest)
     privacy_status: "private"
     publish_delay_minutes: 45
 telegram:

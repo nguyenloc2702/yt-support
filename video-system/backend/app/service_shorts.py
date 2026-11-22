@@ -71,6 +71,11 @@ class ShortService:
              else reason or None, now(), short_id),
         )
 
+    def cancel(self, short_id: str, *, actor: str = "api", reason: str = "") -> None:
+        """Huỷ 1 short ở trạng thái scripted/queued — dùng khi critic bắt lỗi và gen lại."""
+        self._transition(short_id, domain.ShortStatus.CANCELLED.value,
+                         reason=f"cancelled by {actor}: {reason}"[:180])
+
     # ------------------------------------------------------------------ create
     def create(self, mode: str, source_text: str, source_note: str = "",
                source_link: str = "", target_seconds: float | None = None,
@@ -349,6 +354,8 @@ class ShortService:
         per_scene_multi: dict[int, dict] = {}  # seq -> {"paths": list[Path], "attribution": str, "asset_id": str}
         story_links = script.get("story_links") or {}
         stories_meta = list(script.get("stories") or [])
+        # Ảnh chủ động cung cấp qua digest submit ({seq: [path,...]}) — ưu tiên cao nhất
+        owner_images = script.get("owner_images") or {}
         if mode == "daily_digest" and (isinstance(story_links, dict) and story_links or stories_meta):
             seen_hashes: set[str] = set()
             for sc in scenes:
@@ -367,14 +374,20 @@ class ShortService:
                 if not link_u and not q_list and seq in {1, len(scenes)}:
                     # Hook/Outro lấy đại diện ảnh #1 hoặc tin cuối nếu không có query riêng
                     continue
-                found_items = story_media.collect_story_visuals(
-                    article_link=link_u,
-                    headline=headline_hint,
-                    queries=q_list,
-                    out_dir=objects / "article_images" / f"s{seq:02d}",
-                    target_images=3 if 2 <= seq <= len(scenes) - 1 else 2,
-                    seen_hashes=seen_hashes,
-                )
+                owner_files = [Path(p) for p in (owner_images.get(str(seq)) or []) if Path(p).exists()]
+                if owner_files:
+                    # Owner submit ảnh sẵn → dùng thẳng, không scrape
+                    found_items = [{"path": str(p), "source": "owner-submitted", "attribution": ""}
+                                   for p in owner_files]
+                else:
+                    found_items = story_media.collect_story_visuals(
+                        article_link=link_u,
+                        headline=headline_hint,
+                        queries=q_list,
+                        out_dir=objects / "article_images" / f"s{seq:02d}",
+                        target_images=3 if 2 <= seq <= len(scenes) - 1 else 2,
+                        seen_hashes=seen_hashes,
+                    )
                 if found_items:
                     paths_i: list[Path] = []
                     attrs_i: list[str] = []

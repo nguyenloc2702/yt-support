@@ -26,6 +26,7 @@ import httpx
 from . import config as _cfg
 from . import service_news
 from .config import public_base_url
+from .pipeline_short import owner_images
 from .store import Store, new_id, now
 
 logger = logging.getLogger("video_system.service_digest")
@@ -252,7 +253,8 @@ def _send_telegram_video(video_path: Path, caption: str) -> bool:
     return True
 
 
-def _notify_telegram_digest(short: dict, video_path: Path | None) -> dict:
+def _notify_telegram_digest(short: dict, video_path: Path | None,
+                            *, awaiting_approval: bool = False) -> dict:
     """Gửi báo cáo + MP4 preview về Telegram cho bước duyệt bán tự động."""
     if not service_news._telegram_configured():
         return {"message_sent": False, "video_sent": False}
@@ -277,6 +279,16 @@ def _notify_telegram_digest(short: dict, video_path: Path | None) -> dict:
         "",
         f"👉 Duyệt &amp; đăng YouTube Shorts tại: <a href=\"{html.escape(studio_url)}\">Mở Short Studio</a>",
     ]
+    if awaiting_approval:
+        approve_cfg = (_digest_cfg().get("submission_flow") or {}).get("approve") or {}
+        privacy = str(approve_cfg.get("privacy_status") or "public")
+        lines += [
+            "",
+            "⚡ <b>CHỐT ĐĂNG:</b>",
+            f"• /approve <code>{html.escape(short['id'])}</code> → đăng YouTube ({privacy}) ngay",
+            f"• /reject <code>{html.escape(short['id'])}</code> → bỏ bản này, nộp nội dung lại",
+            "• Không chốt = KHÔNG đăng (không còn auto-publish).",
+        ]
     msg_sent = False
     vid_sent = False
     try:
@@ -466,14 +478,16 @@ def _run_daily_digest_inner(
 
     tg_res = {"message_sent": False, "video_sent": False}
     if send_telegram:
-        tg_res = _notify_telegram_digest(final_short, vid_path)
+        tg_res = _notify_telegram_digest(final_short, vid_path,
+                                         awaiting_approval=_submission_enabled(cfg))
 
     # Auto-publish lên YouTube (config gate `daily_digest.youtube_auto_publish`).
     # Upload ngay với privacy_status cấu hình; có publish_at = now + delay để có
     # khung thời gian hủy/sửa trước khi video public. Lỗi publish KHÔNG làm hỏng digest.
+    # SUBMISSION FLOW: khi bật, KHÔNG BAO GIỜ tự đăng — chỉ /approve qua Telegram.
     yt_res: dict[str, Any] = {"auto_publish": False}
     yt_cfg = cfg.get("youtube_auto_publish") or {}
-    if yt_cfg.get("enabled") and youtube_svc is not None:
+    if yt_cfg.get("enabled") and youtube_svc is not None and not _submission_enabled(cfg):
         try:
             delay_min = int(yt_cfg.get("publish_delay_minutes", 45))
             publish_at = (datetime.now(timezone.utc) + timedelta(minutes=delay_min)).isoformat()
@@ -546,25 +560,60 @@ def get_digest_status(store: Store) -> dict:
 
 
 def start_digest_scheduler(store: Store, shorts_svc, *, youtube_svc=None) -> threading.Thread | None:
-    """Khởi chạy scheduler nền 06:30 AM giờ Mỹ khi VIDEO_DAILY_DIGEST_ENABLED=1."""
+    """Khởi chạy scheduler nền Daily Digest khi VIDEO_DAILY_DIGEST_ENABLED=1.
+
+    submission_flow.enabled=true: đến giờ run_at -> Telegram "đòi nội dung" (1 lần),
+    nhắc tại reminder_hour, quá deadline_hour chưa có bản nộp -> fallback tự chọn
+    tin RSS (vẫn dừng ở preview chờ /approve). Submission mode tắt auto-publish.
+    """
     if os.environ.get("VIDEO_DAILY_DIGEST_ENABLED", "").strip() != "1":
         logger.info("daily digest scheduler disabled (set VIDEO_DAILY_DIGEST_ENABLED=1 để bật)")
         return None
     cfg = _digest_cfg()
     tz_name = str(cfg.get("timezone") or "America/New_York")
     target_h, target_m = _parse_hhmm(str(cfg.get("run_at") or "07:00"), default=(7, 0))
+    sf_cfg = cfg.get("submission_flow") or {}
+    sub_on = _submission_enabled(cfg)
+    remind_h, remind_m = _parse_hhmm(str(sf_cfg.get("reminder_hour") or "17:15"), default=(17, 15))
+    fallback_h, fallback_m = _parse_hhmm(str(sf_cfg.get("deadline_hour") or "18:00"), default=(18, 0))
 
     def _loop() -> None:
         tz = ZoneInfo(tz_name)
         while True:
             try:
-                ny_now = datetime.now(tz)
-                ny_date = ny_now.strftime("%Y-%m-%d")
-                if (ny_now.hour, ny_now.minute) >= (target_h, target_m):
-                    if not _already_ran_for_ny_date(store, ny_date):
-                        logger.info("Starting scheduled daily digest for %s (%s)", ny_date, tz_name)
-                        run_daily_digest(store, shorts_svc, force=False, actor="digest-scheduler",
-                                         youtube_svc=youtube_svc)
+                local_now = datetime.now(tz)
+                local_date = local_now.strftime("%Y-%m-%d")
+                hhmm = (local_now.hour, local_now.minute)
+                if sub_on:
+                    sub = get_digest_submission(store, local_date)
+                    if hhmm >= (target_h, target_m) and sub is None:
+                        if hhmm >= (fallback_h, fallback_m):
+                            # Quá deadline chưa submit -> fallback tự chọn tin RSS,
+                            # vẫn dừng ở preview chờ /approve (submission mode chặn auto-publish).
+                            if not _has_event_today(store, "digest.fallback_started", local_date):
+                                logger.info("Digest %s: quá deadline submit — fallback RSS", local_date)
+                                _record_event(store, "digest.fallback_started", "digest-scheduler",
+                                              {"date": local_date})
+                                run_daily_digest(store, shorts_svc, force=False, sync_first=True,
+                                                 actor="digest-scheduler-fallback",
+                                                 youtube_svc=youtube_svc)
+                        elif not _has_event_today(store, "digest.requested", local_date):
+                            logger.info("Digest %s: gửi yêu cầu nội dung qua Telegram", local_date)
+                            _record_event(store, "digest.requested", "digest-scheduler",
+                                          {"date": local_date})
+                            send_digest_request_message(local_date)
+                    elif (sub is None and hhmm >= (remind_h, remind_m)
+                          and hhmm < (fallback_h, fallback_m)
+                          and not _has_event_today(store, "digest.reminder", local_date)):
+                        _record_event(store, "digest.reminder", "digest-scheduler", {"date": local_date})
+                        send_digest_reminder_message(local_date, fallback_h, fallback_m)
+                else:
+                    ny_date = local_date
+                    if hhmm >= (target_h, target_m):
+                        if not _already_ran_for_ny_date(store, ny_date):
+                            logger.info("Starting scheduled daily digest for %s (%s)", ny_date, tz_name)
+                            run_daily_digest(store, shorts_svc, force=False, actor="digest-scheduler",
+                                             youtube_svc=youtube_svc)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("daily digest scheduler error: %s", exc)
             time.sleep(30)
@@ -572,3 +621,543 @@ def start_digest_scheduler(store: Store, shorts_svc, *, youtube_svc=None) -> thr
     th = threading.Thread(target=_loop, name="daily-digest", daemon=True)
     th.start()
     return th
+
+
+# ============================================================================
+# SUBMISSION FLOW — Daily Brief human-in-the-loop (chốt 3 bên 2026-11-22)
+# 16:00 VN: Telegram đòi nội dung -> owner POST /api/v1/digest/submit
+# (list tin chốt + link bài + ảnh + thumbnail) -> thu thập media -> LLM viết
+# -> critic AI rà soát -> render template hiện tại -> Telegram preview
+# -> /approve mới đăng YouTube. Không submit đến deadline -> fallback RSS
+# (vẫn phải /approve). Không submit-flow thì không bao giờ auto-publish.
+# ============================================================================
+
+
+def _submission_enabled(cfg: dict | None = None) -> bool:
+    cfg = cfg or _digest_cfg()
+    return bool((cfg.get("submission_flow") or {}).get("enabled"))
+
+
+def _has_event_today(store: Store, event_type: str, date_key: str) -> bool:
+    rows = store.query(
+        "SELECT payload_json FROM events WHERE type=? ORDER BY at DESC LIMIT 40",
+        (event_type,),
+    )
+    for r in rows:
+        try:
+            p = json.loads(r.get("payload_json") or "{}")
+        except json.JSONDecodeError:
+            continue
+        if str(p.get("date") or p.get("ny_date") or "") == date_key:
+            return True
+    return False
+
+
+def _get_submission_row(store: Store, date_key: str) -> dict | None:
+    row = store.query_one("SELECT * FROM digest_submissions WHERE date=?", (date_key,))
+    return dict(row) if row else None
+
+
+def get_digest_submission(store: Store, date_key: str | None = None) -> dict | None:
+    """Submission của ngày (mặc định hôm nay theo timezone digest)."""
+    cfg = _digest_cfg()
+    if date_key is None:
+        tz_name = str(cfg.get("timezone") or "Asia/Ho_Chi_Minh")
+        date_key = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    return _get_submission_row(store, date_key)
+
+
+def _tg_text(text: str) -> bool:
+    """Gửi tin text qua Telegram (best-effort). Dùng chung cho flow submission."""
+    try:
+        service_news._send_telegram(text)
+        return True
+    except Exception as exc:  # noqa: BLE001 — Telegram là kênh báo cáo, không fail pipeline
+        logger.warning("telegram send failed: %s", exc)
+        return False
+
+
+def send_digest_request_message(date_key: str) -> bool:
+    """16:00 VN — tin nhắn đòi nội dung kèm endpoint + hướng dẫn submit."""
+    cfg = _digest_cfg()
+    sf = cfg.get("submission_flow") or {}
+    min_s = int(sf.get("min_stories") or 8)
+    max_s = int(sf.get("max_stories") or 15)
+    max_img = int(sf.get("max_images_per_story") or 4)
+    deadline = str(sf.get("deadline_hour") or "18:00")
+    base = public_base_url().rstrip("/")
+    lines = [
+        f"🌍 <b>@StickSto BRIEF {html.escape(date_key)}</b> — cần nội dung từ bạn",
+        f"Deadline nộp: <b>{html.escape(deadline)} giờ VN</b>. Quá giờ hệ tự chọn tin RSS — nhưng vẫn phải /approve mới đăng.",
+        "",
+        "MỖI TIN 1 OBJECT:",
+        "• <b>headline</b>* — tiêu đề tin (EN)",
+        "• <b>link</b>* — link bài gốc (http/https)",
+        "• summary — 1-2 câu tóm tắt (critic dùng để đối chiếu số liệu)",
+        "• images — list URL ảnh (tối đa " + str(max_img) + "/tin, JPG/PNG)",
+        "• thumbnail — URL ảnh đại diện (tuỳ chọn)",
+        "Không có ảnh? Hệ tự scrape og:image từ link bài.",
+        f"Chấp nhận <b>{min_s}-{max_s} tin</b>.",
+        "",
+        "ENDPOINT:",
+        f"POST {base}/api/v1/digest/submit",
+        "Authorization: Bearer &lt;API_KEY_INGEST&gt;",
+        "",
+        "VÍ DỤ:",
+        f"""curl -X POST {base}/api/v1/digest/submit \
+ -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+ -d '{{"date":"{date_key}","stories":[{{"headline":"Fed cuts rates","link":"https://reuters.com/...","summary":"Fed cut 25bps","images":["https://.../a.jpg"],"thumbnail":"https://.../t.jpg"}}]}}'""",
+        "",
+        "Lệnh: /status — xem tiến độ. Nộp lại nhiều lần được, bản cuối trước deadline tính.",
+    ]
+    return _tg_text("\n".join(lines))
+
+
+def send_digest_reminder_message(date_key: str, fallback_h: int, fallback_m: int) -> bool:
+    lines = [
+        f"⏰ <b>Chưa nhận nội dung Brief {html.escape(date_key)}</b>.",
+        f"Deadline <b>{fallback_h:02d}:{fallback_m:02d}</b> — quá giờ hệ tự chọn tin RSS (vẫn phải /approve mới đăng).",
+        "Nộp: POST /api/v1/digest/submit (hướng dẫn ở tin 16:00). /status — xem tiến độ.",
+    ]
+    return _tg_text("\n".join(lines))
+
+
+# --- submit + build -----------------------------------------------------------
+
+
+def submit_digest_stories(
+    store: Store,
+    shorts_svc,
+    stories: list[dict],
+    *,
+    date_key: str | None = None,
+    force: bool = False,
+    actor: str = "api",
+    build_async: bool = True,
+    youtube_svc=None,
+) -> dict:
+    """Owner nộp list tin đã chốt -> lưu submission -> tải ảnh -> build video.
+
+    State: submitted -> building -> built | failed. Nộp lại cùng ngày:
+    - requested/submitted/rejected/failed -> replace bản nộp mới
+    - building/built/approved -> 409 (trừ khi force=True, trừ approved luôn chặn)
+    """
+    cfg = _digest_cfg()
+    tz_name = str(cfg.get("timezone") or "Asia/Ho_Chi_Minh")
+    if date_key is None:
+        date_key = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    sf = cfg.get("submission_flow") or {}
+    min_s = int(sf.get("min_stories") or 8)
+    max_s = int(sf.get("max_stories") or 15)
+
+    normalized = _normalize_stories(stories)
+    if not (min_s <= len(normalized) <= max_s):
+        raise ValueError(f"Số tin phải từ {min_s} đến {max_s} — nhận được {len(normalized)}.")
+
+    existing = _get_submission_row(store, date_key)
+    if existing and not force:
+        locked = {"building", "built", "approved"}
+        if existing["status"] in locked:
+            raise PermissionError(
+                f"Kỳ {date_key} đang ở trạng thái '{existing['status']}' — không nộp đè được."
+            )
+    if existing and existing["status"] == "approved":
+        raise PermissionError(f"Kỳ {date_key} đã approved và đăng — không nộp đè.")
+
+    # Dedupe link trùng với tin đã dùng 72h qua (warning, không chặn — owner chốt rồi)
+    warnings: list[str] = []
+    for st in normalized:
+        link = str(st.get("link") or "")
+        if link:
+            h = __import__("hashlib").sha1(link.encode("utf-8")).hexdigest()
+            dup = store.query_one(
+                "SELECT title FROM news_items WHERE link_hash=? AND status='used'", (h,)
+            )
+            if dup:
+                warnings.append(f"Đã dùng 72h qua: {str(dup.get('title') or '')[:80]}")
+
+    if existing:
+        sub_id = existing["id"]
+        store.execute(
+            "UPDATE digest_submissions SET status='submitted', stories_json=?, short_id=NULL, "
+            "critic_issues_json=NULL, updated_at=? WHERE id=?",
+            (json.dumps(normalized, ensure_ascii=False), now(), sub_id),
+        )
+    else:
+        sub_id = new_id("dsub")
+        store.execute(
+            "INSERT INTO digest_submissions (id,date,status,stories_json,short_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,NULL,?,?)",
+            (sub_id, date_key, "submitted", json.dumps(normalized, ensure_ascii=False), now(), now()),
+        )
+    _record_event(store, "digest.submitted", actor, {"date": date_key, "stories": len(normalized),
+                                                     "submission_id": sub_id})
+
+    if build_async:
+        th = threading.Thread(
+            target=_build_digest_from_submission,
+            args=(store, shorts_svc, sub_id),
+            kwargs={"youtube_svc": youtube_svc, "actor": actor},
+            name=f"digest-build-{date_key}",
+            daemon=True,
+        )
+        th.start()
+        return {"submission_id": sub_id, "date": date_key, "stories": len(normalized),
+                "warnings": warnings, "building": True}
+    result = _build_digest_from_submission(store, shorts_svc, sub_id,
+                                           youtube_svc=youtube_svc, actor=actor)
+    result["warnings"] = warnings
+    result["submission_id"] = sub_id
+    
+    return result
+
+
+def _normalize_stories(stories: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for st in stories or []:
+        st = st or {}
+        headline = str(st.get("headline") or st.get("title") or "").strip()
+        if not headline:
+            continue
+        out.append({
+            "headline": headline[:200],
+            "link": str(st.get("link") or st.get("source_url") or "").strip(),
+            "source": str(st.get("source") or "").strip(),
+            "summary": str(st.get("summary") or "").strip(),
+            "category": str(st.get("category") or "").strip().upper() or None,
+            "thumbnail_url": str(st.get("thumbnail_url") or "").strip(),
+            "image_urls": [str(u).strip() for u in (st.get("images") or st.get("image_urls") or [])
+                           if str(u).strip()],
+        })
+    return out
+
+
+def _build_digest_from_submission(
+    store: Store,
+    shorts_svc,
+    submission_id: str,
+    *,
+    youtube_svc=None,
+    actor: str = "api",
+) -> dict:
+    """Xây video từ list tin đã chốt: tải ảnh -> LLM viết -> critic -> render."""
+    cfg = _digest_cfg()
+    sf = cfg.get("submission_flow") or {}
+    sub = store.query_one("SELECT * FROM digest_submissions WHERE id=?", (submission_id,))
+    if not sub:
+        raise ValueError(f"Submission không tồn tại: {submission_id}")
+    sub = dict(sub)
+    date_key = str(sub["date"])
+    stories = json.loads(sub.get("stories_json") or "[]")
+    store.execute("UPDATE digest_submissions SET status='building', updated_at=? WHERE id=?",
+                  (now(), submission_id))
+    _record_event(store, "digest.building", actor, {"submission_id": submission_id, "date": date_key})
+
+    def _fail(msg: str, issues: list | None = None) -> dict:
+        store.execute(
+            "UPDATE digest_submissions SET status='failed', critic_issues_json=?, updated_at=? WHERE id=?",
+            (json.dumps(issues or [], ensure_ascii=False), now(), submission_id),
+        )
+        _record_event(store, "digest.failed", actor,
+                      {"submission_id": submission_id, "date": date_key, "error": msg})
+        _tg_text(f"❌ <b>Brief {html.escape(date_key)} thất bại</b>\n{html.escape(msg[:400])}\n"
+                 "Nộp lại: POST /api/v1/digest/submit (force=true để nộp đè kỳ failed).")
+        return {"ok": False, "error": msg}
+
+    try:
+        owner_imgs = owner_images.download_owner_images(
+            date_key, stories, max_per_story=int(sf.get("max_images_per_story") or 4))
+    except Exception as exc:  # noqa: BLE001 — ảnh lỗi không chặn build
+        logger.warning("owner images failed: %s", exc)
+        owner_imgs = {}
+
+    # Candidates = list tin đã chốt (source_index = vị trí trong list)
+    candidates = [{
+        "id": None,
+        "title": st["headline"],
+        "link": st["link"],
+        "source": st["source"] or "",
+        "summary": st["summary"],
+    } for st in stories]
+    prompt_text = build_digest_prompt_input(candidates, recent_headlines=recent_covered_titles(store))
+    prompt_text += (
+        "\n\nIMPORTANT: USE EXACTLY these "
+        f"{len(candidates)} stories IN THIS ORDER above — source_index = position in this list. "
+        "Do NOT add, drop or reorder stories."
+    )
+    brand_header = str(cfg.get("brand_header") or "@STICKSTO · DAILY BRIEF")
+    signature = str(cfg.get("signature") or "@StickSto")
+    date_label = datetime.now(ZoneInfo(str(cfg.get("timezone") or "Asia/Ho_Chi_Minh"))).strftime("%b %d")
+
+    critic_cfg = sf.get("critic") or {}
+    critic_on = bool(critic_cfg.get("enabled", True))
+    max_attempts = max(1, int(critic_cfg.get("max_attempts") or 2))
+
+    short = None
+    final_issues: list = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            short = shorts_svc.create(
+                mode="daily_digest",
+                lang="en",
+                source_text=prompt_text,
+                source_note=f"{signature} · Global News Desk ({date_label})",
+                target_seconds=155.0,
+                actor=actor,
+                extra_script_meta={
+                    "brand_header": brand_header,
+                    "signature": signature,
+                    "ny_date": date_key,
+                    "submission_id": submission_id,
+                    "owner_images": owner_imgs,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — LLM adapter fail-closed
+            return _fail(f"LLM generate failed (attempt {attempt}): {exc}")
+        verdict = {"verdict": "pass", "issues": []}
+        if critic_on:
+            try:
+                verdict = _critic_review(short.get("script") or {}, candidates)
+            except Exception as exc:  # noqa: BLE001 — critic lỗi mạng: cho qua, không chết kỳ
+                logger.warning("critic call failed: %s", exc)
+                verdict = {"verdict": "pass", "issues": [{"type": "critic_error", "detail": str(exc)[:200]}]}
+        if verdict.get("verdict") == "pass":
+            break
+        final_issues = list(verdict.get("issues") or [])
+        if attempt < max_attempts:
+            # Gen lại với feedback của critic, huỷ bản cũ (scripted -> cancelled)
+            try:
+                shorts_svc.cancel(short["id"], actor=f"{actor}:critic")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cancel regen short failed: %s", exc)
+            prompt_text += "\n\nCRITIC FEEDBACK from previous attempt (fix ALL of these):\n" + "\n".join(
+                f"- {str(i.get('type'))}: {str(i.get('detail'))}" for i in final_issues[:10])
+        else:
+            store.execute(
+                "UPDATE digest_submissions SET status='failed', critic_issues_json=?, updated_at=? WHERE id=?",
+                (json.dumps(final_issues, ensure_ascii=False), now(), submission_id),
+            )
+            _record_event(store, "digest.critic_failed", actor,
+                          {"submission_id": submission_id, "date": date_key, "issues": final_issues[:10]})
+            issue_lines = "\n".join(
+                f"• {html.escape(str(i.get('type')))}: {html.escape(str(i.get('detail'))[:120])}"
+                for i in final_issues[:6])
+            _tg_text(f"🚫 <b>Brief {html.escape(date_key)} bị critic từ chối {max_attempts} lần</b>\n"
+                     f"{issue_lines}\nNộp lại nội dung hoặc chỉnh qua web rồi thử lại.")
+            return {"ok": False, "critic_issues": final_issues}
+
+    script = dict(short.get("script") or {})
+    digested = script.get("stories") or []
+    # Map source_index -> link gốc từng tin (tương tự legacy flow, cho list chốt)
+    story_links: dict[str, dict] = {}
+    sources_seen: list[str] = []
+    kw_list = [f"world news studio globe {signature}"]
+    for pos, st in enumerate(digested):
+        seq = pos + 2
+        src_idx = st.get("source_index")
+        cand = None
+        if isinstance(src_idx, int) and 1 <= src_idx <= len(candidates):
+            cand = candidates[src_idx - 1]
+        elif pos < len(candidates):
+            cand = candidates[pos]
+        if cand:
+            story_links[str(seq)] = {
+                "link": cand.get("link") or "",
+                "title": cand.get("title") or st.get("headline") or "",
+                "source": cand.get("source") or "",
+            }
+            if cand.get("source") and cand["source"] not in sources_seen:
+                sources_seen.append(cand["source"])
+        kw_list.append(st.get("search_keywords_en") or st.get("headline") or "global news")
+    if "2" in story_links:
+        story_links["1"] = story_links["2"]
+    last_seq = str(len(digested) + 2)
+    if str(len(digested) + 1) in story_links:
+        story_links[last_seq] = story_links[str(len(digested) + 1)]
+    kw_list.append("global financial skyline sunset")
+    script["story_links"] = story_links
+    script["search_keywords_en"] = kw_list
+    if sources_seen:
+        script["source_note"] = f"Sources: {', '.join(sources_seen[:5])} | {signature}"
+    store.execute(
+        "UPDATE shorts SET script_json=?, source_note=?, updated_at=? WHERE id=?",
+        (json.dumps(script, ensure_ascii=False), script["source_note"], now(), short["id"]),
+    )
+    # Đánh dấu tin đã dùng theo link (nếu có trong news_items)
+    for st in candidates:
+        link = str(st.get("link") or "")
+        if link:
+            h = __import__("hashlib").sha1(link.encode("utf-8")).hexdigest()
+            store.execute("UPDATE news_items SET status='used' WHERE link_hash=?", (h,))
+
+    produced = shorts_svc.produce(short["id"], actor=actor)
+    final_short = shorts_svc.get(short["id"])
+    vid_path = None
+    try:
+        vid_path = shorts_svc.video_path(short["id"])
+    except Exception:  # noqa: BLE001
+        vid_path = None
+
+    store.execute(
+        "UPDATE digest_submissions SET status='built', short_id=?, updated_at=? WHERE id=?",
+        (short["id"], now(), submission_id),
+    )
+    tg_res = _notify_telegram_digest(final_short, vid_path, awaiting_approval=True)
+
+    payload = {
+        "date": date_key,
+        "submission_id": submission_id,
+        "short_id": short["id"],
+        "title": final_short["title"],
+        "stories_count": len(digested),
+        "duration_s": produced.get("duration") or final_short.get("duration_s"),
+        "telegram": tg_res,
+        "auto_publish": False,  # submission flow: chỉ đăng khi /approve
+        "critic_issues": final_issues,
+    }
+    _record_event(store, "digest.completed", actor, payload)
+    return {"ok": True, "short": final_short, **payload}
+
+
+# --- critic -------------------------------------------------------------------
+
+
+_CRITIC_SYSTEM = """You are an independent, skeptical senior producer reviewing a news-digest script BEFORE it is rendered. Your job is to catch errors, not to write.
+
+Check strictly:
+1. number_mismatch — every figure/date/number in narration or hero_stat MUST appear in, or be a reasonable formatting of, that story's source summary/headline. Flag invented or altered numbers.
+2. duplicate — two stories covering the same event, or a story clearly duplicating another's facts.
+3. unsupported_claim — a strong claim with no basis in the source summary at all.
+4. weak_hook — the opening hook is bland or fails to name a concrete stake.
+
+Be strict on numbers, lenient on style. Return verdict "pass" only when nothing significant is wrong."""
+
+
+def _critic_review(script: dict, candidates: list[dict]) -> dict:
+    """AI rà soát độc lập: 1 call LLM riêng (reviewer), không phải writer."""
+    from .providers import registry
+
+    stories = list(script.get("stories") or [])
+    src_by_idx = {}
+    for i, c in enumerate(candidates, start=1):
+        src_by_idx[i] = {
+            "headline": c.get("title") or "",
+            "source_summary": c.get("summary") or "",
+        }
+    payload = {
+        "stories": [{
+            "source_index": st.get("source_index"),
+            "headline": st.get("headline"),
+            "hero_stat": st.get("hero_stat"),
+            "narration": st.get("narration"),
+        } for st in stories],
+        "sources": src_by_idx,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["pass", "regenerate"]},
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "story_index": {"type": "integer"},
+                        "type": {"type": "string"},
+                        "detail": {"type": "string"},
+                    },
+                    "required": ["type", "detail"],
+                },
+            },
+        },
+        "required": ["verdict", "issues"],
+    }
+    llm = registry.require_llm()
+    raw = llm.chat_json(
+        _CRITIC_SYSTEM,
+        "Review this digest script against its sources. Return JSON per schema.\n"
+        + json.dumps(payload, ensure_ascii=False),
+        schema,
+    )
+    verdict = str((raw or {}).get("verdict") or "pass").lower()
+    return {"verdict": "regenerate" if verdict == "regenerate" else "pass",
+            "issues": list((raw or {}).get("issues") or [])}
+
+
+# --- approve / reject ---------------------------------------------------------
+
+
+def shorts_title(store: Store, short_id: str) -> str | None:
+    row = store.query_one("SELECT title FROM shorts WHERE id=?", (short_id,))
+    return (row or {}).get("title")
+
+
+def script_description(store: Store, short_id: str) -> str | None:
+    row = store.query_one("SELECT script_json FROM shorts WHERE id=?", (short_id,))
+    if not row:
+        return None
+    try:
+        return str((json.loads(row["script_json"] or "{}")).get("description") or "")
+    except json.JSONDecodeError:
+        return None
+
+
+def approve_digest(store: Store, youtube_svc, short_id: str, *, actor: str = "telegram") -> dict:
+    """Owner chốt: đăng YouTube với privacy theo config submission_flow.approve. Idempotent."""
+    cfg = _digest_cfg()
+    approve_cfg = ((cfg.get("submission_flow") or {}).get("approve") or {})
+    privacy = str(approve_cfg.get("privacy_status") or "public")
+    sub = store.query_one(
+        "SELECT * FROM digest_submissions WHERE short_id=? ORDER BY updated_at DESC LIMIT 1",
+        (short_id,),
+    )
+    if not sub:
+        raise ValueError(f"Không tìm thấy submission cho short {short_id}")
+    sub = dict(sub)
+    if sub["status"] == "approved":
+        return {"already_approved": True, "submission_id": sub["id"]}
+    up = youtube_svc.publish_short(
+        short_id,
+        title=str(shorts_title(store, short_id) or "")[:100],
+        description=str(script_description(store, short_id) or ""),
+        privacy_status=privacy,
+        publish_at=None,
+    )
+    store.execute("UPDATE digest_submissions SET status='approved', updated_at=? WHERE id=?",
+                  (now(), sub["id"]))
+    _record_event(store, "digest.published", actor, {
+        "submission_id": sub["id"], "date": sub["date"], "short_id": short_id,
+        "privacy_status": privacy, "upload_id": up.get("upload_id"),
+    })
+    return {"approved": True, "submission_id": sub["id"], "privacy_status": privacy,
+            "upload_id": up.get("upload_id")}
+
+
+def reject_digest(store: Store, short_id: str, reason: str = "", *, actor: str = "telegram") -> dict:
+    """Owner từ chối bản render — submission về rejected; nộp nội dung lại được."""
+    sub = store.query_one(
+        "SELECT * FROM digest_submissions WHERE short_id=? ORDER BY updated_at DESC LIMIT 1",
+        (short_id,),
+    )
+    if not sub:
+        raise ValueError(f"Không tìm thấy submission cho short {short_id}")
+    sub = dict(sub)
+    if sub["status"] == "approved":
+        raise PermissionError("Kỳ này đã đăng — không reject được.")
+    store.execute("UPDATE digest_submissions SET status='rejected', updated_at=? WHERE id=?",
+                  (now(), sub["id"]))
+    _record_event(store, "digest.rejected", actor,
+                  {"submission_id": sub["id"], "date": sub["date"],
+                   "short_id": short_id, "reason": reason[:200]})
+    return {"rejected": True, "submission_id": sub["id"], "date": sub["date"]}
+
+
+def get_digest_status_today(store: Store) -> dict:
+    sub = get_digest_submission(store)
+    return {
+        "date": (sub or {}).get("date"),
+        "status": (sub or {}).get("status"),
+        "short_id": (sub or {}).get("short_id"),
+        "stories": len(json.loads((sub or {}).get("stories_json") or "[]")),
+        "submission_id": (sub or {}).get("id"),
+    }

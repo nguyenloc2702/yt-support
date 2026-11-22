@@ -347,3 +347,25 @@ class BioPageUpdate(BaseModel):
     title: str = Field(default="", max_length=120)
     items: list[dict] = Field(default_factory=list, max_length=30,
                               description="[{label, slug}] — slug từ affiliate_links")
+
+
+# --- Daily Brief submission flow (3 bên 2026-11-22) ---------------------------
+
+class DigestStorySubmit(BaseModel):
+    headline: str = Field(min_length=5, max_length=200, description="Tiêu đề tin (EN)")
+    category: str | None = Field(default=None, max_length=20,
+                                 description="WORLD/MARKETS/TECH/SCIENCE/SPORTS")
+    link: str | None = Field(default=None, max_length=1000,
+                             description="Link bài gốc — hệ scrape og:image làm ảnh dự phòng")
+    source: str | None = Field(default=None, max_length=120, description="Tên nguồn (Reuters...)")
+    summary: str | None = Field(default=None, max_length=2000,
+                                description="Tóm tắt 1-2 câu — critic dùng để đối chiếu số liệu")
+    thumbnail_url: str | None = Field(default=None, max_length=1000)
+    images: list[str] = Field(default_factory=list, max_length=10,
+                              description="URL ảnh cho tin (tối đa max_images_per_story được dùng)")
+
+
+class DigestSubmitBody(BaseModel):
+    stories: list[DigestStorySubmit] = Field(min_length=1, max_length=20)
+    date: str | None = Field(default=None, max_length=10, description="YYYY-MM-DD, mặc định hôm nay")
+    force: bool = Field(default=False, description="Nộp đè kỳ đang failed/rejected")

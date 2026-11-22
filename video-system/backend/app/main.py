@@ -37,8 +37,11 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
 from .service_assembler import AssemblerService, ShortfallWarningError, ThumbnailMissingError
 from .service_news import (dismiss_news, list_news, push_selected as push_selected_news,
                            run_once as news_run_once, start_news_scheduler)
-from .service_digest import (get_digest_status, run_daily_digest,
-                             start_digest_scheduler)
+from .service_digest import (get_digest_status, get_digest_submission,
+                             get_digest_status_today, run_daily_digest,
+                             start_digest_scheduler, submit_digest_stories,
+                             approve_digest, reject_digest)
+from .service_telegram_bot import start_telegram_bot
 from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sync_item_to_gdrive
 
 from .service_batches import BatchService
@@ -58,6 +61,7 @@ from .service_affiliate import (
     start_affiliate_sync_scheduler,
 )
 from .schemas import (AffiliateProductCreate, AffiliateProductPatch, BioPageUpdate,
+                      DigestSubmitBody,
                       InstagramPublishRequest)
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
@@ -106,6 +110,8 @@ def _start_news_scheduler() -> None:
     youtube.startup_sweep()
     instagram.startup_sweep()
     start_affiliate_sync_scheduler(store, webhooks)
+    # Daily Brief human-in-the-loop: chốt /approve /reject /status từ Telegram
+    start_telegram_bot(store, shorts, youtube_svc=youtube)
 
 # -- Web PIN gate (chặn mọi request không có session/bearer hợp lệ) -----------
 # Mở: health, 3 endpoint auth/*, OPTIONS (preflight), "/favicon.ico", và "/" (shell HTML chứa
@@ -1691,6 +1697,74 @@ def daily_digest_run(send_telegram: bool = True, sync_first: bool = True,
         )
     except AdapterNotConfigured as e:
         raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+# -- Daily Brief submission flow (16:00 VN đòi nội dung → submit → chốt → đăng) --
+
+
+@app.post("/api/v1/digest/submit")
+def digest_submit(body: DigestSubmitBody, request: Request = None):
+    """Owner nộp list tin đã chốt (kèm link bài/ảnh/thumbnail) → thu thập media → render → Telegram chờ /approve."""
+    auth.require(request, "ingest")
+    try:
+        return submit_digest_stories(
+            store, shorts,
+            [s.model_dump() for s in body.stories],
+            date_key=body.date,
+            force=body.force,
+            actor="api",
+            build_async=True,
+            youtube_svc=youtube,
+        )
+    except PermissionError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.get("/api/v1/digest/submissions")
+def digest_submissions_list(date: str = "", request: Request = None):
+    auth.require(request, "read")
+    if date:
+        sub = get_digest_submission(store, date)
+        return {"submission": sub}
+    rows = store.query("SELECT * FROM digest_submissions ORDER BY date DESC LIMIT 30")
+    return {"submissions": [dict(r) for r in rows]}
+
+
+@app.get("/api/v1/digest/today")
+def digest_today(request: Request = None):
+    auth.require(request, "read")
+    return get_digest_status_today(store)
+
+
+@app.post("/api/v1/digest/{submission_id}/approve")
+def digest_approve(submission_id: str, request: Request = None):
+    """Chốt đăng YouTube (privacy theo news_config submission_flow.approve). Idempotent."""
+    auth.require(request, "admin")
+    sub = store.query_one("SELECT * FROM digest_submissions WHERE id=?", (submission_id,))
+    if not sub:
+        raise HTTPException(404, f"Submission không tồn tại: {submission_id}")
+    try:
+        return approve_digest(store, youtube, str(sub["short_id"] or ""), actor="api")
+    except PermissionError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/v1/digest/{submission_id}/reject")
+def digest_reject(submission_id: str, request: Request = None, reason: str = ""):
+    auth.require(request, "admin")
+    sub = store.query_one("SELECT * FROM digest_submissions WHERE id=?", (submission_id,))
+    if not sub:
+        raise HTTPException(404, f"Submission không tồn tại: {submission_id}")
+    try:
+        return reject_digest(store, str(sub["short_id"] or ""), reason, actor="api")
+    except PermissionError as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
 
