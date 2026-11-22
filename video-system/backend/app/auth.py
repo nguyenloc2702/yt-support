@@ -38,9 +38,16 @@ class Auth:
                 "VIDEO_API_KEYS is UNSET — only loopback clients are served. "
                 "Set VIDEO_API_KEYS before exposing this API.")
 
-    def scope_for(self, request: Request) -> str:
+    def identity_for(self, request: Request) -> tuple[str, str]:
+        """(định danh agent, scope) — phần tên của key làm agent identity.
+
+        Key `video-agent-1:ingest` → identity `video-agent-1`. Session PIN →
+        `owner` với scope admin. Chat board dùng identity này làm sender,
+        vậy mỗi agent cần key riêng trong VIDEO_API_KEYS (key chung = mọi
+        tin hiện cùng một sender).
+        """
         if webauth.session_ok(request):
-            return "admin"  # chủ hệ thống đăng nhập PIN = toàn quyền
+            return "owner", "admin"
         keys = self.keys or api_keys()
         if keys:
             header = request.headers.get("Authorization", "")
@@ -50,10 +57,15 @@ class Auth:
             scope = keys.get(key)
             if scope is None:
                 raise HTTPException(401, "unknown key")
-            return scope
+            name = key.rsplit(":", 1)[0] if ":" in key else key
+            return (name or "agent"), scope
         if not webauth.is_direct_loopback(request):
             raise HTTPException(401, "API keys unconfigured; remote access denied")
-        return "admin"
+        return "loopback", "admin"
+
+    def scope_for(self, request: Request) -> str:
+        _, scope = self.identity_for(request)
+        return scope
 
     def require(self, request: Request, needed: str) -> str:
         scope = self.scope_for(request)

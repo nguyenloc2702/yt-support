@@ -63,6 +63,7 @@ from .service_affiliate import (
 from .schemas import (AffiliateProductCreate, AffiliateProductPatch, BioPageUpdate,
                       DigestSubmitBody,
                       InstagramPublishRequest)
+from .service_chat import ChatService, ChatError
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
 
@@ -73,6 +74,7 @@ app = FastAPI(title="video-system", version="0.2.0",
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 store = SQLiteStore(db_path())
 items = ItemService(store)
+chat = ChatService(store)
 shots = ShotService(store, items)
 batches = BatchService(store, items, shots)
 importer = ImportGate(store, items)
@@ -112,6 +114,8 @@ def _start_news_scheduler() -> None:
     start_affiliate_sync_scheduler(store, webhooks)
     # Daily Brief human-in-the-loop: chốt /approve /reject /status từ Telegram
     start_telegram_bot(store, shorts, youtube_svc=youtube)
+    # Bảng chat agent: dọn tin cũ theo retention (mặc định 30 ngày)
+    chat.start_retention_worker()
 
 # -- Web PIN gate (chặn mọi request không có session/bearer hợp lệ) -----------
 # Mở: health, 3 endpoint auth/*, OPTIONS (preflight), "/favicon.ico", và "/" (shell HTML chứa
@@ -1767,6 +1771,78 @@ def digest_reject(submission_id: str, request: Request = None, reason: str = "")
         raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
+
+
+# -- Bảng chat chung cho agent (thread 1-1, tối đa 2 participants) --------------
+
+
+def _chat_identity(request: Request) -> tuple[str, bool]:
+    """(sender, is_owner) — sender = key-name / 'owner'; admin scope (PIN hoặc key admin) được xem + post mọi thread."""
+    identity, scope = auth.identity_for(request)
+    return identity, identity == "owner" or scope == "admin"
+
+
+@app.post("/api/v1/chat/threads")
+def chat_create_thread(body: dict, request: Request = None):
+    """Agent/owner tạo thread 1-1 (slot cho agent thứ 2 để trống, tự claim)."""
+    scope = auth.require(request, "ingest")
+    sender, _ = _chat_identity(request)
+    try:
+        return chat.create_thread(sender, str(body.get("title") or ""),
+                                  item_id=body.get("item_id") or None,
+                                  actor_scope=scope)
+    except ChatError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+@app.get("/api/v1/chat/threads")
+def chat_list_threads(limit: int = 50, request: Request = None):
+    """Metadata threads — public cho mọi key (agent mới tìm được agent cũ để claim)."""
+    auth.require(request, "read")
+    return {"threads": chat.list_threads(limit)}
+
+
+@app.get("/api/v1/chat/threads/{thread_id}")
+def chat_get_thread(thread_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return chat.get_thread(thread_id)
+    except ChatError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+@app.post("/api/v1/chat/threads/{thread_id}/messages")
+def chat_post_message(thread_id: str, body: dict, request: Request = None):
+    """Gửi tin — sender phải là participant (slot trống thì tự claim bằng CAS)."""
+    auth.require(request, "ingest")
+    sender, is_owner = _chat_identity(request)
+    try:
+        return chat.post_message(thread_id, sender, str(body.get("body") or ""),
+                                 is_owner=is_owner)
+    except ChatError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+@app.get("/api/v1/chat/threads/{thread_id}/messages")
+def chat_get_messages(thread_id: str, request: Request = None, since_id: int = 0,
+                      limit: int = 100):
+    """Đọc tin mới theo cursor `since_id` — chỉ participants + owner."""
+    auth.require(request, "read")
+    sender, is_owner = _chat_identity(request)
+    try:
+        return chat.get_messages(thread_id, sender, since_id=since_id, limit=limit,
+                                 is_owner=is_owner)
+    except ChatError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+@app.delete("/api/v1/chat/threads/{thread_id}")
+def chat_close_thread(thread_id: str, request: Request = None):
+    auth.require(request, "admin")
+    try:
+        return chat.close_thread(thread_id)
+    except ChatError as e:
+        raise HTTPException(e.status_code, e.message)
 
 
 # -- YouTube Channel OAuth & Publishing ----------------------------------------

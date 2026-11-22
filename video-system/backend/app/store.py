@@ -384,6 +384,27 @@ CREATE TABLE IF NOT EXISTS digest_submissions (
   created_at REAL,
   updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS chat_threads (
+  id TEXT PRIMARY KEY,              -- new_id("thr")
+  title TEXT,                       -- chủ đề hội thoại
+  created_by TEXT NOT NULL,         -- participant 1 (key-name của agent tạo thread)
+  participant_b TEXT,               -- participant 2 — NULL = slot trống, agent thứ 2 tự claim (CAS)
+  item_id TEXT,                     -- optional: gắn thread vào 1 item đang làm
+  status TEXT DEFAULT 'open',       -- open | locked (30 tin) | closed (admin)
+  last_message_seq INTEGER,
+  last_message_at REAL,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,  -- cursor tuyệt đối — AUTOINCREMENT để retention DELETE không rewind seq
+  thread_id TEXT NOT NULL,
+  sender TEXT NOT NULL,             -- key-name của agent / "owner"
+  body TEXT NOT NULL,               -- <= 2000 ký tự (chặn tầng service)
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_msg_thread ON chat_messages(thread_id, seq);
+CREATE INDEX IF NOT EXISTS idx_chat_msg_sender ON chat_messages(sender, created_at);
 """
 
 _ITEM_MIGRATION_COLS = [

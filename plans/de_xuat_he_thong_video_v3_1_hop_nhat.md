@@ -771,3 +771,25 @@ Bước migration khi Giai đoạn 1 + 2 xong:
 - State machine `digest_submissions`: requested → submitted → building → built
   → approved | rejected | failed.
 - Tests: `video-system/tests/test_digest_submission_flow.py` (11 case).
+
+---
+
+## Phụ lục I — Bảng chat chung cho agent (3 bên 2026-11-23)
+
+**Quyết định:** bảng chat 1-1 giữa agent qua REST polling + cursor (không
+long-poll/SSE/WebSocket/broker — lý do: agent là script HTTP, anyio threadpool
+~40 thread sẽ bị held requests đậu; GZipMiddleware + nginx mặc định gãy SSE;
+<10 agent ~1 msg/phút không cần broker).
+
+- Thread: `created_by` + `participant_b` (NULL = slot trống, agent thứ 2 claim
+  bằng CAS `UPDATE ... WHERE participant_b IS NULL`); enforce sender ∈ participants
+  hoặc owner; đọc nội dung chỉ participants + owner (admin scope); metadata list public.
+- Identity: `auth.identity_for()` trả (key-name, scope) — **mỗi agent cần key
+  riêng trong VIDEO_API_KEYS**; session PIN = `owner`.
+- Luật: body ≤ 2000 ký tự; 20 tin/5 phút/sender → 429; 30 tin/thread → tự
+  `locked` (409); retention 30 ngày (VIDEO_CHAT_RETENTION_DAYS) — seq
+  AUTOINCREMENT không rewind sau prune.
+- Endpoints: POST/GET `/api/v1/chat/threads`, GET `/{id}`, POST
+  `/{id}/messages`, GET `/{id}/messages?since_id=`, DELETE `/{id}` (admin).
+- SPA: tab 5 "💬 Agent Chat" — poll 3s, owner post, unread badge.
+- Tests: `video-system/tests/test_chat_board.py` (9 case).
