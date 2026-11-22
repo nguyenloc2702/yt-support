@@ -28,6 +28,21 @@ SENSITIVE_KEYS = {"llm_api_key"}
 
 _SECRET_KEY_PATH = Path(settings.data_dir) / ".secret_key"
 
+_db_ready = False
+
+
+def _ensure_db() -> None:
+    """Fresh environments (CI checkout, first run) have no tables yet — pages
+    like 00_settings read settings before anyone calls init_db(). create_all
+    is idempotent, so a one-time lazy bootstrap here is cheap and fail-closed
+    instead of crashing the page with 'no such table: app_settings'."""
+    global _db_ready
+    if not _db_ready:
+        from core.database import init_db
+
+        init_db()
+        _db_ready = True
+
 
 def _get_fernet() -> Fernet:
     """Load (or create) the master key and return a Fernet instance."""
@@ -64,6 +79,7 @@ def _decrypt(value: str) -> str:
 
 def get_setting(key: str, default: str | None = None) -> str | None:
     """Return a setting value (decrypted if sensitive), or default."""
+    _ensure_db()
     with SessionLocal() as db:
         row = db.get(AppSetting, key)
         if row is None or row.value is None:
@@ -79,6 +95,7 @@ def get_setting(key: str, default: str | None = None) -> str | None:
 
 def set_setting(key: str, value: str | None) -> None:
     """Create/update a setting. Sensitive keys are encrypted at rest."""
+    _ensure_db()
     with SessionLocal() as db:
         row = db.get(AppSetting, key)
         if value is None:

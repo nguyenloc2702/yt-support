@@ -75,6 +75,14 @@ jobs:
             # pushes never reach the running process.
             if [ -d /opt/video-system ]; then
               rsync -a /opt/support-video-edit/video-system/backend/ /opt/video-system/backend/
+              # Frontend SPA (main.py:206 serves parents[2]/frontend/index.html),
+              # runtime config (config.py reads REPO_ROOT/config/*.yaml),
+              # read_me docs and the agent guide all live OUTSIDE backend/ —
+              # without these rsyncs, new UI/config never reaches production.
+              rsync -a /opt/support-video-edit/video-system/frontend/ /opt/video-system/frontend/
+              rsync -a /opt/support-video-edit/video-system/config/ /opt/video-system/config/
+              rsync -a /opt/support-video-edit/video-system/read_me/ /opt/video-system/read_me/
+              rsync -a /opt/support-video-edit/video-system/AGENT_API_GUIDE.md /opt/video-system/AGENT_API_GUIDE.md
               systemctl restart video-system || true
               sleep 3
               systemctl is-active video-system || true
