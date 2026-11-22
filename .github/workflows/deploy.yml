@@ -64,6 +64,11 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
+            echo "=== Stopping retired factory worker container (tombstone 2026-11-21) ==="
+            # Factory Telegram đã retire — container cũ từ image legacy vẫn chạy
+            # restart:unless-stopped; gỡ hẳn để không đốt CPU/RAM/poll Telegram.
+            docker rm -f support-video-worker 2>/dev/null || true
+
             echo "=== Syncing & restarting video-system backend (vidfac) ==="
             # The EN video API (vidfac.gacdero.vn, systemd unit "video-system") runs
             # from /opt/video-system — sync the backend code and restart, otherwise
