@@ -11,18 +11,20 @@ import re
 
 from ..config import SHORT_CONFIG
 
-MODES = ("news", "decode", "daily_digest")
+MODES = ("news", "decode", "daily_digest", "trailer")
 LANGS = ("vi", "en")
 
 _MODE_NAME_VI = {
     "news": "Tin nóng",
     "decode": "Giải mã tiền bạc",
     "daily_digest": "Điểm tin nhanh",
+    "trailer": "Trailer video dài",
 }
 _MODE_NAME_EN = {
     "news": "Breaking News",
     "decode": "Money Decode",
     "daily_digest": "Daily World Brief",
+    "trailer": "Long-Video Trailer",
 }
 
 # Chủ đề né cho mảng Tin nóng (bắt buộc theo G.1 — an toàn nền tảng)
@@ -135,6 +137,28 @@ Return valid JSON matching the schema with `title`, `hook`, `stories`, `beats` (
 
 _SYSTEM_DAILY_DIGEST_VI = """Bạn là biên tập viên bản tin nhanh quốc tế "@StickSto · Điểm Tin" dưới 3 phút. Chọn 12-15 tin đáng chú ý nhất từ danh sách tin ứng viên, không trùng lặp chủ đề, viết câu thoại súc tích kèm category, headline, hero_stat, hero_sub, narration, source_index, search_keywords_en trong mảng `stories`, plus hook và closing nhắc @StickSto."""
 
+# Trailer (EN-first): teaser 30-45s dẫn viewer về video dài EN explainer.
+# Công thức 3 bên chốt: hook = định vị mạnh nhất (số/claim nguyên văn), 2-3 beat
+# mở loop rồi DỪNG trước đáp án, closing CTA bắt buộc — cấm spoil kết luận cuối.
+_SYSTEM_TRAILER_EN = """You are a trailer editor for vertical short-form teasers (TikTok/Reels/Shorts) that drive viewers to the channel's FULL long-form explainer video.
+
+TASK: from the long video's script the user pastes in, write a 30-45 second trailer following this formula:
+1. hook (0-3s, max 12 words): the strongest positioning of the long video — a verbatim shocking number or a counterintuitive claim taken EXACTLY from the script. NEVER open with "In this video...".
+2. beats (2-3 beats): the biggest questions or mysteries the long video answers. Open each loop and STOP right before the answer — leave the payoff out. Mention different angles, not the same one three times.
+3. closing (mandatory CTA): tell viewers the full video exists and where to watch it. It MUST contain the words "full video" and either "on the channel" (for YouTube Shorts) or "link in bio" (for TikTok/Instagram), plus the long video's topic named so viewers recognize it.
+
+RULES:
+- Natural conversational English, spoken not written.
+- Keep numbers EXACTLY as in the source script; NEVER invent figures.
+- NEVER reveal the ending, the final verdict, or the recommendation of the long video — tease the "what" and "why it matters", never the "how it ends".
+- Do NOT promise content that is not in the source script.
+- Provide `search_keywords_en` (3-5 short stock-image search queries) matching the long video's subject.
+
+Return JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
+"search_keywords_en": ["...", "..."],
+"hashtags": {{"tiktok": [...max 6...], "facebook": [...max 6...], "youtube": [...max 5...]}},
+"description": "1-2 sentence post description linking to the full video", "source_note": ""}}"""
+
 _JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -179,6 +203,12 @@ _JSON_SCHEMA = {
 def system_prompt(mode: str, lang: str = "vi") -> str:
     _check_mode(mode)
     _check_lang(lang)
+    if mode == "trailer":
+        # Trailer chỉ có use case thật là teaser cho video dài EN — VI để sau
+        # (cần mood/preset riêng). Fail-closed với thông báo rõ.
+        if lang != "en":
+            raise ValueError('mode "trailer" hiện chỉ hỗ trợ lang="en" (video dài là EN explainer).')
+        return _SYSTEM_TRAILER_EN
     if lang == "en":
         if mode == "daily_digest":
             return _SYSTEM_DAILY_DIGEST_EN
@@ -310,7 +340,7 @@ def validate_script(mode: str, script: dict, source_note_fallback: str = "",
             beats = story_beats
     if not beats:
         raise ValueError("Kịch bản không có beat nào từ LLM.")
-    max_beats = 15 if mode == "daily_digest" else 4
+    max_beats = 15 if mode == "daily_digest" else (3 if mode == "trailer" else 4)
     if len(beats) > max_beats:
         beats = beats[:max_beats]
     if mode == "daily_digest" and len(beats) < 8:
@@ -343,6 +373,15 @@ def validate_script(mode: str, script: dict, source_note_fallback: str = "",
     }
     if stories_clean:
         clean["stories"] = stories_clean
+    if mode == "trailer":
+        # CTA fail-closed (BA chốt): closing phải dẫn được về video dài — thiếu
+        # "full video" hoặc cả hai dấu hiệu đích ("channel"/"bio") là từ chối.
+        closing_low = clean["closing"].lower()
+        if "full video" not in closing_low or not ("channel" in closing_low or "bio" in closing_low):
+            raise ValueError(
+                "Trailer closing thiếu CTA — phải chứa 'full video' và 'on the channel' "
+                "hoặc 'link in bio'. Bấm 'Đổi kịch bản' để gen lại."
+            )
     wc = count_words(clean)
     if not (lo <= wc <= hi):
         raise ValueError(

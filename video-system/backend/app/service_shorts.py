@@ -203,7 +203,7 @@ class ShortService:
             beats = [str(b).strip() for b in (patch["beats"] or []) if str(b).strip()]
             if not beats:
                 raise ValueError("beats không được rỗng.")
-            max_beats = 15 if row["mode"] == "daily_digest" else 4
+            max_beats = 15 if row["mode"] == "daily_digest" else (3 if row["mode"] == "trailer" else 4)
             script["beats"] = beats[:max_beats]
             if row["mode"] == "daily_digest" and isinstance(script.get("stories"), list):
                 for idx_s, st in enumerate(script["stories"]):

@@ -29,6 +29,16 @@ modes:
     images_per_scene: 1
     fast_mode: true
     hero_images: 8              # dự phòng AI-gen khi bài báo/Wikimedia không có ảnh khớp
+  trailer:
+    target_seconds: 38          # 30–45s teaser cho video dài EN explainer (mode 3 bên chốt 2026-11-22)
+    min_words: 85               # VI để sau — trailer hiện chỉ nhận lang=en
+    max_words: 115
+    min_words_en: 70            # ~2.45 từ/s: 30s→73, 45s→110 (yaml tts_en.words_per_sec_estimate)
+    max_words_en: 105
+    images_per_scene: 1
+    fast_mode: true
+    hero_images: 2              # AI-gen hook + 1 beat khi stock/bank không khớp chủ đề video dài
+    voice: "en-US-BrianMultilingualNeural"  # đồng bộ giọng Creator EN của daily_digest
 tts_vi:
   default_voice: "vi-VN-HoaiMyNeural"
   fallback_voice: "vi-VN-HoaiMyNeural"

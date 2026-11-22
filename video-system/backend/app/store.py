@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS todo_feedbacks (
 );
 CREATE TABLE IF NOT EXISTS shorts (
   id TEXT PRIMARY KEY,
-  mode TEXT NOT NULL,               -- news | decode (Phụ lục G)
+  mode TEXT NOT NULL,               -- news | decode | daily_digest | trailer (Phụ lục G)
   lang TEXT DEFAULT 'vi',           -- vi | en (mảng quốc tế)
   title TEXT NOT NULL,
   status TEXT NOT NULL,

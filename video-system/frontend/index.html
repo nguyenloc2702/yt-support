@@ -7348,14 +7348,15 @@ let shortQuickPreviewId = '';
 const SHORT_MODE_META = {
   news: { label: 'Tin nóng', hint: '25–40s · 80–110 từ · hook giật gân → 3 beat → câu hỏi mở', target: 32 },
   decode: { label: 'Giải mã tiền bạc', hint: '40–60s · 110–160 từ · nghịch lý → cơ chế → chốt loop', target: 48 },
-  daily_digest: { label: 'Daily World Brief (EN)', hint: '140–170s · 250–430 từ · 12–15 tin quốc tế (<180s Shorts)', target: 155 }
+  daily_digest: { label: 'Daily World Brief (EN)', hint: '140–170s · 250–430 từ · 12–15 tin quốc tế (<180s Shorts)', target: 155 },
+  trailer: { label: 'Trailer video dài (EN)', hint: '30–45s · 70–105 từ EN · hook định vị → 2-3 beat tease (không spoil) → CTA về video dài', target: 38 }
 };
 const SHORT_STATUS_PILL = {
   draft: 'pill-ghost', scripted: 'pill-ready', queued: 'pill-warn',
   rendering: 'pill-warn', producing: 'pill-warn',
   ready: 'pill-assembled', failed: 'pill-failed', cancelled: 'pill-ghost'
 };
-const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc', daily_digest: 'Daily World Brief' };
+const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc', daily_digest: 'Daily World Brief', trailer: 'Trailer video dài' };
 
 function setActiveNav(page) {
   const t = document.getElementById('navTodoBtn');
@@ -7651,6 +7652,8 @@ function switchShortMode(mode) {
   });
   const target = document.getElementById('shortTargetSec');
   if (target) target.value = String(SHORT_MODE_META[mode].target);
+  // Trailer chỉ hỗ trợ EN (video dài là EN explainer) — tự chuyển mảng quốc tế
+  if (mode === 'trailer' && shortLang !== 'en') switchShortLang('en');
 }
 
 async function createShortForm(ev) {
@@ -7801,8 +7804,8 @@ function renderShortStudioShell() {
           <div class="short-form-grid">
             <textarea id="shortSourceText" rows="5" placeholder="Dán nội dung bài báo/tin vắn (mode Tin nóng) hoặc chủ đề giải mã (vd: 'Càng tiết kiệm càng nghèo')..." maxlength="14000"></textarea>
             <div class="short-form-row">
-              <label for="shortSourceLink">Link bài báo (tùy chọn — lấy ảnh gốc minh họa):</label>
-              <input type="text" id="shortSourceLink" placeholder="https://... (hoặc để trống nếu chỉ có tin vắn)" maxlength="1000" style="flex:1;min-width:220px"/>
+              <label for="shortSourceLink">Link bài báo / video dài (tùy chọn — ảnh gốc minh họa; trailer: URL video dài trên YouTube):</label>
+              <input type="text" id="shortSourceLink" placeholder="https://... (trailer: link video dài — dùng cho CTA/description)" maxlength="1000" style="flex:1;min-width:220px"/>
             </div>
             <div class="short-form-row">
               <label for="shortSourceNote">Nguồn tin (ghi trên video):</label>
