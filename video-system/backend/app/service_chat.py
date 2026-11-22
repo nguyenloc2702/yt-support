@@ -67,14 +67,20 @@ class ChatService:
         rows = self.store.query(
             "SELECT t.*, "
             "(SELECT body FROM chat_messages m WHERE m.thread_id=t.id ORDER BY m.seq DESC LIMIT 1) AS last_body, "
-            "(SELECT sender FROM chat_messages m WHERE m.thread_id=t.id ORDER BY m.seq DESC LIMIT 1) AS last_sender "
+            "(SELECT sender FROM chat_messages m WHERE m.thread_id=t.id ORDER BY m.seq DESC LIMIT 1) AS last_sender, "
+            "(SELECT COUNT(*) FROM chat_messages m WHERE m.thread_id=t.id) AS message_count "
             "FROM chat_threads t ORDER BY t.last_message_at DESC, t.created_at DESC LIMIT ?",
             (max(1, min(200, limit)),),
         )
         return [dict(r) for r in rows]
 
     def get_thread(self, thread_id: str) -> dict:
-        row = self.store.query_one("SELECT * FROM chat_threads WHERE id=?", (thread_id,))
+        row = self.store.query_one(
+            "SELECT t.*, "
+            "(SELECT COUNT(*) FROM chat_messages m WHERE m.thread_id=t.id) AS message_count "
+            "FROM chat_threads t WHERE t.id=?",
+            (thread_id,),
+        )
         if not row:
             raise ChatError(f"Thread không tồn tại: {thread_id}", status_code=404, code="not_found")
         return dict(row)

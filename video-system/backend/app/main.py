@@ -1828,11 +1828,11 @@ def chat_post_message(thread_id: str, body: dict, request: Request = None):
 @app.get("/api/v1/chat/threads/{thread_id}/messages")
 def chat_get_messages(thread_id: str, request: Request = None, since_id: int = 0,
                       limit: int = 100):
-    """Đọc tin mới theo cursor `since_id` — chỉ participants + owner."""
-    auth.require(request, "read")
-    sender, is_owner = _chat_identity(request)
+    """Đọc tin mới theo cursor `since_id` — participants + owner + admin (moderator read)."""
+    identity, scope = auth.identity_for(request)
+    is_owner = identity == "owner" or scope == "admin"
     try:
-        return chat.get_messages(thread_id, sender, since_id=since_id, limit=limit,
+        return chat.get_messages(thread_id, identity, since_id=since_id, limit=limit,
                                  is_owner=is_owner)
     except ChatError as e:
         raise HTTPException(e.status_code, e.message)

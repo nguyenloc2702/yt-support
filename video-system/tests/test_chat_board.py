@@ -101,13 +101,15 @@ def test_thread_auto_locks_at_30(client, three_agents, store_fixture):
 
 
 def test_owner_key_and_pin_session_are_owner_other_admin_key_is_not(client, three_agents, store_fixture):
-    """Mô hình owner: CHỈ key tên 'owner' + session PIN là owner. Key admin khác = participant thường."""
+    """Mô hình owner: CHỈ key tên 'owner' + session PIN là owner. Key admin khác = participant thường,
+    NHƯNG scope admin vẫn ĐỌC được mọi thread (moderator read) — post vào thread người khác thì 403."""
     t = _mk_thread(client, three_agents["a"])
     assert _post(client, three_agents["b"], t["id"], "giữa 2 agent").status_code == 200
 
-    # Key admin khác (test-admin) KHÔNG phải owner — là người lạ với thread này
-    r_foreign = client.get(f"/api/v1/chat/threads/{t['id']}/messages", headers=three_agents["admin_other"])
-    assert r_foreign.status_code == 403
+    # Key admin khác (test-admin): moderator read → 200; post vào thread người khác → 403
+    r_foreign_read = client.get(f"/api/v1/chat/threads/{t['id']}/messages", headers=three_agents["admin_other"])
+    assert r_foreign_read.status_code == 200
+    assert any(m["body"] == "giữa 2 agent" for m in r_foreign_read.json()["messages"])
     assert _post(client, three_agents["admin_other"], t["id"], "tôi admin mà").status_code == 403
 
     # Key 'owner' riêng của owner: đọc + post mọi thread, sender = 'owner'
@@ -116,6 +118,10 @@ def test_owner_key_and_pin_session_are_owner_other_admin_key_is_not(client, thre
     r_post = _post(client, three_agents["owner"], t["id"], "owner vào việc: ưu tiên shot 12")
     assert r_post.status_code == 200
     assert r_post.json()["sender"] == "owner"
+
+    # message_count có trong metadata (seq global không phải số tin trong thread)
+    th = client.get(f"/api/v1/chat/threads/{t['id']}", headers=three_agents["a"]).json()
+    assert th["message_count"] == 2  # b post 1 + owner post 1 (a chỉ tạo thread)
 
 
 def test_pin_session_is_owner(client, store_fixture, monkeypatch):
@@ -169,3 +175,8 @@ def test_spa_has_chat_nav(client):
     assert shell.status_code == 200
     assert "navChatBtn" in shell.text
     assert "pageChat" in shell.text
+    # Regression: chat JS từng gọi escapeHtml() không tồn tại (helper thật là esc())
+    # → lỗi runtime "escapeHtml is not defined" khi mở tab chat. Không được tái phạm.
+    assert "escapeHtml" not in shell.text
+    assert "function goChatPage(" in shell.text
+    assert "function esc(" in shell.text
