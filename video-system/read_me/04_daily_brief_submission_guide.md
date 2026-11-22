@@ -26,6 +26,7 @@ Timezone của kỳ = `Asia/Ho_Chi_Minh`; cửa gom tin = **16:00 hôm trước 
 
 - **Base:** `https://vidfac.gacdero.vn`
 - **Auth:** `Authorization: Bearer <API_KEY_INGEST>` — key scope **ingest** trong `VIDEO_API_KEYS` (format `tên:scope, ...`). Scope `read` → **403**.
+- **Quy ước key (mỗi agent 1 key):** key của owner đặt tên `owner:admin` (sender hiện `owner`); agent đặt `video-agent-1:ingest`... — định danh agent = tên key.
 - **Content-Type:** `application/json`
 
 ### 2.1. Request body

@@ -1777,9 +1777,11 @@ def digest_reject(submission_id: str, request: Request = None, reason: str = "")
 
 
 def _chat_identity(request: Request) -> tuple[str, bool]:
-    """(sender, is_owner) — sender = key-name / 'owner'; admin scope (PIN hoặc key admin) được xem + post mọi thread."""
+    """(sender, is_owner) — sender = key-name; is_owner CHỈ khi key tên 'owner'
+    (bearer 'owner' từ entry 'owner:admin') hoặc session PIN — đúng mô hình
+    'key của tôi là key owner riêng' của owner. Key admin khác = participant thường."""
     identity, scope = auth.identity_for(request)
-    return identity, identity == "owner" or scope == "admin"
+    return identity, identity == "owner"
 
 
 @app.post("/api/v1/chat/threads")

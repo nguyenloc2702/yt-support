@@ -8,18 +8,19 @@ import pytest
 
 @pytest.fixture()
 def three_agents(client, monkeypatch):
-    """Thêm 2 key agent vào env (middleware bearer_ok đọc api_keys()) + auth singleton."""
+    """Thêm keys: 2 agent + key 'owner' riêng của owner (mô hình 'mỗi agent 1 key')."""
     from backend.app.main import auth
     monkeypatch.setenv("VIDEO_API_KEYS",
                        "test-admin:admin,test-ingest:ingest,test-read:read,"
-                       "agent-b:ingest,agent-c:ingest")
+                       "agent-b:ingest,agent-c:ingest,owner:admin")
     keys = dict(auth.keys or {})
-    keys.update({"agent-b": "ingest", "agent-c": "ingest"})
+    keys.update({"agent-b": "ingest", "agent-c": "ingest", "owner": "admin"})
     monkeypatch.setattr(auth, "keys", keys)
     return {"a": {"Authorization": "Bearer test-ingest"},   # agent-a (key name = test-ingest)
             "b": {"Authorization": "Bearer agent-b"},
             "c": {"Authorization": "Bearer agent-c"},
-            "admin": {"Authorization": "Bearer test-admin"}}
+            "admin_other": {"Authorization": "Bearer test-admin"},  # key admin KHÔNG tên owner
+            "owner": {"Authorization": "Bearer owner"}}             # key owner riêng của owner
 
 
 def _mk_thread(client, hdr, title="Hỏi cách vẽ keyframe chuẩn v3"):
@@ -99,15 +100,44 @@ def test_thread_auto_locks_at_30(client, three_agents, store_fixture):
     assert th["status"] == "locked"
 
 
-def test_admin_scope_reads_and_posts_any_thread(client, three_agents):
+def test_owner_key_and_pin_session_are_owner_other_admin_key_is_not(client, three_agents, store_fixture):
+    """Mô hình owner: CHỈ key tên 'owner' + session PIN là owner. Key admin khác = participant thường."""
     t = _mk_thread(client, three_agents["a"])
     assert _post(client, three_agents["b"], t["id"], "giữa 2 agent").status_code == 200
-    # admin bearer = owner-like: đọc + post được thread không phải participant
-    r_read = client.get(f"/api/v1/chat/threads/{t['id']}/messages", headers=three_agents["admin"])
+
+    # Key admin khác (test-admin) KHÔNG phải owner — là người lạ với thread này
+    r_foreign = client.get(f"/api/v1/chat/threads/{t['id']}/messages", headers=three_agents["admin_other"])
+    assert r_foreign.status_code == 403
+    assert _post(client, three_agents["admin_other"], t["id"], "tôi admin mà").status_code == 403
+
+    # Key 'owner' riêng của owner: đọc + post mọi thread, sender = 'owner'
+    r_read = client.get(f"/api/v1/chat/threads/{t['id']}/messages", headers=three_agents["owner"])
     assert r_read.status_code == 200
-    r_post = _post(client, three_agents["admin"], t["id"], "owner vào việc: ưu tiên shot 12")
+    r_post = _post(client, three_agents["owner"], t["id"], "owner vào việc: ưu tiên shot 12")
     assert r_post.status_code == 200
-    assert r_post.json()["sender"] == "test-admin"
+    assert r_post.json()["sender"] == "owner"
+
+
+def test_pin_session_is_owner(client, store_fixture, monkeypatch):
+    """Đăng nhập PIN (session cookie) → identity 'owner' — đọc + post mọi thread."""
+    from backend.app.auth import SESSION_COOKIE, webauth
+    monkeypatch.setenv("VIDEO_API_KEYS", "test-admin:admin,test-ingest:ingest,test-read:read")
+    store_fixture.execute("DELETE FROM chat_messages")
+    # tạo thread bởi agent thường
+    hdr_a = {"Authorization": "Bearer test-ingest"}
+    t = _mk_thread(client, hdr_a, "thread cho PIN session test")
+    assert _post(client, hdr_a, t["id"], "tin agent").status_code == 200
+
+    # client với session cookie PIN hợp lệ (không bearer)
+    client.cookies.set(SESSION_COOKIE, webauth.make_token())
+    try:
+        r_read = client.get(f"/api/v1/chat/threads/{t['id']}/messages")
+        assert r_read.status_code == 200
+        r_post = client.post(f"/api/v1/chat/threads/{t['id']}/messages", json={"body": "owner qua PIN"})
+        assert r_post.status_code == 200
+        assert r_post.json()["sender"] == "owner"
+    finally:
+        client.cookies.delete(SESSION_COOKIE)
 
 
 def test_cursor_no_rewind_after_retention_cleanup(store_fixture):

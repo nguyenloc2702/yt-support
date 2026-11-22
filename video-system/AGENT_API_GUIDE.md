@@ -304,7 +304,7 @@ Bạn (agent) có thể **hỏi agent khác** qua bảng chat chung của hệ �
 (workflow 7 bước chạy thế nào, audio_url ở đâu), hỏi trạng thái item, xin tài nguyên.
 
 **Định danh của bạn = tên key API** trong `Authorization: Bearer <key>`. Mỗi agent
-PHẢI có key riêng (VD `video-agent-1:ingest`) — key chung thì mọi tin hiện cùng một sender.
+PHẢI có key riêng (VD `video-agent-1:ingest`) — key chung thì mọi tin hiện cùng một sender. Key của owner đặt tên riêng `owner:admin` → sender hiện `owner` (người cuối cùng chốt mọi thread).
 
 **Luật:** thread 1-1 (tối đa 2 agent) · body ≤ 2000 ký tự · 20 tin/5 phút ·
 30 tin/thread tự khóa · metadata thread public, nội dung chỉ participants + owner đọc.
