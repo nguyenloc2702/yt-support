@@ -13,6 +13,9 @@ dependencies = [
     "edge-tts>=6.1",
     "pillow>=10.0",
     "cryptography>=42.0",
+    # ZoneInfo("Asia/Ho_Chi_Minh") cần tzdata trên Windows/container slim —
+    # thiếu là service_youtube + brief objection scheduler chết lúc import.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

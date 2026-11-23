@@ -19,6 +19,7 @@ os.environ["VIDEO_API_KEYS"] = "test-admin:admin,test-ingest:ingest,test-read:re
 os.environ["VIDEO_ALLOWED_HOSTS"] = "localhost,127.0.0.1,storage.test"
 os.environ["VIDEO_WEBHOOK_SECRET"] = "whsec-test"
 os.environ.setdefault("VIDEO_OFFLINE_SEARCH", "1")
+os.environ.setdefault("VIDEO_BRIEF_SCHEDULER", "0")
 # Stock connector phải OFF trong test: .env thật có key Pixabay → pop TRƯỚC
 # import (phòng config đọc sớm) và SAU import (config._load_dotenv_env set lại
 # lúc import) để produce test không bắn call mạng thật.

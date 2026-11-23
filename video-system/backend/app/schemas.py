@@ -1,6 +1,8 @@
 """Pydantic schemas for API boundary (Appendix D/E shapes live here too)."""
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -369,3 +371,64 @@ class DigestSubmitBody(BaseModel):
     stories: list[DigestStorySubmit] = Field(min_length=1, max_length=20)
     date: str | None = Field(default=None, max_length=10, description="YYYY-MM-DD, mặc định hôm nay")
     force: bool = Field(default=False, description="Nộp đè kỳ đang failed/rejected")
+
+
+# --- Authoring flow: brief -> script duel (2026-11-23) ------------------------
+
+class BriefCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    angle: str | None = Field(default=None, max_length=500)
+    target_duration_sec: float = Field(default=780, ge=60, le=3600)
+    language: str = Field(default="en", max_length=10)
+    style_lock_version: str = Field(default="v3", max_length=20)
+    source_links: list[str] = Field(default_factory=list, max_length=20)
+    deadline_at: float | None = Field(default=None, description="Unix ts; mặc định +8h")
+    budget: dict = Field(default_factory=dict)
+    approval_mode: Literal["calendar", "objection", "hard"] = "objection"
+    sensitive: bool = Field(default=False, description="True ⇒ luôn ép hard gate")
+    # Sàn 30 phút: cửa sổ ngắn hơn thì agent tự tạo brief rồi tự duyệt trong vài phút,
+    # biến `objection` thành cửa sau để lách quyền duyệt của owner.
+    objection_window_sec: int = Field(default=1800, ge=1800, le=86400)
+    critic: str | None = Field(default=None, max_length=64,
+                               description="Agent được chỉ định review (owner set)")
+
+
+class ShotProposal(BaseModel):
+    index: int | None = Field(default=None, ge=1)
+    narration: str = Field(min_length=1, max_length=2000)
+    visual_prompt: str | None = Field(default=None, max_length=2000)
+    shot_type: str = Field(default="scene", max_length=40)
+    beat_type: str | None = Field(default=None, max_length=40)
+    on_screen_text: str | None = Field(default=None, max_length=300)
+    on_screen_type: str | None = Field(default=None, max_length=40)
+    source_url: str | None = Field(default=None, max_length=1000)
+
+
+class ScriptProposalCreate(BaseModel):
+    brief_id: str = Field(min_length=3, max_length=64)
+    parent_id: str | None = Field(default=None, max_length=64)
+    script_text: str | None = Field(default=None, max_length=50000)
+    shots: list[ShotProposal] = Field(min_length=1, max_length=200)
+
+
+class ScriptFindingCreate(BaseModel):
+    category: Literal["fact", "structure", "style", "duration"]
+    severity: Literal["low", "medium", "high"]
+    evidence: str | None = Field(default=None, max_length=2000)
+    blocking: bool = Field(default=False)
+
+
+class ScriptSignatureCreate(BaseModel):
+    verdict: Literal["pass", "block"]
+    note: str | None = Field(default=None, max_length=500)
+
+
+class BriefCriticSet(BaseModel):
+    critic: str = Field(min_length=1, max_length=64,
+                        description="Tên agent (key-name) được chỉ định review")
+
+
+class BriefDecisionCreate(BaseModel):
+    decision: Literal["force_agree", "reject"]
+    proposal_id: str = Field(min_length=3, max_length=64)
+    reason: str = Field(min_length=3, max_length=1000)

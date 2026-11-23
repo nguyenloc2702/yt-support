@@ -6,9 +6,12 @@ Every mutation writes events; matching webhooks are dispatched.
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import logging
 import os
+import sqlite3
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -61,9 +64,12 @@ from .service_affiliate import (
     start_affiliate_sync_scheduler,
 )
 from .schemas import (AffiliateProductCreate, AffiliateProductPatch, BioPageUpdate,
-                      DigestSubmitBody,
-                      InstagramPublishRequest)
+                      BriefCreate, BriefCriticSet, BriefDecisionCreate, DigestSubmitBody,
+                      InstagramPublishRequest, ScriptFindingCreate,
+                      ScriptProposalCreate, ScriptSignatureCreate)
 from .service_chat import ChatService, ChatError
+from .service_briefs import BriefError, BriefService
+from .service_script_duel import ScriptDuelError, ScriptDuelService
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
 
@@ -75,6 +81,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 store = SQLiteStore(db_path())
 items = ItemService(store)
 chat = ChatService(store)
+briefs = BriefService(store)
+duel = ScriptDuelService(store, briefs)
 shots = ShotService(store, items)
 batches = BatchService(store, items, shots)
 importer = ImportGate(store, items)
@@ -116,6 +124,8 @@ def _start_news_scheduler() -> None:
     start_telegram_bot(store, shorts, youtube_svc=youtube)
     # Bảng chat agent: dọn tin cũ theo retention (mặc định 30 ngày)
     chat.start_retention_worker()
+    # Brief: tự duyệt objection-window trong giờ làm việc (scheduler, không read-path)
+    briefs.start_objection_scheduler()
 
 # -- Web PIN gate (chặn mọi request không có session/bearer hợp lệ) -----------
 # Mở: health, 3 endpoint auth/*, OPTIONS (preflight), "/favicon.ico", và "/" (shell HTML chứa
@@ -191,6 +201,114 @@ def _idempotent(request: Request, payload: dict, status_code: int = 200):
             (key, request.method, request.url.path, status_code,
              json.dumps(payload, ensure_ascii=False), now()))
     return resp
+
+
+IDEMPOTENCY_STALE_SEC = 300
+
+
+def _idempotency_scope(request: Request) -> str | None:
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        return None
+    try:
+        identity, _ = auth.identity_for(request)
+    except HTTPException:
+        identity = "anon"
+    return f"{identity}:{key}"
+
+
+def _payload_hash(payload: dict | None) -> str | None:
+    if payload is None:
+        return None
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _check_replay_match(row: dict, request: Request, req_hash: str | None) -> None:
+    """Cùng key mà khác method/path/body -> 422, không im lặng trả response cũ."""
+    stored = row.get("request_hash")
+    if not stored or not req_hash:
+        return  # bản ghi cũ trước migration: không so được, chấp nhận replay
+    if row["method"] != request.method or row["path"] != request.url.path \
+            or stored != req_hash:
+        raise ApiError(
+            422, "Idempotency-Key đã dùng cho request khác (method/path/body không khớp).",
+            "idempotency_key_reused")
+
+
+def _idempotent_call(request: Request, payload: dict, fn, status_code: int = 201):
+    """Chiếm Idempotency-Key TRƯỚC khi chạy nghiệp vụ, chốt kết quả sau.
+
+    Vì sao không phải "chạy xong rồi INSERT": hai request song song cùng key đều
+    không thấy row, cùng chạy nghiệp vụ, cùng INSERT OR IGNORE -> sinh 2 brief.
+
+    Quyền sở hữu key là `claim_token`, không phải `status_code`:
+    - INSERT OR IGNORE mang theo token của mình -> ai insert được thì chạy.
+    - Row `status_code=0` quá `IDEMPOTENCY_STALE_SEC` (process bị kill) được reclaim
+      bằng UPDATE có `WHERE claim_token = <token cũ>` — đây là CAS thật: 2 reclaimer
+      đọc cùng token cũ, chỉ 1 UPDATE khớp, người kia nhận 409.
+    - Finalize/delete đều kèm `WHERE claim_token = <token của mình>`, nên owner cũ
+      không thể ghi đè kết quả của người đã reclaim.
+    """
+    scoped = _idempotency_scope(request)
+    if not scoped:
+        return JSONResponse(fn(), status_code=status_code)
+
+    req_hash = _payload_hash(payload)
+    token = uuid.uuid4().hex
+    ts = now()
+    owned = store.execute(
+        "INSERT OR IGNORE INTO idempotency (key,method,path,status_code,response_json,"
+        "created_at,request_hash,claim_token) VALUES (?,?,?,0,'{}',?,?,?)",
+        (scoped, request.method, request.url.path, ts, req_hash, token)) == 1
+
+    if not owned:
+        row = store.query_one("SELECT * FROM idempotency WHERE key=?", (scoped,))
+        if row and int(row["status_code"] or 0) == 0:
+            stale = (ts - float(row["created_at"] or 0)) > IDEMPOTENCY_STALE_SEC
+            won = stale and store.cas_update(
+                "UPDATE idempotency SET claim_token=?, created_at=?, request_hash=? "
+                "WHERE key=? AND status_code=0 AND COALESCE(claim_token,'')=?",
+                (token, ts, req_hash, scoped, row.get("claim_token") or ""))
+            if not won:
+                raise ApiError(
+                    409, "Request cùng Idempotency-Key đang được xử lý — thử lại sau.",
+                    "idempotency_in_progress")
+            # reclaim thắng -> tiếp tục như owner
+        elif row:
+            _check_replay_match(row, request, req_hash)
+            resp = JSONResponse(json.loads(row["response_json"]),
+                                status_code=row["status_code"])
+            resp.headers["Idempotency-Replayed"] = "true"
+            return resp
+        else:
+            raise ApiError(409, "Không chiếm được Idempotency-Key — thử lại.",
+                           "idempotency_in_progress")
+
+    try:
+        result = fn()
+    except BaseException:
+        # Không cache lỗi: nhả key để agent retry được (kể cả KeyboardInterrupt).
+        _release_idempotency(scoped, token)
+        raise
+    try:
+        store.execute(
+            "UPDATE idempotency SET status_code=?, response_json=?, claim_token=NULL "
+            "WHERE key=? AND claim_token=?",
+            (status_code, json.dumps(result, ensure_ascii=False, default=str), scoped, token))
+    except sqlite3.OperationalError:
+        _release_idempotency(scoped, token)
+        raise
+    return JSONResponse(result, status_code=status_code)
+
+
+def _release_idempotency(scoped: str, token: str) -> None:
+    """Nhả key — chỉ xoá row của chính mình, không xoá claim của người khác."""
+    try:
+        store.execute("DELETE FROM idempotency WHERE key=? AND claim_token=?",
+                      (scoped, token))
+    except Exception:  # noqa: BLE001 — DB chết thì để stale reclaim dọn
+        logger.warning("không nhả được idempotency key %s", scoped)
 
 
 @app.get("/api/v1/health")
@@ -1845,6 +1963,219 @@ def chat_close_thread(thread_id: str, request: Request = None):
         return chat.close_thread(thread_id)
     except ChatError as e:
         raise HTTPException(e.status_code, e.message)
+
+
+# -- Authoring flow: brief -> script duel (2026-11-23) -------------------------
+
+class ApiError(HTTPException):
+    """HTTPException có `code` máy đọc được.
+
+    Agent cần phân biệt 409 `duplicate_content` (đừng thử lại) với 409
+    `version_conflict` (thử lại với parent mới). Body vẫn giữ `detail` là string
+    để client cũ không vỡ; `code` là field thêm.
+    """
+
+    def __init__(self, status_code: int, message: str, code: str) -> None:
+        super().__init__(status_code, message)
+        self.code = code
+
+
+@app.exception_handler(ApiError)
+async def _api_error_handler(request: Request, exc: ApiError):
+    return JSONResponse({"detail": exc.detail, "code": exc.code},
+                        status_code=exc.status_code)
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def _sqlite_error_handler(request: Request, exc: sqlite3.OperationalError):
+    """Lock timeout không được thành 500 — agent cần biết là 'thử lại sau'."""
+    msg = str(exc).lower()
+    busy = "locked" in msg or "busy" in msg
+    return JSONResponse(
+        {"detail": "Database đang bận — thử lại sau vài giây." if busy
+                   else "Lỗi truy cập database.",
+         "code": "database_busy" if busy else "database_error"},
+        status_code=503 if busy else 500)
+
+
+def _fail(exc: Exception) -> None:
+    """Bọc BriefError/ScriptDuelError thành response có `code`."""
+    raise ApiError(getattr(exc, "status_code", 400), str(getattr(exc, "message", exc)),
+                   getattr(exc, "code", "error"))
+
+
+def _require_owner(request: Request) -> str:
+    auth.require(request, "admin")
+    identity, _ = auth.identity_for(request)
+    if identity != "owner":
+        raise ApiError(403, "Chỉ owner được duyệt/huỷ brief.", "owner_only")
+    return identity
+
+
+@app.post("/api/v1/briefs")
+def create_brief(body: BriefCreate, request: Request = None):
+    """Tạo brief (Phase 0). Brief phải approved trước khi nộp script proposal."""
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    if body.approval_mode == "calendar" and not body.sensitive and identity != "owner":
+        raise ApiError(403, "Chỉ owner được tạo brief calendar (tự duyệt).",
+                       "calendar_owner_only")
+    payload = body.model_dump()
+
+    def run() -> dict:
+        try:
+            return briefs.create(
+                title=body.title, created_by=identity, angle=body.angle,
+                target_duration_sec=body.target_duration_sec, language=body.language,
+                style_lock_version=body.style_lock_version,
+                source_links=body.source_links, deadline_at=body.deadline_at,
+                budget=body.budget, approval_mode=body.approval_mode,
+                sensitive=body.sensitive, objection_window_sec=body.objection_window_sec,
+                critic=body.critic)
+        except BriefError as e:
+            _fail(e)
+
+    return _idempotent_call(request, payload, run, 201)
+
+
+@app.get("/api/v1/briefs")
+def list_briefs(status: str | None = None, limit: int = 50, request: Request = None):
+    auth.require(request, "read")
+    return {"briefs": briefs.list(status=status, limit=limit)}
+
+
+@app.get("/api/v1/briefs/{brief_id}")
+def get_brief(brief_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return briefs.get(brief_id)
+    except BriefError as e:
+        _fail(e)
+
+
+@app.post("/api/v1/briefs/{brief_id}/approve")
+def approve_brief(brief_id: str, request: Request = None):
+    actor = _require_owner(request)
+    try:
+        return briefs.approve(brief_id, approved_by=actor)
+    except BriefError as e:
+        _fail(e)
+
+
+@app.post("/api/v1/briefs/{brief_id}/cancel")
+def cancel_brief(brief_id: str, request: Request = None):
+    actor = _require_owner(request)
+    try:
+        return briefs.cancel(brief_id, actor=actor)
+    except BriefError as e:
+        _fail(e)
+
+
+@app.post("/api/v1/briefs/{brief_id}/critic")
+def set_brief_critic(brief_id: str, body: BriefCriticSet, request: Request = None):
+    """Owner chỉ định critic trước chữ ký đầu tiên (chưa có registry)."""
+    actor = _require_owner(request)
+    try:
+        return briefs.set_critic(brief_id, critic=body.critic, actor=actor)
+    except BriefError as e:
+        _fail(e)
+
+
+@app.post("/api/v1/briefs/{brief_id}/decisions")
+def decide_brief_script(brief_id: str, body: BriefDecisionCreate,
+                        request: Request = None):
+    """Owner phá bế tắc: force_agree đúng hash hiện tại, hoặc reject kèm lý do."""
+    actor = _require_owner(request)
+    try:
+        return duel.decide(brief_id, decided_by=actor, decision=body.decision,
+                           proposal_id=body.proposal_id, reason=body.reason)
+    except (ScriptDuelError, BriefError) as e:
+        _fail(e)
+
+
+@app.post("/api/v1/script-proposals")
+def create_script_proposal(body: ScriptProposalCreate, request: Request = None):
+    """Author nộp một version kịch bản; validator máy chạy ngay trong request."""
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    payload = body.model_dump()
+
+    def run() -> dict:
+        try:
+            return duel.create_proposal(
+                brief_id=body.brief_id, author=identity,
+                shots=[s.model_dump() for s in body.shots],
+                script_text=body.script_text, parent_id=body.parent_id)
+        except (ScriptDuelError, BriefError) as e:
+            _fail(e)
+
+    return _idempotent_call(request, payload, run, 201)
+
+
+@app.get("/api/v1/briefs/{brief_id}/proposals")
+def list_script_proposals(brief_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return {"proposals": duel.list_proposals(brief_id)}
+    except BriefError as e:
+        _fail(e)
+
+
+@app.get("/api/v1/script-proposals/{proposal_id}")
+def get_script_proposal(proposal_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        p = duel.get_proposal(proposal_id)
+        p["findings"] = duel.list_findings(proposal_id)
+        return p
+    except ScriptDuelError as e:
+        _fail(e)
+
+
+@app.post("/api/v1/script-proposals/{proposal_id}/findings")
+def add_script_finding(proposal_id: str, body: ScriptFindingCreate, request: Request = None):
+    """Critic ghi finding có cấu trúc; blocking=1 chặn ký pass cho tới khi có version mới."""
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    try:
+        return duel.add_finding(
+            proposal_id, reviewer=identity, category=body.category,
+            severity=body.severity, evidence=body.evidence, blocking=body.blocking,
+            is_owner=identity == "owner")
+    except ScriptDuelError as e:
+        _fail(e)
+
+
+@app.get("/api/v1/script-proposals/{proposal_id}/findings")
+def list_script_findings(proposal_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return {"findings": duel.list_findings(proposal_id)}
+    except ScriptDuelError as e:
+        _fail(e)
+
+
+@app.post("/api/v1/script-proposals/{proposal_id}/sign")
+def sign_script_proposal(proposal_id: str, body: ScriptSignatureCreate,
+                         request: Request = None):
+    """Author + critic ký cùng content_hash; đủ 2 chữ ký (có author) ⇒ agreed."""
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    try:
+        return duel.sign(proposal_id, signer=identity, verdict=body.verdict,
+                         note=body.note, is_owner=identity == "owner")
+    except ScriptDuelError as e:
+        _fail(e)
+
+
+@app.get("/api/v1/briefs/{brief_id}/agreement")
+def get_script_agreement(brief_id: str, request: Request = None):
+    """Trạng thái chốt kịch bản + next_action cho agent (build_job khi agreed)."""
+    auth.require(request, "read")
+    try:
+        return duel.agreement(brief_id)
+    except BriefError as e:
+        _fail(e)
 
 
 # -- YouTube Channel OAuth & Publishing ----------------------------------------

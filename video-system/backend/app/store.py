@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 );
 CREATE TABLE IF NOT EXISTS idempotency (
   key TEXT PRIMARY KEY, method TEXT, path TEXT, status_code INTEGER,
-  response_json TEXT, created_at REAL
+  response_json TEXT, created_at REAL, request_hash TEXT, claim_token TEXT
 );
 CREATE TABLE IF NOT EXISTS todo_feedbacks (
   id TEXT PRIMARY KEY,
@@ -405,6 +405,81 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_msg_thread ON chat_messages(thread_id, seq);
 CREATE INDEX IF NOT EXISTS idx_chat_msg_sender ON chat_messages(sender, created_at);
+
+-- Authoring flow (2026-11-23): brief -> script duel -> agreement -------------
+CREATE TABLE IF NOT EXISTS job_briefs (
+  id TEXT PRIMARY KEY,                  -- new_id("brf")
+  title TEXT NOT NULL,
+  angle TEXT,
+  target_duration_sec REAL DEFAULT 780,
+  language TEXT DEFAULT 'en',
+  style_lock_version TEXT DEFAULT 'v3',
+  source_links_json TEXT,
+  deadline_at REAL,
+  budget_json TEXT,
+  status TEXT NOT NULL DEFAULT 'draft', -- draft | approved | in_progress | done | cancelled
+  approval_mode TEXT NOT NULL DEFAULT 'objection', -- calendar | objection | hard
+  sensitive INTEGER DEFAULT 0,
+  objection_window_sec INTEGER DEFAULT 1800,
+  critic TEXT,                          -- agent được chỉ định review (owner set)
+  approved_by TEXT,
+  approved_at REAL,
+  created_by TEXT NOT NULL,
+  created_at REAL,
+  updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_status ON job_briefs(status, created_at);
+
+CREATE TABLE IF NOT EXISTS script_proposals (
+  id TEXT PRIMARY KEY,                  -- new_id("prp")
+  brief_id TEXT NOT NULL,
+  parent_id TEXT,
+  version INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  content_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft', -- draft | invalid | under_review | agreed | rejected | superseded | stale
+  validator_json TEXT,
+  created_at REAL,
+  updated_at REAL,
+  UNIQUE(brief_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_brief ON script_proposals(brief_id, version);
+CREATE INDEX IF NOT EXISTS idx_proposals_hash ON script_proposals(content_hash);
+
+CREATE TABLE IF NOT EXISTS script_findings (
+  id TEXT PRIMARY KEY,                  -- new_id("fnd")
+  proposal_id TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  category TEXT NOT NULL,               -- fact | structure | style | duration
+  severity TEXT NOT NULL,               -- low | medium | high
+  evidence_json TEXT,
+  blocking INTEGER DEFAULT 0,
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_findings_proposal ON script_findings(proposal_id, blocking);
+
+CREATE TABLE IF NOT EXISTS script_signatures (
+  proposal_id TEXT NOT NULL,
+  signer TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  verdict TEXT NOT NULL,                -- pass | block
+  note TEXT,
+  signed_at REAL,
+  PRIMARY KEY (proposal_id, signer)
+);
+
+CREATE TABLE IF NOT EXISTS script_decisions (
+  id TEXT PRIMARY KEY,                  -- new_id("dec")
+  brief_id TEXT NOT NULL,
+  proposal_id TEXT,
+  decided_by TEXT NOT NULL,
+  decision TEXT NOT NULL,               -- force_agree | reject | owner_override
+  reason TEXT,
+  content_hash TEXT,
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_brief ON script_decisions(brief_id, created_at);
 """
 
 _ITEM_MIGRATION_COLS = [
@@ -451,6 +526,13 @@ _SHORT_SCENES_MIGRATION_COLS = [
 
 _NEWS_MIGRATION_COLS = [
     ("lang", "TEXT DEFAULT 'vi'"),  # mảng quốc tế EN
+]
+
+_IDEMPOTENCY_MIGRATION_COLS = [
+    ("request_hash", "TEXT"),  # scoped idempotency: chống reuse key khác body/path
+    # claim_token: chủ sở hữu key đang xử lý. Cho phép CAS thật khi reclaim row
+    # `status_code=0` bị bỏ rơi, và chặn owner cũ ghi đè kết quả của người reclaim.
+    ("claim_token", "TEXT"),
 ]
 
 
@@ -507,6 +589,12 @@ class SQLiteStore(Store):
         for col, col_def in _NEWS_MIGRATION_COLS:
             if existing_news_cols and col not in existing_news_cols:
                 conn.execute(f"ALTER TABLE news_items ADD COLUMN {col} {col_def}")
+        existing_idem_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(idempotency)").fetchall()
+        }
+        for col, col_def in _IDEMPOTENCY_MIGRATION_COLS:
+            if existing_idem_cols and col not in existing_idem_cols:
+                conn.execute(f"ALTER TABLE idempotency ADD COLUMN {col} {col_def}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=30000")
