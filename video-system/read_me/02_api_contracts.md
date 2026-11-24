@@ -108,7 +108,14 @@
 | `422` | `bad_path` | Đường dẫn thoát root / chứa `..` / absolute / symlink |
 | `422` | `secret_detected` | Nội dung chứa token thật — thay bằng placeholder |
 | `428` | `missing_if_match` | Thiếu `If-Match` cho PUT/`overwrite`/`replace_text` |
+| `404` | `doc_not_found` / `source_not_found` / `version_not_found` / `trash_missing` | ID/source/version/trash không tồn tại |
+| `413` | `doc_too_large` | Vượt 5MB |
+| `422` | `bad_mode` / `bad_status` / `target_text_required` / `validation_error` | Sai field body |
 
-**ETag** dạng `"<sha256[:16]>-v<n>"`. Gửi lại nguyên chuỗi trong header `If-Match`.
-`If-Match: *` được chấp nhận khi chắc chắn mình là writer duy nhất.
+Bảng này không đầy đủ mọi `code` (Pydantic còn có thêm vài mã), nhưng đây là những mã
+agent sẽ gặp thường xuyên nhất.
+
+**ETag** dạng `"<sha256[:16]>-v<n>"`. Gửi lại **nguyên chuỗi** trong header `If-Match`.
+Chỉ chấp nhận ETag đúng định dạng hoặc `If-Match: *` (khi chắc chắn mình là writer duy nhất) —
+**prefix cắt ngắn, `""` hay `-v0` bị từ chối 412**, nếu không stale writer có thể đè bản mới.
 

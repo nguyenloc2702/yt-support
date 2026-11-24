@@ -131,7 +131,7 @@ def test_version_history_is_capped(knowledge, doc_id):
                                      "test-ingest")["version"] > 0
 
 
-def test_etag_accepts_wildcard_and_prefix(knowledge, doc_id):
+def test_etag_accepts_exact_etag_and_wildcard_only(knowledge, doc_id):
     doc = knowledge.get_doc(doc_id)
     etag = doc["etag"]
     sha_prefix = doc["content_hash"][:16]
@@ -140,15 +140,27 @@ def test_etag_accepts_wildcard_and_prefix(knowledge, doc_id):
     # `*` = "không quan tâm bản nào" (dùng khi agent biết mình là writer duy nhất).
     assert knowledge.update_doc(doc_id, "# Log\nstar\n", "test-ingest", "*")["version"] == 2
 
-    # Chỉ prefix hash cũng đủ (client hay cắt chuỗi) — vẫn phải khớp version hiện tại.
+    # Phải gửi đúng ETag API đã phát (sha16-vN), kể cả quotes.
     current = knowledge.get_doc(doc_id)
-    prefix = current["content_hash"][:8]
-    assert knowledge.update_doc(doc_id, "# Log\nprefix\n", "test-ingest", prefix)["version"] == 3
+    bare = current["etag"].strip('"')
+    assert knowledge.update_doc(doc_id, "# Log\nexact\n", "test-ingest", bare)["version"] == 3
 
-    # Prefix lạc → 412.
+    # Mọi biến thể thiếu/thừa đều bị từ chối — nếu không, stale writer đè bản mới.
+    current = knowledge.get_doc(doc_id)
+    malformed = [
+        '""', "-v0", '"-v0"', current["content_hash"][:8],
+        current["content_hash"][:16],            # đúng hash nhưng thiếu version
+        f'{current["content_hash"][:16]}-v0',     # hash đúng, version sai
+        "ffffffffffffffff-v1", '""-v0"',
+    ]
+    for bad in malformed:
+        with pytest.raises(KnowledgeError) as exc:
+            knowledge.update_doc(doc_id, "# Log\nx\n", "test-ingest", bad)
+        assert exc.value.status_code == 412, bad
+    # Header rỗng thì vẫn là "thiếu If-Match" (428), không phải hash sai.
     with pytest.raises(KnowledgeError) as exc:
-        knowledge.update_doc(doc_id, "# Log\nx\n", "test-ingest", "ffffffffffffffff")
-    assert exc.value.status_code == 412
+        knowledge.update_doc(doc_id, "# Log\nx\n", "test-ingest", "")
+    assert exc.value.status_code == 428
 
 
 def test_atomic_write_leaves_no_temp_file(knowledge, doc_id, knowledge_env):

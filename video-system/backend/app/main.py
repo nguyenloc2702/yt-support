@@ -2880,9 +2880,24 @@ def knowledge_raw_doc(doc_id: str, request: Request = None):
         content, title = knowledge.raw_doc(doc_id)
     except KnowledgeError as exc:
         _fail(exc)
-    filename = f"{title or doc_id}.md".replace("/", "-")
+    # Content-Disposition chỉ chứa ASCII. Title do ingest nhập có thể là tiếng Việt
+    # (→ UnicodeEncodeError 500) hoặc chứa `"`/CRLF (→ inject filename/header).
+    # sanitize cho phần ascii + RFC 5987 filename* cho tên thật.
+    import re as _re
+    from urllib.parse import quote as _quote
+    raw_title = str(title or doc_id)
+    # filename* giữ nguyên Unicode (RFC 5987); filename= là bản ASCII dự phòng.
+    utf8_name = _re.sub(r"[\x00-\x1f/\\]+", "-", raw_title).strip("- ") or doc_id
+    if not utf8_name.lower().endswith(".md"):
+        utf8_name += ".md"
+    utf8_name = utf8_name[-120:]
+    ascii_name = _re.sub(r"[^A-Za-z0-9._-]+", "-", utf8_name).strip("-")
+    ascii_name = (ascii_name or "document.md")[-120:]
+    disposition = (
+        f'attachment; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{_quote(utf8_name, safe='')}")
     return Response(content=content, media_type="text/markdown; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+                    headers={"Content-Disposition": disposition})
 
 
 @app.get("/api/v1/knowledge/docs/{doc_id}/versions")

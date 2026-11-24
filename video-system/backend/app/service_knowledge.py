@@ -126,6 +126,12 @@ def _clean_rel(rel_path: str) -> str:
     raw = (rel_path or "").strip().replace("\\", "/")
     if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
         raise KnowledgeError("Đường dẫn không hợp lệ.", 422, "bad_path")
+    # Ký tự điều khiển (\r, \n, NUL) làm `_resolve`/`_atomic_write` ném OSError
+    # → 500. Chặn ở đây, và để dư chỗ cho hậu tố `.tmp-<ns>` của atomic write.
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise KnowledgeError("Đường dẫn chứa ký tự điều khiển.", 422, "bad_path")
+    if len(raw) > 180:
+        raise KnowledgeError("Đường dẫn quá dài (tối đa 180 ký tự).", 422, "bad_path")
     parts = [p for p in raw.split("/") if p]
     if not parts or any(p in {".", ".."} for p in parts):
         raise KnowledgeError("Đường dẫn không được chứa '..'.", 422, "bad_path")
@@ -250,14 +256,26 @@ def _etag(row: dict[str, Any]) -> str:
 
 
 def _etag_matches(header: str | None, row: dict[str, Any]) -> bool:
+    """Chỉ chấp nhận ETag mà API đã phát (`sha16-vN`) hoặc `*`.
+
+    Bản cũ dùng `startswith(prefix)` nên `""`, `"-v0"` hay 1 ký tự hex đều qua
+    được → stale writer đè mất bản của người khác. Version phải khớp luôn:
+    `restore_version` có thể đưa nội dung về sha cũ ở version mới, nếu chỉ so
+    hash thì ETag của bản cũ lại hợp lệ.
+    """
     if not header:
         return False
-    value = header.strip().strip('"')
+    value = header.strip()
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        value = value[1:-1]
     if value == "*":
         return True
-    prefix = value.split("-v", 1)[0]
+    match = re.fullmatch(r"([0-9a-fA-F]{16})-v(\d+)", value)
+    if not match:
+        return False
     sha = str(row.get("current_sha256") or "")
-    return bool(sha) and sha.startswith(prefix)
+    return (bool(sha) and sha.startswith(match.group(1))
+            and int(match.group(2)) == int(row.get("version_no") or 1))
 
 
 def _snippet(text: str, needle: str) -> str:
@@ -367,16 +385,24 @@ class KnowledgeService:
                             counts["skipped"] += 1
                             if len(counts["errors"]) < 20:
                                 counts["errors"].append(f"{spec.alias}: {exc!r}")
-                    if prune_missing and spec.mode == "ro":
-                        rows = conn.execute(
-                            "SELECT id, rel_path FROM knowledge_docs WHERE source_alias=?",
-                            (spec.alias,)).fetchall()
-                        for row in rows:
+                    if prune_missing:
+                        # FS là source of truth — kể cả với source rw. Nếu không,
+                        # `DELETE /read-me/x.md` (legacy) xoá file nhưng row vẫn
+                        # nằm trong list rồi trả 404 khi mở. Chỉ ngoại lệ: row
+                        # đã xoá mềm qua knowledge API (`trashed_path`) phải giữ
+                        # lại để restore được.
+                        sql = "SELECT id, rel_path FROM knowledge_docs WHERE source_alias=?"
+                        params: tuple = (spec.alias,)
+                        if spec.mode == "rw":
+                            sql += " AND deleted_at IS NULL AND trashed_path IS NULL"
+                        for row in conn.execute(sql, params).fetchall():
                             if row["rel_path"] not in seen:
                                 conn.execute("DELETE FROM knowledge_docs WHERE id=?",
                                              (row["id"],))
-                                conn.execute("DELETE FROM knowledge_versions WHERE doc_id=?",
-                                             (row["id"],))
+                                if spec.mode == "ro":
+                                    conn.execute(
+                                        "DELETE FROM knowledge_versions WHERE doc_id=?",
+                                        (row["id"],))
                                 counts["removed"] += 1
                 finished = now()
                 conn.execute(
@@ -456,7 +482,10 @@ class KnowledgeService:
 
     def _insert_version(self, conn, doc_id: str, version_no: int, sha: str,
                         title: str, author: str, note: str, text: str) -> None:
-        raw = text.encode("utf-8")
+        # Snapshot cũng phải che: DB được backup lên Drive, và restore_version
+        # nếu trả lại secret thì lần ghi sau bị 422 secret_detected.
+        safe_text, _ = _redact_secrets(text)
+        raw = safe_text.encode("utf-8")
         conn.execute(
             "INSERT OR IGNORE INTO knowledge_versions (id,doc_id,version_no,sha256,"
             "title,author,note,content_z,size_bytes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -489,27 +518,37 @@ class KnowledgeService:
             raise KnowledgeError("Source không tồn tại.", 404, "source_not_found")
         return spec
 
+    @staticmethod
+    def _safe_text(value: Any) -> Any:
+        """Front-matter là dữ liệu không tin được: title/tags/... cũng phải che.
+
+        Chỉ redact `content` thì token trong `title: sk-...` vẫn lọt ra qua
+        /docs, /raw (Content-Disposition) và snippets.
+        """
+        return _redact_secrets(value)[0] if isinstance(value, str) else value
+
     def _public(self, row: dict[str, Any]) -> dict[str, Any]:
         tags = json.loads(row.get("tags_json") or "[]")
         refs = json.loads(row.get("source_refs_json") or "[]")
+        clean = self._safe_text
         return {
             "id": row["id"],
-            "source": row["source_alias"],
-            "path": row["rel_path"],
-            "title": row["title"],
-            "category": row["category"],
-            "tags": tags,
+            "source": clean(row["source_alias"]),
+            "path": clean(row["rel_path"]),
+            "title": clean(row["title"]),
+            "category": clean(row["category"]),
+            "tags": [clean(t) for t in tags],
             "status": row["status"],
-            "owner": row["owner"],
-            "generated_by": row["generated_by"],
-            "source_refs": refs,
+            "owner": clean(row["owner"]),
+            "generated_by": clean(row["generated_by"]),
+            "source_refs": [clean(r) for r in refs],
             "read_only": bool(row["read_only"]),
             "content_hash": row["current_sha256"],
             "version": int(row["version_no"] or 1),
             "size_bytes": row["size_bytes"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-            "duplicate_of": row["duplicate_of"],
+            "duplicate_of": clean(row["duplicate_of"]),
             "etag": _etag(row),
         }
 
@@ -599,6 +638,8 @@ class KnowledgeService:
         try:
             tmp.write_bytes(content.encode("utf-8"))
             os.replace(tmp, target)
+        except OSError as exc:
+            raise KnowledgeError(f"Không ghi được file: {exc}", 422, "bad_path") from exc
         finally:
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
@@ -643,6 +684,12 @@ class KnowledgeService:
                         title: str | None = None, category: str | None = None,
                         tags: list[str] | None = None, note: str = "update",
                         action: str = "updated") -> dict[str, Any]:
+        if row["status"] == "trashed" or row["deleted_at"]:
+            # Nếu không chặn: PUT/create overwrite tạo lại file ở path cũ nhưng
+            # UPDATE không đổi status → doc vẫn trashed (410), file trong trash
+            # bị bỏ rơi và restore_doc trả 409.
+            raise KnowledgeError("Tài liệu đang nằm trong trash; hãy restore trước.",
+                                 410, "doc_trashed")
         if row["read_only"]:
             raise KnowledgeError("Tài liệu repo là read-only; hãy fork sang library.",
                                  403, "read_only")
@@ -821,6 +868,9 @@ class KnowledgeService:
             raise KnowledgeError("status phải là published|canonical.", 422, "bad_status")
         with self._lock:
             row = self._row(doc_id)
+            if row["status"] == "trashed" or row["deleted_at"]:
+                raise KnowledgeError("Không publish tài liệu đang nằm trong trash.",
+                                     410, "doc_trashed")
             if row["read_only"]:
                 raise KnowledgeError("Không publish tài liệu repo.", 403, "read_only")
             with self.store.transaction() as conn:

@@ -193,7 +193,7 @@ kế hoạch ban đầu** để người sau không ngạc nhiên.
 | Trang độc lập | `frontend/library.html`, `library.css`, `library.js` |
 | Thư viện vendor | `frontend/vendor/marked.min.js` (12.0.2), `purify.min.js` (3.1.6) |
 | Tài liệu agent | `read_me/09_knowledge_library.md`, `read_me/02_api_contracts.md` §4b |
-| Test | `tests/test_knowledge_{api,search,security,concurrency}.py` (49 case) |
+| Test | `tests/test_knowledge_{api,search,security,concurrency,regressions}.py` (67 case: 66 pass + 1 skip) |
 
 ### Bốn chỗ sửa so với kế hoạch
 
@@ -223,3 +223,25 @@ kế hoạch ban đầu** để người sau không ngạc nhiên.
 
 FTS5 + ranking, workflow review, UI diff version, dedupe/canonical cho `skills/` trùng,
 rate limit, backup `data/knowledge/` lên Drive.
+
+### Audit sau deploy lần 1 (4 subagent, 2026-11-24)
+
+Bốn subagent độc lập (code review / prod live / QA acceptance / red-team) vào test sau khi
+deploy `3143c45`. Kết quả: **6 lỗi thật** đã sửa trong cùng ngày, kèm 17 regression test.
+
+| Lỗi | Mức | Hệ quả |
+|---|---|---|
+| `/raw` đặt title tiếng Việt vào `Content-Disposition` | P1 | **500 trên prod** cho mọi tài liệu có title không ASCII; title chứa `"`/CRLF còn inject header. Đổi sang `filename*` RFC 5987 + sanitize |
+| `_etag_matches` chấp nhận prefix bất kỳ (`""`, `-v0`, 1 hex) và bỏ qua `vN` | P1 | Stale writer đè mất bản người khác; ETag cũ lại khớp sau `restore_version`. Giờ chỉ nhận ETag đúng `sha16-vN` hoặc `*` |
+| Secret lọt qua `title`/`category`/`tags` từ front-matter | P1 | `/docs`, `/raw` lộ token dù `content` đã redact. `_public()` che mọi field chuỗi |
+| Ghi vào doc đã xoá mềm | P1 | File hồi sinh nhưng row vẫn `trashed` (410), file trong trash bị bỏ rơi, restore trả 409. Giờ trả 410 `doc_trashed` |
+| Version snapshot lưu secret dạng gzip thô | P2 | DB backup lên Drive chứa secret; restore trả nội dung bị `422` khi ghi lại. Snapshot giờ đã redact |
+| `DELETE /read-me/x.md` legacy để lại row ma | P2 | List hiện doc mà mở thì 404. Prune giờ áp cả source `rw`, trừ row có `trashed_path` |
+
+Ngoài ra: path chứa `\r`/`\n`/NUL hoặc dài >180 trả 500 thay vì 422 → đã chặn trong
+`_clean_rel` + `_atomic_write`. Red-team xác nhận **không có** SQL injection, XSS (DOMPurify
+được dùng thật), traversal hay leo quyền.
+
+Sửa drift tài liệu/UI: bỏ filter `status=reviewed` (không phải status thật), sửa claim "nút
+xoá chỉ hiện với owner" (backend mới là nơi enforce), bổ sung error code còn thiếu, làm rõ
+"không CDN" chỉ áp cho JS.

@@ -181,6 +181,7 @@ Quy tắc phản xạ khi gặp lỗi:
 | `403 read_only` | Tài liệu repo | `POST /fork` rồi sửa bản fork |
 
 `If-Match: *` được chấp nhận khi bạn chắc chắn là writer duy nhất.
+Phải gửi **nguyên ETag** (`sha16-vN`) — cắt prefix, gửi `""` hay `-v0` đều bị 412.
 
 ### 5.4 Sửa cục bộ
 
@@ -284,9 +285,13 @@ file chưa ai duyệt không tự phong `canonical` rồi khoá đường sửa 
 `https://vidfac.gacdero.vn/library` — mở trực tiếp, không cần qua SPA.
 
 - Cột trái: source + bộ lọc + danh sách (có badge `read-only` / `draft` / `published`).
-- Giữa: Markdown render (`marked` + `DOMPurify`, vendor sẵn — không gọi CDN, chạy được offline).
+- Giữa: Markdown render (`marked` + `DOMPurify`, vendor sẵn trong `/static/vendor/` —
+  phần JS không gọi CDN nên vẫn render được offline. Font Google cũng giống app chính; khi
+  mạng chết chỉ fallback sang font hệ thống, không ảnh hưởng chức năng).
 - Phải: mục lục sinh từ heading `##`.
-- Nút: tạo mới, sửa, fork, tải `.md`, xoá/khôi phục (chỉ hiện với owner), sync.
+- Nút: tạo mới, sửa, fork, tải `.md`, xoá/khôi phục, sync. Nút xoá/publish hiện với mọi
+  tài liệu ghi được; **backend mới là nơi enforce owner** — agent không có session PIN sẽ
+  nhận `403 owner_only` kèm toast.
 - Editor gửi `If-Match`; gặp `412` sẽ báo "tài liệu đã đổi, mở lại rồi sửa".
 
 Trang này cần PIN gate như phần còn lại của web UI (`/library` và `/static/` nằm trong
