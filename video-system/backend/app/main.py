@@ -19,6 +19,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import domain
@@ -30,7 +31,11 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
                       CharacterSheetCreate,
                       ConfirmAssembleRequest, FeedbackBatchCreate, FeedbackItemCreate,
                       FeedbackResolveRequest, GateDecision, GenerateRequest,
-                      HoldRequest, ItemCreate, ReadMeCreateRequest, ReadMePatchRequest,
+                      HoldRequest, ItemCreate, KnowledgeCreateRequest,
+                      KnowledgeForkRequest, KnowledgePatchRequest,
+                      KnowledgePublishRequest, KnowledgeSyncRequest,
+                      KnowledgeUpdateRequest,
+                      ReadMeCreateRequest, ReadMePatchRequest,
                       ReadMePutRequest, ShortCreate, ShortScriptUpdate,
                       ShotChecklistBatchUpdate,
                       ShotCheckUpdate, ShotImport, SyncGdriveRequest,
@@ -54,6 +59,7 @@ from .service_bgm import BgmService
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
 from .service_readme import ReadMeService
+from .service_knowledge import KnowledgeError, KnowledgeService
 from .service_shots import ShotService
 from .service_shorts import ShortService, ShortfallError
 from .service_todos import TodoService
@@ -80,6 +86,8 @@ logger = logging.getLogger("video_system.main")
 app = FastAPI(title="video-system", version="0.2.0",
               description="EN-Only TODO & External Video Assembly Pipeline (plan v3.2)")
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 store = SQLiteStore(db_path())
 items = ItemService(store)
 chat = ChatService(store)
@@ -112,6 +120,7 @@ affiliate = AffiliateService(store, webhooks)
 set_affiliate_service(affiliate)
 bgm_service = BgmService(store)
 readme_service = ReadMeService()
+knowledge = KnowledgeService(store)
 
 
 @app.on_event("startup")
@@ -134,11 +143,11 @@ def _start_news_scheduler() -> None:
 # màn hình khóa — dữ liệu vẫn nằm sau API được bảo vệ).
 # Ngoại lệ prefix: /b/{slug} + /bio/{handle} (trang công khai cho bio TikTok/IG),
 # /api/v1/instagram/media/ (signed URL để IG pull video), callback OAuth IG.
-_WEB_OPEN_PATHS = {"/", "/favicon.ico", "/api/v1/health", "/api/v1/auth/login",
-                   "/api/v1/auth/session", "/api/v1/auth/logout",
+_WEB_OPEN_PATHS = {"/", "/library", "/favicon.ico", "/api/v1/health",
+                   "/api/v1/auth/login", "/api/v1/auth/session", "/api/v1/auth/logout",
                    "/api/v1/youtube/auth/callback",
                    "/api/v1/instagram/auth/callback"}
-_WEB_OPEN_PREFIXES = ("/b/", "/bio/", "/api/v1/instagram/media/")
+_WEB_OPEN_PREFIXES = ("/b/", "/bio/", "/api/v1/instagram/media/", "/static/")
 
 
 @app.middleware("http")
@@ -334,6 +343,14 @@ def favicon():
 def index():
     return FileResponse(
         Path(__file__).parents[2] / "frontend" / "index.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
+@app.api_route("/library", methods=["GET", "HEAD"])
+def library_page():
+    return FileResponse(
+        FRONTEND_DIR / "library.html",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
@@ -2020,7 +2037,7 @@ def _require_owner(request: Request) -> str:
     auth.require(request, "admin")
     identity, _ = auth.identity_for(request)
     if identity != "owner":
-        raise ApiError(403, "Chỉ owner được duyệt/huỷ brief.", "owner_only")
+        raise ApiError(403, "Chỉ owner được thực hiện thao tác này.", "owner_only")
     return identity
 
 
@@ -2821,6 +2838,185 @@ def delete_read_me_doc(doc_path: str, request: Request = None):
         raise HTTPException(422, str(exc))
 
 
+# -- Knowledge Library API ----------------------------------------------------
+# FS là source of truth; API này index repo docs read-only và cho ghi trong
+# data/knowledge/ + read_me/ legacy. `/api/v1/read-me` phía trên vẫn giữ nguyên.
+
+@app.get("/api/v1/knowledge/sources")
+def knowledge_sources(request: Request = None):
+    auth.require(request, "read")
+    try:
+        return knowledge.sources()
+    except KnowledgeError as exc:
+        _fail(exc)
 
 
+@app.get("/api/v1/knowledge/docs")
+def knowledge_list_docs(q: str | None = None, source: str | None = None,
+                        category: str | None = None, status: str | None = None,
+                        tag: str | None = None, limit: int = 50,
+                        offset: int = 0, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return knowledge.list_docs(q=q, source=source, category=category,
+                                  status=status, tag=tag, limit=limit, offset=offset)
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.get("/api/v1/knowledge/stats")
+def knowledge_stats(request: Request = None):
+    auth.require(request, "read")
+    try:
+        return knowledge.stats()
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.get("/api/v1/knowledge/docs/{doc_id}/raw")
+def knowledge_raw_doc(doc_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        content, title = knowledge.raw_doc(doc_id)
+    except KnowledgeError as exc:
+        _fail(exc)
+    filename = f"{title or doc_id}.md".replace("/", "-")
+    return Response(content=content, media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/v1/knowledge/docs/{doc_id}/versions")
+def knowledge_versions(doc_id: str, request: Request = None):
+    auth.require(request, "read")
+    try:
+        return knowledge.versions(doc_id)
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.get("/api/v1/knowledge/docs/{doc_id}")
+def knowledge_get_doc(doc_id: str, response: Response, request: Request = None):
+    auth.require(request, "read")
+    try:
+        doc = knowledge.get_doc(doc_id)
+    except KnowledgeError as exc:
+        _fail(exc)
+    response.headers["ETag"] = doc["etag"]
+    return doc
+
+
+@app.post("/api/v1/knowledge/docs")
+def knowledge_create_doc(body: KnowledgeCreateRequest, request: Request = None):
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    payload = body.model_dump()
+
+    def run() -> dict:
+        try:
+            return knowledge.create_doc(
+                source=body.source, path=body.path, content=body.content,
+                actor=identity, title=body.title, category=body.category,
+                tags=body.tags, source_refs=body.source_refs,
+                overwrite=body.overwrite)
+        except KnowledgeError as exc:
+            _fail(exc)
+
+    return _idempotent_call(request, payload, run, 201)
+
+
+@app.post("/api/v1/knowledge/docs/{doc_id}/fork")
+def knowledge_fork_doc(doc_id: str, body: KnowledgeForkRequest, request: Request = None):
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    payload = {"doc_id": doc_id, **body.model_dump()}
+
+    def run() -> dict:
+        try:
+            return knowledge.fork_doc(
+                doc_id, identity, path=body.path, title=body.title,
+                category=body.category, tags=body.tags)
+        except KnowledgeError as exc:
+            _fail(exc)
+
+    return _idempotent_call(request, payload, run, 201)
+
+
+@app.put("/api/v1/knowledge/docs/{doc_id}")
+def knowledge_put_doc(doc_id: str, body: KnowledgeUpdateRequest,
+                      response: Response, request: Request = None):
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    try:
+        doc = knowledge.update_doc(
+            doc_id, body.content, identity, request.headers.get("If-Match"),
+            title=body.title, category=body.category, tags=body.tags,
+            note=body.note or "put")
+    except KnowledgeError as exc:
+        _fail(exc)
+    response.headers["ETag"] = doc["etag"]
+    return doc
+
+
+@app.patch("/api/v1/knowledge/docs/{doc_id}")
+def knowledge_patch_doc(doc_id: str, body: KnowledgePatchRequest,
+                        response: Response, request: Request = None):
+    auth.require(request, "ingest")
+    identity, _ = auth.identity_for(request)
+    try:
+        doc = knowledge.patch_doc(
+            doc_id, mode=body.mode, content=body.content, actor=identity,
+            if_match=request.headers.get("If-Match"), target_text=body.target_text,
+            replacement=body.replacement, note=body.note or "patch")
+    except KnowledgeError as exc:
+        _fail(exc)
+    response.headers["ETag"] = doc["etag"]
+    return doc
+
+
+@app.delete("/api/v1/knowledge/docs/{doc_id}")
+def knowledge_delete_doc(doc_id: str, request: Request = None):
+    identity = _require_owner(request)
+    try:
+        return knowledge.delete_doc(doc_id, identity)
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.post("/api/v1/knowledge/docs/{doc_id}/restore")
+def knowledge_restore_doc(doc_id: str, request: Request = None):
+    identity = _require_owner(request)
+    try:
+        return knowledge.restore_doc(doc_id, identity)
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.post("/api/v1/knowledge/docs/{doc_id}/versions/{version_no}/restore")
+def knowledge_restore_version(doc_id: str, version_no: int, request: Request = None):
+    identity = _require_owner(request)
+    try:
+        return knowledge.restore_version(doc_id, version_no, identity)
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.post("/api/v1/knowledge/docs/{doc_id}/publish")
+def knowledge_publish_doc(doc_id: str, body: KnowledgePublishRequest,
+                          request: Request = None):
+    identity = _require_owner(request)
+    try:
+        return knowledge.publish_doc(doc_id, identity, body.status)
+    except KnowledgeError as exc:
+        _fail(exc)
+
+
+@app.post("/api/v1/knowledge/sync")
+def knowledge_sync(body: KnowledgeSyncRequest | None = None, request: Request = None):
+    auth.require(request, "admin")
+    identity, _ = auth.identity_for(request)
+    try:
+        return knowledge.sync(prune_missing=body.prune_missing if body else True,
+                              actor=identity, trigger="api")
+    except KnowledgeError as exc:
+        _fail(exc)
 

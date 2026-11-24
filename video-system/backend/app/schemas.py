@@ -235,6 +235,48 @@ class ReadMePatchRequest(BaseModel):
     replacement: str | None = Field(default=None)
 
 
+class KnowledgeCreateRequest(BaseModel):
+    source: str = Field(default="library", max_length=40)
+    path: str = Field(..., min_length=1, max_length=240)
+    content: str = Field(..., description="UTF-8 Markdown")
+    title: str | None = Field(default=None, max_length=200)
+    category: str | None = Field(default=None, max_length=120)
+    tags: list[str] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
+    overwrite: bool = Field(default=False)
+
+
+class KnowledgeForkRequest(BaseModel):
+    path: str | None = Field(default=None, max_length=240)
+    title: str | None = Field(default=None, max_length=200)
+    category: str | None = Field(default=None, max_length=120)
+    tags: list[str] = Field(default_factory=list)
+
+
+class KnowledgeUpdateRequest(BaseModel):
+    content: str = Field(..., description="Full replacement UTF-8 Markdown")
+    title: str | None = Field(default=None, max_length=200)
+    category: str | None = Field(default=None, max_length=120)
+    tags: list[str] | None = Field(default=None)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class KnowledgePatchRequest(BaseModel):
+    mode: str = Field(default="append", pattern="^(append|prepend|replace_text|overwrite)$")
+    content: str = Field(default="")
+    target_text: str | None = Field(default=None)
+    replacement: str | None = Field(default=None)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class KnowledgePublishRequest(BaseModel):
+    status: str = Field(default="published", pattern="^(published|canonical)$")
+
+
+class KnowledgeSyncRequest(BaseModel):
+    prune_missing: bool = Field(default=True)
+
+
 class FeedbackItemCreate(BaseModel):
     category: str = Field(
         default="pronunciation",

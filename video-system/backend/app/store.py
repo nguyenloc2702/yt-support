@@ -489,6 +489,77 @@ CREATE TABLE IF NOT EXISTS archived_units (
   last_restored_at REAL,
   restore_count INTEGER DEFAULT 0
 );
+
+-- Knowledge Library: FS là source of truth, DB chỉ là index/version/audit -----
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+  alias TEXT PRIMARY KEY,
+  abs_path TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'ro',      -- rw | ro
+  category TEXT,
+  priority INTEGER DEFAULT 0,
+  recursive INTEGER DEFAULT 1,
+  created_at REAL
+);
+CREATE TABLE IF NOT EXISTS knowledge_docs (
+  id TEXT PRIMARY KEY,                  -- knd_<sha1(source:path)[:16]>, stable qua reindex
+  source_alias TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  title TEXT,
+  category TEXT,
+  tags_json TEXT,
+  status TEXT NOT NULL DEFAULT 'published', -- published | draft | reviewed | canonical | archived | trashed | missing
+  owner TEXT,
+  generated_by TEXT,
+  source_refs_json TEXT,
+  current_sha256 TEXT,
+  size_bytes INTEGER,
+  mtime REAL,
+  version_no INTEGER DEFAULT 1,
+  read_only INTEGER DEFAULT 1,
+  duplicate_of TEXT,
+  trashed_path TEXT,
+  deleted_at REAL,
+  created_at REAL,
+  updated_at REAL,
+  UNIQUE(source_alias, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_docs_sha ON knowledge_docs(current_sha256);
+CREATE INDEX IF NOT EXISTS idx_knowledge_docs_status ON knowledge_docs(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_docs_source ON knowledge_docs(source_alias, rel_path);
+CREATE TABLE IF NOT EXISTS knowledge_versions (
+  id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  version_no INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  title TEXT,
+  author TEXT,
+  note TEXT,
+  content_z BLOB,                       -- gzip(UTF-8); chỉ lưu bản version, không lưu bản sống
+  size_bytes INTEGER,
+  created_at REAL,
+  UNIQUE(doc_id, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_versions_doc ON knowledge_versions(doc_id, version_no);
+CREATE TABLE IF NOT EXISTS knowledge_events (
+  id TEXT PRIMARY KEY,
+  doc_id TEXT,
+  actor TEXT,
+  action TEXT,
+  from_sha TEXT,
+  to_sha TEXT,
+  meta_json TEXT,
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_events_doc ON knowledge_events(doc_id, created_at);
+CREATE TABLE IF NOT EXISTS knowledge_sync_runs (
+  id TEXT PRIMARY KEY,
+  trigger TEXT,
+  started_at REAL,
+  finished_at REAL,
+  counts_json TEXT,
+  errors_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_sync_started ON knowledge_sync_runs(started_at);
 """
 
 _ITEM_MIGRATION_COLS = [

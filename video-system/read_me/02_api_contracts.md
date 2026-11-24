@@ -64,3 +64,51 @@
 | `PUT` | `/api/v1/read-me/{doc_path}` | `ingest` | Tạo mới hoặc ghi đè toàn bộ file (`content`) |
 | `PATCH` | `/api/v1/read-me/{doc_path}` | `ingest` | Chỉnh sửa / nối thêm log (`mode`: `append \| prepend \| replace_text \| overwrite`) |
 | `DELETE` | `/api/v1/read-me/{doc_path}` | `admin` | Xóa file |
+
+---
+
+## 4b. Knowledge Library (`/library`)
+
+> Kho tổng hợp **toàn bộ** tài liệu Markdown của hệ thống (read_me, docs, skills, plans, root).
+> FS là source of truth; DB chỉ là index + version + audit. Đọc `/read_me/09_knowledge_library.md`
+> trước khi dùng — contract dưới đây chỉ là bảng tra cứu nhanh.
+> **Endpoint `/api/v1/read-me` ở mục 4 vẫn giữ nguyên**, không bị thay thế.
+
+| Method | Endpoint | Scope | Mô tả |
+|---|---|---|---|
+| `GET` | `/api/v1/knowledge/sources` | `read` | Danh sách source (`alias`, `path`, `mode` `rw`/`ro`, `doc_count`) |
+| `GET` | `/api/v1/knowledge/docs?q=&source=&category=&status=&tag=&limit=&offset=` | `read` | Liệt kê / tìm kiếm (`limit` mặc định 50, trần 200) |
+| `GET` | `/api/v1/knowledge/stats` | `read` | Tổng số, dung lượng, theo source/status, nhóm trùng lặp |
+| `GET` | `/api/v1/knowledge/docs/{doc_id}` | `read` | Đọc tài liệu; trả `ETag` ở header, `content` + `secret_redacted` ở body |
+| `GET` | `/api/v1/knowledge/docs/{doc_id}/raw` | `read` | Tải `.md` gốc (`text/markdown`, attachment) |
+| `GET` | `/api/v1/knowledge/docs/{doc_id}/versions` | `read` | Lịch sử version (mới nhất trước, tối đa 20) |
+| `POST` | `/api/v1/knowledge/docs` | `ingest` | Tạo tài liệu (`source`, `path`, `content`, `title`, `category`, `tags`, `source_refs`, `overwrite`) |
+| `POST` | `/api/v1/knowledge/docs/{doc_id}/fork` | `ingest` | Copy tài liệu repo (`ro`) sang `library` để sửa được |
+| `PUT` | `/api/v1/knowledge/docs/{doc_id}` | `ingest` | Ghi đè toàn bộ — **bắt buộc `If-Match`** |
+| `PATCH` | `/api/v1/knowledge/docs/{doc_id}` | `ingest` | `append`/`prepend` không cần `If-Match`; `replace_text`/`overwrite` thì có |
+| `DELETE` | `/api/v1/knowledge/docs/{doc_id}` | **owner** | Xoá mềm vào `.trash/<doc_id>/` |
+| `POST` | `/api/v1/knowledge/docs/{doc_id}/restore` | **owner** | Khôi phục từ trash |
+| `POST` | `/api/v1/knowledge/docs/{doc_id}/versions/{n}/restore` | **owner** | Khôi phục nội dung version `n` (tạo version mới) |
+| `POST` | `/api/v1/knowledge/docs/{doc_id}/publish` | **owner** | `status`: `published \| canonical` |
+| `POST` | `/api/v1/knowledge/sync` | `admin` | Re-index từ đĩa; body tuỳ chọn `{"prune_missing": true}` |
+
+**Mã lỗi máy đọc được** (`body.code`):
+
+| HTTP | `code` | Nghĩa / cách xử lý |
+|---|---|---|
+| `403` | `read_only` | Tài liệu repo không sửa trực tiếp — gọi `/fork` rồi sửa bản fork |
+| `403` | `published_locked` | Bản `library` đã publish; chỉ owner sửa |
+| `403` | `owner_only` | Thao tác xoá/publish/restore chỉ owner |
+| `409` | `doc_exists` | Đã có tài liệu cùng `path`; dùng `overwrite: true` hoặc `/fork` |
+| `409` | `target_not_found` | `replace_text` không thấy `target_text` — đọc lại tài liệu |
+| `409` | `already_trashed` / `not_trashed` | Trạng thái trash không khớp |
+| `410` | `doc_trashed` | Đã xoá mềm — `/restore` nếu cần |
+| `412` | `hash_mismatch` | `If-Match` cũ — **đọc lại, hợp nhất, gửi lại** (đừng retry y nguyên) |
+| `415` | `unsupported_media_type` | Chỉ `.md`, không NUL/binary |
+| `422` | `bad_path` | Đường dẫn thoát root / chứa `..` / absolute / symlink |
+| `422` | `secret_detected` | Nội dung chứa token thật — thay bằng placeholder |
+| `428` | `missing_if_match` | Thiếu `If-Match` cho PUT/`overwrite`/`replace_text` |
+
+**ETag** dạng `"<sha256[:16]>-v<n>"`. Gửi lại nguyên chuỗi trong header `If-Match`.
+`If-Match: *` được chấp nhận khi chắc chắn mình là writer duy nhất.
+

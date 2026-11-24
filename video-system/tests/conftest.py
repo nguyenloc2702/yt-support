@@ -250,3 +250,100 @@ def make_fake_bank_image(name="bank_01.png"):
     p = d / name
     Image.new("RGB", (108, 192), (28, 25, 23)).save(p, format="PNG")
     return p
+
+
+# --- Knowledge Library (plans/knowledge_library) -----------------------------
+
+_KNOWLEDGE_TABLES = (
+    "knowledge_docs", "knowledge_versions", "knowledge_events",
+    "knowledge_sync_runs", "knowledge_sources",
+)
+
+
+def wipe_knowledge_index() -> None:
+    """Xoá index knowledge giữa các test.
+
+    Store là process-global nên row của test trước vẫn còn; chúng trỏ vào
+    `tmp_path` đã bị xoá và sẽ làm hỏng count/get của test sau. Xoá ở đây
+    thay vì xoá cả DB để không đụng dữ liệu của test khác.
+    """
+    for table in _KNOWLEDGE_TABLES:
+        try:
+            _app_store.execute(f"DELETE FROM {table}")
+        except Exception:  # noqa: BLE001 — bảng có thể chưa tồn tại ở DB cũ
+            pass
+
+
+def _knowledge_dirs(tmp_path):
+    lib = tmp_path / "knowledge"
+    lib.mkdir(parents=True, exist_ok=True)
+    read_me = tmp_path / "read_me"
+    read_me.mkdir(parents=True, exist_ok=True)
+    return lib, read_me
+
+
+@pytest.fixture()
+def knowledge_env(tmp_path, monkeypatch):
+    """Cô lập hoàn toàn: chỉ source `library` + `read_me`, repo sources OFF.
+
+    `VIDEO_KNOWLEDGE_SYNC_TTL=0` ép sync mỗi lần đọc để test không phụ thuộc
+    thời điểm gọi — corpus vài file nên chi phí không đáng kể.
+    """
+    lib, read_me = _knowledge_dirs(tmp_path)
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_DIR", str(lib))
+    monkeypatch.setenv("VIDEO_READ_ME_DIR", str(read_me))
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_REPO_SOURCES", "0")
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_SYNC_TTL", "0")
+    wipe_knowledge_index()
+    yield {"library": lib, "read_me": read_me}
+    wipe_knowledge_index()
+
+
+@pytest.fixture()
+def knowledge_repo_env(tmp_path, monkeypatch):
+    """Bật repo sources với một repo giả trong tmp_path (docs/ + plans/).
+
+    Lưu ý: `docs`/`skills` của chính app vẫn được index vì chúng nằm cạnh
+    backend — test nào cần số liệu chắc chắn thì phải lọc theo `source`.
+    """
+    lib, read_me = _knowledge_dirs(tmp_path)
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True, exist_ok=True)
+    (repo / "plans").mkdir(parents=True, exist_ok=True)
+    (repo / "docs" / "protocol.md").write_text(
+        "# Repo Protocol\nCanonical protocol lives here.\n", encoding="utf-8")
+    (repo / "plans" / "roadmap.md").write_text(
+        "# Roadmap Q1\n- ship library\n", encoding="utf-8")
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_DIR", str(lib))
+    monkeypatch.setenv("VIDEO_READ_ME_DIR", str(read_me))
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_REPO_DIR", str(repo))
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_REPO_SOURCES", "1")
+    monkeypatch.setenv("VIDEO_KNOWLEDGE_SYNC_TTL", "0")
+    wipe_knowledge_index()
+    yield {"library": lib, "read_me": read_me, "repo": repo}
+    wipe_knowledge_index()
+
+
+@pytest.fixture()
+def owner():
+    """Client riêng có session PIN → identity `owner`.
+
+    Cố ý KHÔNG dùng chung `client`: cookie dính vào client sẽ biến mọi request
+    sau đó thành owner và làm test phân quyền pass giả.
+    """
+    from fastapi.testclient import TestClient
+    from backend.app.auth import SESSION_COOKIE, webauth
+    from backend.app.main import app
+    c = TestClient(app)
+    c.cookies.set(SESSION_COOKIE, webauth.make_token())
+    yield c
+    c.cookies.clear()
+    c.close()
+
+
+@pytest.fixture()
+def knowledge():
+    """Service instance dùng chung với app (test gọi trực tiếp, không qua HTTP)."""
+    from backend.app.main import knowledge as service
+    return service
+

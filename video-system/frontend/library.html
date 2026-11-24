@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Knowledge Library — Video System</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231C1917'/><text x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' fill='white' font-family='monospace' font-weight='bold' font-size='15'>KB</text></svg>"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/library.css"/>
+</head>
+<body>
+<header class="lib-topbar">
+  <div class="lib-topbar-inner">
+    <div class="lib-brand">
+      <div class="lib-brand-mark">KB</div>
+      <div>
+        <h1>Knowledge Library</h1>
+        <p>Kho tài liệu Markdown của toàn hệ thống — đọc, tìm, tổng hợp và quản lý</p>
+      </div>
+    </div>
+    <div class="lib-actions">
+      <a class="lib-btn" href="/">← Điều phối Shot</a>
+      <button type="button" class="lib-btn" id="libSyncBtn" onclick="syncLibrary()">Đồng bộ index</button>
+      <button type="button" class="lib-btn primary" id="libNewBtn" onclick="openEditor(true)">+ Tài liệu mới</button>
+    </div>
+  </div>
+</header>
+
+<main class="lib-shell">
+  <aside class="lib-panel lib-sidebar">
+    <h2>Tìm kiếm</h2>
+    <input id="libSearch" class="lib-search" type="search" placeholder="Tìm theo tiêu đề, path, nội dung..." autocomplete="off"/>
+    <h2>Nguồn tài liệu</h2>
+    <div id="libSources" class="lib-source-list"></div>
+    <h2>Thống kê</h2>
+    <div id="libStats"></div>
+  </aside>
+
+  <section class="lib-main">
+    <div id="libAuth" class="lib-auth hidden">
+      Phiên đăng nhập đã hết hạn. <a href="/">Mở trang chủ và nhập PIN</a> rồi quay lại.
+    </div>
+    <div id="libToolbar" class="lib-toolbar">
+      <div>
+        <div class="lib-toolbar-title" id="libTitle">Tất cả tài liệu</div>
+        <div class="lib-toolbar-sub" id="libCount">Đang tải...</div>
+      </div>
+      <div class="lib-toolbar-actions">
+        <select id="libStatus" class="lib-select" onchange="loadDocs()">
+          <option value="">Đang sống</option>
+          <option value="published">Published</option>
+          <option value="draft">Draft</option>
+          <option value="reviewed">Reviewed</option>
+          <option value="canonical">Canonical</option>
+          <option value="archived">Archived</option>
+          <option value="trashed">Trash</option>
+        </select>
+        <button type="button" class="lib-btn small" onclick="loadDocs()">Làm mới</button>
+      </div>
+    </div>
+
+    <div id="libList" class="lib-list"></div>
+    <article id="libReader" class="lib-panel lib-reader hidden"></article>
+  </section>
+
+  <aside class="lib-panel lib-toc">
+    <h2>Mục lục</h2>
+    <div id="libToc" class="lib-toc-list"><div class="lib-toc-empty">Mở một tài liệu để xem mục lục.</div></div>
+  </aside>
+</main>
+
+<div id="libEditor" class="lib-modal hidden" onclick="if(event.target===this)closeEditor()">
+  <div class="lib-modal-card" role="dialog" aria-modal="true" aria-labelledby="libEditorTitle">
+    <div class="lib-modal-head">
+      <h2 id="libEditorTitle">Tài liệu mới</h2>
+      <button type="button" class="lib-btn small" onclick="closeEditor()">Đóng</button>
+    </div>
+    <div class="lib-modal-body">
+      <div id="libEditorError" class="lib-error hidden"></div>
+      <div class="lib-grid-2">
+        <div class="lib-field">
+          <label for="libDocPath">Path (trong library)</label>
+          <input id="libDocPath" placeholder="notes/2026-11-24-tong-hop.md"/>
+        </div>
+        <div class="lib-field">
+          <label for="libDocTitle">Tiêu đề</label>
+          <input id="libDocTitle" placeholder="Tổng hợp kiến thức..."/>
+        </div>
+      </div>
+      <div class="lib-grid-2">
+        <div class="lib-field">
+          <label for="libDocCategory">Nhóm</label>
+          <input id="libDocCategory" placeholder="Tổng hợp"/>
+        </div>
+        <div class="lib-field">
+          <label for="libDocTags">Tags (phẩy)</label>
+          <input id="libDocTags" placeholder="library, onboarding"/>
+        </div>
+      </div>
+      <div class="lib-field">
+        <label for="libDocContent">Nội dung Markdown</label>
+        <textarea id="libDocContent" placeholder="# Tiêu đề&#10;&#10;Nội dung..."></textarea>
+      </div>
+    </div>
+    <div class="lib-modal-foot">
+      <button type="button" class="lib-btn" onclick="closeEditor()">Huỷ</button>
+      <button type="button" class="lib-btn primary" id="libSaveBtn" onclick="saveEditor()">Lưu tài liệu</button>
+    </div>
+  </div>
+</div>
+
+<div id="libToast" class="lib-toast-wrap" aria-live="polite"></div>
+
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script src="/static/library.js"></script>
+</body>
+</html>
