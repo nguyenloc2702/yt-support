@@ -3,7 +3,9 @@
 **Version:** `2026-11-24` · **Status:** Phase 1 (live) · **Base URL:** `https://vidfac.gacdero.vn/api/v1`
 
 Hợp đồng này là nguồn sự thật duy nhất cho agent. Có gì không rõ trong đây thì **hỏi owner**,
-không tự suy diễn. Machine-readable schema: `GET https://vidfac.gacdero.vn/openapi.json`.
+không tự suy diễn. Machine-readable schema: `GET https://vidfac.gacdero.vn/openapi.json`
+— **phải kèm `Authorization: Bearer <tên-key>`**, nếu không app trả `401` PIN gate.
+`GET /api/v1/health` là endpoint duy nhất mở cho không cần key.
 
 ---
 
