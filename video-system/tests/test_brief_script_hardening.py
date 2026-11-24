@@ -325,6 +325,25 @@ def test_idempotency_request_hash_migration(tmp_path):
     assert row["claim_token"] is None
 
 
+def test_failed_begin_does_not_wedge_transaction_flag():
+    """BEGIN IMMEDIATE ném 'locked' thì __exit__ không chạy.
+
+    Flag in_tx phải được hạ xuống ngay trong __enter__, nếu không thread này
+    không bao giờ commit lại được và mọi transaction sau đó trả 500.
+    """
+    from backend.app.store import _Tx
+
+    class LockedConn:
+        def execute(self, _sql):
+            raise sqlite3.OperationalError("database is locked")
+
+    local = threading.local()
+    local.in_tx = True  # mô phỏng flag bị kẹt từ lần trước
+    with pytest.raises(sqlite3.OperationalError):
+        _Tx(LockedConn(), local).__enter__()
+    assert local.in_tx is False
+
+
 # -- Error contract: agent cần `code` để quyết định retry hay không ------------
 
 def test_error_body_carries_machine_code(client, agents):
@@ -341,6 +360,15 @@ def test_error_body_carries_machine_code(client, agents):
                              headers=agents["c"], json={"verdict": "pass"})
     assert not_critic.json()["code"] == "not_critic"
     assert not_critic.status_code == 403
+
+
+def test_schema_validation_error_has_machine_code(client, agents):
+    """422 do Pydantic cũng phải có `code` để agent branch retry/không retry."""
+    r = client.post("/api/v1/briefs", headers=agents["author"], json={
+        "title": "x", "target_duration_sec": "not-a-number"})
+    assert r.status_code == 422
+    assert r.json()["code"] == "validation_error"
+    assert isinstance(r.json()["errors"], list)
 
 
 def test_owner_only_error_has_code(client, agents):
@@ -384,6 +412,58 @@ def test_owner_cannot_reject_an_agreed_proposal(client, agents):
     assert got["status"] == "agreed"
 
 
+def test_owner_force_agree_on_agreed_proposal_is_409(client, agents):
+    b = make_brief(client, agents["author"])
+    p = make_proposal(client, agents["author"], b["id"]).json()
+    client.post(f"/api/v1/script-proposals/{p['id']}/sign",
+                headers=agents["author"], json={"verdict": "pass"})
+    client.post(f"/api/v1/script-proposals/{p['id']}/sign",
+                headers=agents["b"], json={"verdict": "pass"})
+    r = client.post(f"/api/v1/briefs/{b['id']}/decisions", headers=agents["owner"],
+                    json={"decision": "force_agree", "proposal_id": p["id"],
+                          "reason": "muốn chốt lại lần nữa"})
+    assert r.status_code == 409
+    assert r.json()["code"] == "already_agreed"
+
+
+def test_owner_reject_resets_review_round_quota(client, agents):
+    """Owner reject ở vòng 2 phải mở quota cho author làm version mới.
+
+    Nếu không reset, author dính round_limit_reached và chỉ còn cách huỷ brief —
+    mất toàn bộ audit chain của 2 vòng trước.
+    """
+    b = make_brief(client, agents["author"])
+    v1 = make_proposal(client, agents["author"], b["id"]).json()
+    client.post(f"/api/v1/script-proposals/{v1['id']}/findings", headers=agents["b"],
+                json={"category": "structure", "severity": "medium"})
+    shots2 = make_shots()
+    shots2[0]["narration"] += " v2"
+    v2 = make_proposal(client, agents["author"], b["id"], shots=shots2,
+                       parent_id=v1["id"]).json()
+    client.post(f"/api/v1/script-proposals/{v2['id']}/findings", headers=agents["b"],
+                json={"category": "structure", "severity": "medium"})
+
+    before = client.get(f"/api/v1/briefs/{b['id']}/agreement",
+                        headers=agents["read"]).json()
+    assert before["rounds_used"] == 2
+
+    rej = client.post(f"/api/v1/briefs/{b['id']}/decisions", headers=agents["owner"],
+                      json={"decision": "reject", "proposal_id": v2["id"],
+                            "reason": "làm lại từ đầu"})
+    assert rej.status_code == 200, rej.text
+
+    shots3 = make_shots()
+    shots3[0]["narration"] += " v3"
+    v3 = make_proposal(client, agents["author"], b["id"], shots=shots3,
+                       parent_id=v2["id"])
+    assert v3.status_code == 201, v3.text
+
+    after = client.get(f"/api/v1/briefs/{b['id']}/agreement",
+                       headers=agents["read"]).json()
+    assert after["rounds_used"] == 0
+    assert after["latest"]["id"] == v3.json()["id"]
+
+
 def test_invalid_proposals_do_not_consume_review_rounds(client, agents):
     """Agent sửa lỗi validator nhiều lần vẫn còn quota review."""
     b = make_brief(client, agents["author"])
@@ -417,17 +497,28 @@ def test_round_cap_points_to_owner(client, agents):
     assert agg["phase2_open"] is False
 
 
-def test_critic_cannot_be_the_author(client, agents):
+def test_non_owner_cannot_assign_critic(client, agents):
+    """Agent không được tự gán critic khi tạo brief — owner phải gọi /critic."""
     r = client.post("/api/v1/briefs", headers=agents["author"], json={
         "title": "same", "target_duration_sec": 120, "approval_mode": "hard",
-        "critic": "test-ingest"})
+        "critic": "agent-b"})
+    assert r.status_code == 403
+    assert r.json()["code"] == "critic_owner_only"
+
+
+def test_owner_cannot_assign_critic_equal_to_author(client, agents):
+    """Owner thì vẫn bị chặn khi chọn critic trùng người tạo brief."""
+    r = client.post("/api/v1/briefs", headers=agents["owner"], json={
+        "title": "same", "target_duration_sec": 120, "approval_mode": "hard",
+        "critic": "owner"})
     assert r.status_code == 422
     assert r.json()["code"] == "critic_is_author"
 
-    b = make_brief(client, agents["author"])
+    b = make_brief(client, agents["author"])  # author = test-ingest
     r2 = client.post(f"/api/v1/briefs/{b['id']}/critic", headers=agents["owner"],
                      json={"critic": "test-ingest"})
     assert r2.status_code == 422
+    assert r2.json()["code"] == "critic_is_author"
 
 
 def test_pending_idempotency_key_is_409_not_silent(client, agents, store_fixture):

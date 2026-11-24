@@ -34,6 +34,12 @@ def test_browser_without_session_blocked(client):
     assert client.get("/docs", headers=BROWSER).status_code == 401
 
 
+def test_pin_gate_error_has_machine_code(client):
+    r = client.get("/api/v1/todos", headers=BROWSER)
+    assert r.status_code == 401
+    assert r.json()["code"] == "pin_required"
+
+
 def test_wrong_pin_then_correct_pin_grants_admin_session(client):
     r = _login(client, "000001")
     assert r.status_code == 401

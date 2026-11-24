@@ -650,8 +650,16 @@ class _Tx:
         self.local_state = local_state
 
     def __enter__(self) -> sqlite3.Connection:
+        # Flag phải set SAU khi BEGIN thành công. Nếu BEGIN ném "database is
+        # locked", __exit__ không bao giờ chạy — để flag True ở trên sẽ làm thread
+        # này không commit nữa và mọi transaction sau đó fail ("cannot start a
+        # transaction within a transaction") -> 500 dưới contention.
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            self.local_state.in_tx = False
+            raise
         self.local_state.in_tx = True
-        self.conn.execute("BEGIN IMMEDIATE")
         return self.conn
 
     def __exit__(self, exc_type, exc, tb) -> None:

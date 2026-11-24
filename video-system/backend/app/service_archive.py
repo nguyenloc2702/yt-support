@@ -180,7 +180,7 @@ def archive_unit(
         return {"unit": unit_key, "status": "copy_failed", "detail": out[:300]}
 
     code, out = _run_rclone(
-        ["check", str(unit_dir), remote, "--one-way", "--size-only"], 600
+        ["check", str(unit_dir), remote, "--one-way"], 600
     )
     if code != 0:
         logger.warning("archive %s: check lệch, KHÔNG xoá local: %s", unit_key, out[:200])
@@ -243,7 +243,9 @@ def ensure_local(store: Store, path: Path) -> bool:
     Kéo từng file (``rclone copyto``) thay vì cả unit: một request subtitle 2 KB
     không nên bắt chờ tải lại 300 MB. Nếu copyto lỗi mới fallback kéo cả unit.
     """
-    if path.exists():
+    # File 0 byte là kết quả restore hỏng (rclone bị kill giữa chừng) — phải
+    # tính là "chưa có mặt", không được trả True cho request phía sau.
+    if path.exists() and path.stat().st_size > 0:
         return True
     unit_key = unit_of(path)
     if not unit_key:
@@ -265,13 +267,29 @@ def ensure_local(store: Store, path: Path) -> bool:
         return False
 
     remote_file = f"{row['remote_path'].rstrip('/')}/{rel}"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    code, out = _run_rclone(["copyto", remote_file, str(path)], timeout=1800)
-    if code != 0:
-        logger.warning("restore file %s lỗi (%s): %s", rel, code, out[:200])
-        if not restore_unit(store, unit_key):
-            return False
-        return path.exists()
+    lk = _lock_for(unit_key)
+    if not lk.acquire(timeout=1800):
+        return False
+    try:
+        # Kiểm lại sau khi có lock: request khác có thể đã kéo xong lúc mình chờ.
+        if path.exists() and path.stat().st_size > 0:
+            return True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        code, out = _run_rclone(["copyto", remote_file, str(path)], timeout=1800)
+        if code != 0:
+            logger.warning("restore file %s lỗi (%s): %s", rel, code, out[:200])
+            need_fallback = True
+        elif not path.exists() or path.stat().st_size == 0:
+            # File 0 byte không được tính là khôi phục thành công.
+            need_fallback = True
+        else:
+            need_fallback = False
+    finally:
+        # PHẢI nhả lock trước khi gọi restore_unit() — hàm đó cũng lấy cùng lock.
+        lk.release()
+
+    if need_fallback:
+        return restore_unit(store, unit_key) and path.exists() and path.stat().st_size > 0
 
     store.execute(
         "UPDATE archived_units SET last_restored_at=?, "
@@ -279,7 +297,7 @@ def ensure_local(store: Store, path: Path) -> bool:
         (now(), unit_key),
     )
     logger.info("restore file %s từ %s", rel, row["remote_path"])
-    return path.exists()
+    return True
 
 
 def run_archive(

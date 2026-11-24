@@ -47,9 +47,16 @@ def make_brief(client, hdr, approve: bool = True, **over) -> dict:
     """Brief `hard` do tác giả tạo rồi owner duyệt — đường đi thật trên prod."""
     body = {"title": "Test brief", "target_duration_sec": 120,
             "approval_mode": "hard", "critic": "agent-b", **over}
+    # Luật mới: chỉ owner được chỉ định critic. Agent tạo brief rồi owner gọi
+    # /critic — không đưa critic vào body khi creator không phải owner.
+    critic = body.pop("critic", None) if hdr != OWNER else None
     r = client.post("/api/v1/briefs", headers=hdr, json=body)
     assert r.status_code == 201, r.text
     brief = r.json()
+    if critic:
+        c = client.post(f"/api/v1/briefs/{brief['id']}/critic", headers=OWNER,
+                        json={"critic": critic})
+        assert c.status_code == 200, c.text
     if approve and brief["status"] == "draft":
         a = client.post(f"/api/v1/briefs/{brief['id']}/approve", headers=OWNER)
         assert a.status_code == 200, a.text

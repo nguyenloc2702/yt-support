@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def test_archive_keeps_local_when_verify_fails(monkeypatch):
     calls = []
 
     def fake(args, timeout):
-        calls.append(args[0])
+        calls.append(args)
         return (0, "ok") if args[0] == "copy" else (1, "size mismatch")
 
     monkeypatch.setattr(arch, "_run_rclone", fake)
@@ -102,6 +103,9 @@ def test_archive_keeps_local_when_verify_fails(monkeypatch):
 
     assert res["status"] == "verify_failed"
     assert (unit / "artifact.bin").exists(), "verify lỗi mà vẫn xoá local"
+    # Phải so hash thật, không được chỉ so size — size trùng mà nội dung lệch vẫn mất data.
+    check_args = next(args for args in calls if args[0] == "check")
+    assert "--size-only" not in check_args
     assert arch_store().query_one(
         "SELECT 1 FROM archived_units WHERE unit_key=?", ("itm_verify01",)) is None
 
@@ -189,6 +193,71 @@ def test_ensure_local_restores_single_file(monkeypatch):
     row = arch_store().query_one(
         "SELECT restore_count FROM archived_units WHERE unit_key=?", (unit,))
     assert row["restore_count"] == 1
+
+
+def test_ensure_local_replaces_zero_byte_existing_file(monkeypatch):
+    """File 0 byte là restore hỏng — phải kéo lại, không được coi là đã có."""
+    unit = "itm_zero01"
+    arch_store().execute(
+        "INSERT OR REPLACE INTO archived_units (unit_key, remote_path, size_bytes, "
+        "files, archived_at) VALUES (?,?,?,?,?)",
+        (unit, "gdrive:test/" + unit, 5, 1, time.time()))
+    target = data_dir() / "objects" / unit / "f.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"")
+
+    seen = []
+
+    def fake(args, timeout):
+        seen.append(args)
+        Path(args[2]).write_bytes(b"restored")
+        return 0, "ok"
+
+    monkeypatch.setattr(arch, "_run_rclone", fake)
+    assert arch.ensure_local(arch_store(), target) is True
+    assert seen and seen[0][0] == "copyto"
+    assert target.read_bytes() == b"restored"
+
+
+def test_ensure_local_does_not_double_restore_under_concurrency(monkeypatch):
+    """5 request cùng đòi 1 file đã archive thì chỉ được gọi rclone 1 lần."""
+    unit = "itm_racerestore"
+    arch_store().execute(
+        "INSERT OR REPLACE INTO archived_units (unit_key, remote_path, size_bytes, "
+        "files, archived_at) VALUES (?,?,?,?,?)",
+        (unit, "gdrive:test/" + unit, 5, 1, time.time()))
+    target = data_dir() / "objects" / unit / "f.bin"
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake(args, timeout):
+        calls.append(args)
+        started.set()
+        assert release.wait(5), "release không được bật — test bị kẹt"
+        Path(args[2]).parent.mkdir(parents=True, exist_ok=True)
+        Path(args[2]).write_bytes(b"restored")
+        return 0, "ok"
+
+    monkeypatch.setattr(arch, "_run_rclone", fake)
+    done = []
+
+    def worker():
+        done.append(arch.ensure_local(arch_store(), target))
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    assert started.wait(5), "rclone không được gọi"
+    t2.start()
+    time.sleep(0.1)
+    assert not done, "request thứ hai phải đợi lock, không được restore song song"
+    release.set()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert done == [True, True]
+    assert len(calls) == 1, f"rclone copyto phải gọi 1 lần, được {len(calls)}"
 
 
 def test_ensure_local_false_when_restore_fails(monkeypatch):

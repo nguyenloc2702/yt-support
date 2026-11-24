@@ -17,6 +17,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.concurrency import run_in_threadpool
 
 from . import domain
@@ -148,8 +150,8 @@ async def pin_gate(request: Request, call_next):
         return await call_next(request)
     if webauth.request_allowed(request):
         return await call_next(request)
-    return JSONResponse({"detail": "Yêu cầu đăng nhập — nhập mã PIN để tiếp tục"},
-                        status_code=401)
+    return JSONResponse({"detail": "Yêu cầu đăng nhập — nhập mã PIN để tiếp tục",
+                         "code": "pin_required"}, status_code=401)
 
 
 # -- auth: PIN login -----------------------------------------------------------
@@ -1986,6 +1988,16 @@ async def _api_error_handler(request: Request, exc: ApiError):
                         status_code=exc.status_code)
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """422 phải có `code` — contract hứa mọi lỗi đều branch được bằng code."""
+    return JSONResponse({
+        "detail": "Request không hợp lệ (schema).",
+        "code": "validation_error",
+        "errors": jsonable_encoder(exc.errors()),
+    }, status_code=422)
+
+
 @app.exception_handler(sqlite3.OperationalError)
 async def _sqlite_error_handler(request: Request, exc: sqlite3.OperationalError):
     """Lock timeout không được thành 500 — agent cần biết là 'thử lại sau'."""
@@ -2020,6 +2032,11 @@ def create_brief(body: BriefCreate, request: Request = None):
     if body.approval_mode == "calendar" and not body.sensitive and identity != "owner":
         raise ApiError(403, "Chỉ owner được tạo brief calendar (tự duyệt).",
                        "calendar_owner_only")
+    if (body.critic or "").strip() and identity != "owner":
+        raise ApiError(
+            403, "Chỉ owner được chỉ định critic — bỏ qua field này, owner sẽ gọi "
+                 "POST /briefs/{id}/critic sau khi brief được tạo.",
+            "critic_owner_only")
     payload = body.model_dump()
 
     def run() -> dict:

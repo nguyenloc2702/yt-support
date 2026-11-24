@@ -457,9 +457,9 @@ class ScriptDuelService:
             if row["status"] in {"superseded", "stale"}:
                 raise ScriptDuelError("Proposal đã bị thay thế — không quyết được.",
                                       409, "proposal_locked")
-            if row["status"] == "agreed" and decision == "reject":
+            if row["status"] == "agreed":
                 raise ScriptDuelError(
-                    "Proposal đã chốt — không phủ quyết được; tạo brief mới nếu cần.",
+                    "Proposal đã chốt — không quyết lại được; tạo brief/new job nếu cần.",
                     409, "already_agreed")
             try:
                 valid = bool(json.loads(row["validator_json"] or "{}").get("ok"))
@@ -532,20 +532,39 @@ class ScriptDuelService:
 
     # -- internals ----------------------------------------------------------
 
+    def _round_since(self, conn: sqlite3.Connection, brief_id: str) -> float:
+        """Mốc reset quota: lần owner reject gần nhất.
+
+        Nếu không reset, owner reject ở vòng 2 thì author vẫn dính
+        `round_limit_reached` -> không tạo version mới được, chỉ còn cách huỷ brief
+        và mất toàn bộ audit chain.
+        """
+        row = conn.execute(
+            "SELECT COALESCE(MAX(created_at),0) AS ts FROM script_decisions "
+            "WHERE brief_id=? AND decision='reject'", (brief_id,)).fetchone()
+        return float(row["ts"] or 0.0)
+
     def _review_rounds(self, conn: sqlite3.Connection, brief_id: str) -> int:
+        since = self._round_since(conn, brief_id)
         rows = conn.execute(
             "SELECT p.id, p.validator_json, p.status, "
             "(SELECT COUNT(*) FROM script_findings f WHERE f.proposal_id=p.id) AS findings, "
             "(SELECT COUNT(*) FROM script_signatures s WHERE s.proposal_id=p.id) AS sigs "
-            "FROM script_proposals p WHERE p.brief_id=?", (brief_id,)).fetchall()
+            "FROM script_proposals p WHERE p.brief_id=? AND p.created_at>=?",
+            (brief_id, since)).fetchall()
         return self._count_rounds(rows)
 
     def _rounds_used(self, brief_id: str) -> int:
+        dec = self.store.query_one(
+            "SELECT COALESCE(MAX(created_at),0) AS ts FROM script_decisions "
+            "WHERE brief_id=? AND decision='reject'", (brief_id,))
+        since = float(dec["ts"] or 0.0) if dec else 0.0
         rows = self.store.query(
             "SELECT p.id, p.validator_json, p.status, "
             "(SELECT COUNT(*) FROM script_findings f WHERE f.proposal_id=p.id) AS findings, "
             "(SELECT COUNT(*) FROM script_signatures s WHERE s.proposal_id=p.id) AS sigs "
-            "FROM script_proposals p WHERE p.brief_id=?", (brief_id,))
+            "FROM script_proposals p WHERE p.brief_id=? AND p.created_at>=?",
+            (brief_id, since))
         return self._count_rounds(rows)
 
     @staticmethod

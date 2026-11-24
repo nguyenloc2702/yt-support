@@ -19,14 +19,15 @@ curl -X POST "$BASE/api/v1/briefs" -H "Authorization: Bearer $KEY" \
     "target_duration_sec": 780,
     "source_links": ["https://example.com/a", "https://example.com/b"],
     "approval_mode": "objection",
-    "objection_window_sec": 1800,
-    "critic": "agent-b"
+    "objection_window_sec": 1800
   }'
 ```
 
-**`critic` là bắt buộc nếu muốn agent khác review.** Không có `critic` thì mọi chữ ký /
-finding của agent khác trả `409 critic_not_assigned` và brief chỉ còn owner ký được.
-`critic` phải khác người tạo brief (`422 critic_is_author`) — cần người ký đối trọng.
+**`critic` chỉ owner được gán.** Agent bỏ field này khi tạo brief (`403 critic_owner_only`
+nếu cố gán). Sau khi brief được tạo, owner gọi `POST /briefs/{id}/critic` như phần dưới.
+Không có `critic` thì mọi chữ ký / finding của agent khác trả `409 critic_not_assigned`
+và brief chỉ còn owner ký được. `critic` phải khác người tạo brief (`422 critic_is_author`)
+— cần người ký đối trọng.
 
 `approval_mode`:
 - `calendar` → approved ngay (chủ đề đã nằm trong content calendar). **Chỉ owner được tạo**
@@ -192,14 +193,17 @@ curl -X POST "$BASE/api/v1/briefs/$BRIEF/decisions" -H "Authorization: Bearer $O
 | Tự review bài mình | 422 `self_review` |
 | Không phải critic của brief | 403 `not_critic` |
 | Brief chưa set critic | 409 `critic_not_assigned` |
+| Agent tự gán `critic` lúc tạo brief | 403 `critic_owner_only` — bỏ field, báo owner gọi `/critic` |
 | Critic trùng author (lúc tạo brief / set critic) | 422 `critic_is_author` |
 | Critic trùng author (lúc nộp proposal) | 409 `critic_is_author` |
 | Sửa/ký proposal đã agreed/superseded | 409 `proposal_locked` |
-| Owner `reject` proposal đã `agreed` | 409 `already_agreed` |
+| Owner `reject` / `force_agree` proposal đã `agreed` | 409 `already_agreed` |
 | Ký `block` | Proposal `rejected`; author phải tạo version mới |
 | Duyệt/huỷ brief khi trạng thái vừa đổi | 409 `status_race` |
 | Duyệt/huỷ brief sai trạng thái (vd. đã huỷ) | 409 `bad_status` |
 | Không phải owner | 403 `owner_only` / `calendar_owner_only` |
+| Thiếu session/Bearer (bị PIN gate chặn) | 401 `pin_required` |
+| Body sai schema | 422 `validation_error` — đọc `errors` để sửa payload |
 | Reuse `Idempotency-Key` với body khác | 422 `idempotency_key_reused` |
 | Cùng key, request trước còn đang chạy | 409 `idempotency_in_progress` — backoff |
 
@@ -227,7 +231,8 @@ Key bị giữ **trước** khi chạy nghiệp vụ; request lỗi sẽ nhả k
 ## 6. Ví dụ vòng đời tối thiểu
 
 ```
-A: POST /briefs (hard, critic=agent-b)         → brf_x draft
+A: POST /briefs (hard, không gửi critic)       → brf_x draft
+OWNER: POST /briefs/brf_x/critic {agent-b}     → critic = agent-b
 OWNER: POST /briefs/brf_x/approve              → brf_x approved
 A: POST /script-proposals                      → prp_x v1, valid
 B: POST /script-proposals/prp_x/findings       → 2 findings, 1 blocking

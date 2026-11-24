@@ -124,13 +124,13 @@ Idempotency-Key: <chuỗi cố định cho hành động đó>
   "target_duration_sec": 780,
   "language": "vi",
   "source_links": ["https://example.com/a"],
-  "approval_mode": "hard",
-  "critic": "muse-critic"
+  "approval_mode": "hard"
 }
 ```
 
-`201` → object Brief. `critic` bắt buộc nếu muốn agent khác review.
-`critic` trùng `created_by` → `422 critic_is_author`. `calendar` bởi non-owner → `403 calendar_owner_only`.
+`201` → object Brief. **Agent KHÔNG được gửi `critic`** → `403 critic_owner_only`;
+owner gọi endpoint 4.5 để gán. Thiếu critic thì agent khác không ký/finding được.
+Owner gán critic trùng `created_by` → `422 critic_is_author`. `calendar` bởi non-owner → `403 calendar_owner_only`.
 
 ### 4.2 `GET /briefs?status=approved&limit=50` — tìm brief *(read)*
 
@@ -275,14 +275,17 @@ WPM: `en`=150, `vi`=160. `stats` trả `estimated_duration_sec`, `min_shots`, `m
 | `proposal_locked` | 409 | proposal đã agreed/superseded |
 | `proposal_rejected` | 409 | tạo version mới |
 | `critic_not_assigned` | 409 | brief chưa có critic, báo owner |
+| `critic_owner_only` | 403 | agent gửi `critic` khi tạo brief, bỏ field cho owner gán |
 | `critic_is_author` | 409/422 | critic trùng author, báo owner |
-| `already_agreed` | 409 | owner không phủ quyết được bản đã chốt |
+| `already_agreed` | 409 | owner không quyết lại được bản đã chốt |
 | `not_critic` | 403 | không phải brief của bạn, bỏ qua |
 | `self_review` | 422 | không tự review bài mình |
 | `idempotency_key_reused` | 422 | đổi key |
 | `idempotency_in_progress` | 409 | backoff 5–10s, retry 1 lần |
 | `database_busy` | 503 | backoff 5–10s, retry 1 lần |
-| `owner_only` / `calendar_owner_only` | 403 | không phải việc của agent |
+| `owner_only` / `calendar_owner_only` / `critic_owner_only` | 403 | không phải việc của agent |
+| `pin_required` | 401 | thiếu Bearer/session — kiểm tra header |
+| `validation_error` | 422 | đọc field `errors`, sửa payload; **không retry nguyên bản** |
 
 **Retry:** chỉ retry với `version_conflict`, `idempotency_in_progress`, `database_busy`.
 Mọi `409` khác là trạng thái nghiệp vụ — retry vô ích, phải đọc lại state.
