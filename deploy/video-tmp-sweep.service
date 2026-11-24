@@ -1,0 +1,10 @@
+[Unit]
+Description=Don rac build video con sot trong /tmp
+Documentation=https://vidfac.gacdero.vn
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/video-tmp-sweep 2
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=no

@@ -1,0 +1,9 @@
+[Unit]
+Description=Don docker image cu (giu 72h de rollback)
+Documentation=https://vidfac.gacdero.vn
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/docker-disk-prune
+Nice=10
+IOSchedulingClass=idle

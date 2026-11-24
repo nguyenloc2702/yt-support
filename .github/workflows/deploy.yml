@@ -91,4 +91,18 @@ jobs:
               echo "video-system runtime dir not present on this VPS — skipping"
             fi
 
+            echo "=== Disk hygiene: prune docker image cu (>48h, khong container nao dung) ==="
+            # entre-tb build 3-4 image moi ngay (~7.8GB/lan). Khong prune thi moi
+            # deploy cong them chung do cho toi khi day dia (da tung len 96%).
+            # `-a` chi xoa image KHONG duoc container nao dung; `until=48h` giu
+            # ban gan nhat de rollback nhanh.
+            df -h / | tail -1
+            docker image prune -af --filter "until=48h" 2>&1 | tail -3 || true
+            docker builder prune -af --filter "until=48h" 2>&1 | tail -2 || true
+            df -h / | tail -1
+            USED_PCT=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+            if [ "${USED_PCT:-0}" -ge 85 ]; then
+              echo "WARNING: disk da dung ${USED_PCT}% — kiem tra /tmp va data/objects"
+            fi
+
             echo "Deployment completed successfully!"
