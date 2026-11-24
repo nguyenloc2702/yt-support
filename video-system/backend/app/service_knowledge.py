@@ -37,6 +37,12 @@ _IGNORE_DIRS = {
     ".trash", "vendor",
 }
 
+
+def _is_indexable_rel(parts) -> bool:
+    """Dùng CHUNG cho indexer và prune — nếu lệch nhau, API tạo được doc mà
+    sync sau đó xoá mất (vì indexer không bao giờ thấy file để đưa vào `seen`)."""
+    return not any(p in _IGNORE_DIRS or p.startswith(".") for p in parts)
+
 # Chỉ bắt pattern đủ chắc chắn; không redact mọi chuỗi "key" trong tài liệu.
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
@@ -135,6 +141,9 @@ def _clean_rel(rel_path: str) -> str:
     parts = [p for p in raw.split("/") if p]
     if not parts or any(p in {".", ".."} for p in parts):
         raise KnowledgeError("Đường dẫn không được chứa '..'.", 422, "bad_path")
+    if not _is_indexable_rel(parts):
+        raise KnowledgeError("Thư mục này không dùng được cho tài liệu.",
+                             422, "bad_path")
     path = Path(*parts)
     if path.suffix.lower() not in ALLOWED_DOC_EXTS:
         raise KnowledgeError("Chỉ hỗ trợ file .md.", 415, "unsupported_media_type")
@@ -325,9 +334,7 @@ class KnowledgeService:
                 rel_parts = path.relative_to(spec.path).parts
             except ValueError:
                 continue
-            if any(part in _IGNORE_DIRS for part in rel_parts):
-                continue
-            if any(part.startswith(".") for part in rel_parts):
+            if not _is_indexable_rel(rel_parts):
                 continue
             if path.is_symlink() or not path.is_file():
                 continue
@@ -396,10 +403,17 @@ class KnowledgeService:
                         if spec.mode == "rw":
                             sql += " AND deleted_at IS NULL AND trashed_path IS NULL"
                         for row in conn.execute(sql, params).fetchall():
+                            # Bỏ qua path mà indexer có chủ đích không quét —
+                            # nếu không, doc hợp lệ bị prune dù file vẫn còn.
+                            if not _is_indexable_rel(row["rel_path"].split("/")):
+                                continue
                             if row["rel_path"] not in seen:
                                 conn.execute("DELETE FROM knowledge_docs WHERE id=?",
                                              (row["id"],))
                                 if spec.mode == "ro":
+                                    # Với ro: nội dung vẫn có trong git, xoá snapshot.
+                                    # Với rw: snapshot là bản duy nhất còn lại, giữ
+                                    # lại để khôi phục tay nếu agent nhầm xoá file.
                                     conn.execute(
                                         "DELETE FROM knowledge_versions WHERE doc_id=?",
                                         (row["id"],))

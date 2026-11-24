@@ -193,7 +193,7 @@ kế hoạch ban đầu** để người sau không ngạc nhiên.
 | Trang độc lập | `frontend/library.html`, `library.css`, `library.js` |
 | Thư viện vendor | `frontend/vendor/marked.min.js` (12.0.2), `purify.min.js` (3.1.6) |
 | Tài liệu agent | `read_me/09_knowledge_library.md`, `read_me/02_api_contracts.md` §4b |
-| Test | `tests/test_knowledge_{api,search,security,concurrency,regressions}.py` (67 case: 66 pass + 1 skip) |
+| Test | `tests/test_knowledge_{api,search,security,concurrency,regressions}.py` (74 case: 73 pass + 1 skip) |
 
 ### Bốn chỗ sửa so với kế hoạch
 
@@ -227,7 +227,7 @@ rate limit, backup `data/knowledge/` lên Drive.
 ### Audit sau deploy lần 1 (4 subagent, 2026-11-24)
 
 Bốn subagent độc lập (code review / prod live / QA acceptance / red-team) vào test sau khi
-deploy `3143c45`. Kết quả: **6 lỗi thật** đã sửa trong cùng ngày, kèm 17 regression test.
+deploy `3143c45`. Kết quả: **6 lỗi thật** đã sửa trong cùng ngày, kèm 25 regression test.
 
 | Lỗi | Mức | Hệ quả |
 |---|---|---|
@@ -245,3 +245,9 @@ Ngoài ra: path chứa `\r`/`\n`/NUL hoặc dài >180 trả 500 thay vì 422 →
 Sửa drift tài liệu/UI: bỏ filter `status=reviewed` (không phải status thật), sửa claim "nút
 xoá chỉ hiện với owner" (backend mới là nơi enforce), bổ sung error code còn thiếu, làm rõ
 "không CDN" chỉ áp cho JS.
+
+**Thêm sau lần review bản vá (cùng subagent):** rw prune ban đầu xoá nhầm doc hợp lệ nếu
+path nằm trong thư mục indexer bỏ qua (`assets/`, `data/`, `logs/`, `vendor/`, `frontend/`,
+`.trash`, hoặc bắt đầu bằng `.`). API tạo được 201 rồi sync kế tiếp xoá row → 404. Giờ
+`_is_indexable_rel()` là nguồn rule duy nhất cho cả indexer, `_clean_rel` và prune.
+8 case bổ sung (tổng 25 regression test).

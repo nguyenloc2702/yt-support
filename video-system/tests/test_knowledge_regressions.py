@@ -173,3 +173,27 @@ def test_trashed_rows_survive_prune_and_restore(client, ingest, admin, read_key,
                       headers=read_key).status_code == 410
     assert owner.post(f"/api/v1/knowledge/docs/{doc_id}/restore",
                       headers=admin).status_code == 200
+
+
+@pytest.mark.parametrize("path", [
+    "assets/x.md", "data/x.md", "logs/x.md", "vendor/x.md",
+    "frontend/x.md", ".hidden/x.md", ".trash/x.md",
+])
+def test_indexer_skipped_dirs_are_rejected_on_write(client, ingest, knowledge_env, path):
+    """Regression của regression: rw prune và indexer phải dùng chung rule.
+
+    Nếu API cho tạo `assets/x.md` mà indexer bỏ qua `assets/`, sync kế tiếp
+    sẽ thấy path không có trong `seen` và xoá row — doc 201 rồi 404.
+    """
+    r = client.post("/api/v1/knowledge/docs", headers=ingest,
+                    json={"source": "library", "path": path, "content": "# x\n"})
+    assert r.status_code == 422, (path, r.text)
+    assert r.json()["code"] == "bad_path"
+
+
+def test_valid_doc_is_not_pruned_by_sync(client, ingest, read_key, admin, knowledge_env):
+    doc = _create(client, ingest, "notes/keep.md", "# Keep\nNội dung.\n")
+    client.post("/api/v1/knowledge/sync", headers=admin)
+    r = client.get(f"/api/v1/knowledge/docs/{doc['id']}", headers=read_key)
+    assert r.status_code == 200, r.text
+    assert r.json()["content"] == "# Keep\nNội dung.\n"

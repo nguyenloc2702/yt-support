@@ -307,5 +307,6 @@ allowlist để tải được CSS/JS trước khi đăng nhập).
 | `PUT` không kèm `If-Match` | Ghi mù, đè mất bài người khác | Đọc lấy ETag trước |
 | Retry y nguyên sau `412` | Sẽ ghi đè thay đổi của người khác | Đọc lại, hợp nhất, ghi lại |
 | Ghi token thật vào tài liệu | Bị chặn `422`, và nếu lọt thì bị che khi đọc | Dùng `sk-REPLACE_ME` |
+| Đặt file vào `assets/`, `data/`, `logs/`, `vendor/`, `frontend/` hoặc thư mục bắt đầu bằng `.` | Indexer có chủ đích bỏ qua các thư mục này — file tạo ra sẽ bị sync prune ngay | Đặt ở `notes/`, `ops/`, `arch/`, `forks/` |
 | Xoá cả cây `data/knowledge/` để "dọn" | Mất `.trash` + lịch sử version | Dùng `DELETE` từng tài liệu |
 | Dùng library thay git cho code | Library không có diff/branch/PR | Git cho code, library cho tri thức vận hành |
