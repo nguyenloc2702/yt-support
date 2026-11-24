@@ -251,3 +251,23 @@ path nằm trong thư mục indexer bỏ qua (`assets/`, `data/`, `logs/`, `vend
 `.trash`, hoặc bắt đầu bằng `.`). API tạo được 201 rồi sync kế tiếp xoá row → 404. Giờ
 `_is_indexable_rel()` là nguồn rule duy nhất cho cả indexer, `_clean_rel` và prune.
 8 case bổ sung (tổng 25 regression test).
+
+### Contract agent-facing (2026-11-24)
+
+Owner yêu cầu "contract để đưa cho agent coi". Thêm `video-system/KNOWLEDGE_AGENT_CONTRACT.md`
+— **một file duy nhất** chứa đủ thứ agent cần, phục vụ qua
+`GET /api/v1/knowledge/contract?format=raw` (JSON index nếu bỏ `format`). Cùng mô hình với
+`/api/v1/agent-guide`: auth scope `read`, file thiếu thì 404 chứ không trả placeholder cho
+agent chạy tiếp trên bản cũ.
+
+Nội dung: 6 luật cứng, decision tree (đọc → fork/append/PUT), 16 endpoint + scope, object
+shape, giao thức ETag, bảng phản xạ 14 lỗi, quy tắc path/secret/version/trash, 4 lệnh
+copy-paste, bảng "không làm". Không thay `read_me/09_knowledge_library.md` — file đó là
+giải thích chi tiết; contract là bản rút gọn để dán thẳng vào prompt agent.
+
+Sửa drift nhân dịp này: `09` §8 từng nói `prune_missing` chỉ áp cho source `ro` — sai sau
+bản vá `eb2750f`. Giờ ghi đúng: prune cả `rw` (nếu không, `DELETE /read-me/x.md` để lại row
+ma), trừ row có `trashed_path`; snapshot `ro` bị xoá, snapshot `rw` được giữ.
+
+Test: 7 case đối chiếu contract ↔ route đăng ký ↔ mã lỗi trong code — contract quảng cáo
+route không tồn tại thì fail. Full suite **356 passed, 1 skipped**, ruff clean.

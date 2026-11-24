@@ -73,9 +73,12 @@
 > FS là source of truth; DB chỉ là index + version + audit. Đọc `/read_me/09_knowledge_library.md`
 > trước khi dùng — contract dưới đây chỉ là bảng tra cứu nhanh.
 > **Endpoint `/api/v1/read-me` ở mục 4 vẫn giữ nguyên**, không bị thay thế.
+> Contract gọn, tự đọc được qua URL cho agent: `GET /api/v1/knowledge/contract?format=raw`
+> (JSON index khi không có `?format=raw`). Nguồn: `KNOWLEDGE_AGENT_CONTRACT.md`.
 
 | Method | Endpoint | Scope | Mô tả |
 |---|---|---|---|
+| `GET` | `/api/v1/knowledge/contract` | `read` | Contract agent-facing; `?format=raw` → Markdown thuần |
 | `GET` | `/api/v1/knowledge/sources` | `read` | Danh sách source (`alias`, `path`, `mode` `rw`/`ro`, `doc_count`) |
 | `GET` | `/api/v1/knowledge/docs?q=&source=&category=&status=&tag=&limit=&offset=` | `read` | Liệt kê / tìm kiếm (`limit` mặc định 50, trần 200) |
 | `GET` | `/api/v1/knowledge/stats` | `read` | Tổng số, dung lượng, theo source/status, nhóm trùng lặp |

@@ -2842,6 +2842,73 @@ def delete_read_me_doc(doc_path: str, request: Request = None):
 # FS là source of truth; API này index repo docs read-only và cho ghi trong
 # data/knowledge/ + read_me/ legacy. `/api/v1/read-me` phía trên vẫn giữ nguyên.
 
+@app.get("/api/v1/knowledge/contract")
+def knowledge_contract(format: str | None = None, request: Request = None):
+    """Hợp đồng agent-facing — cùng mô hình với `/api/v1/agent-guide`.
+
+    Agent chỉ cần một URL để có toàn bộ contract thay vì phải biết đọc 2 file
+    read_me. File thiếu là lỗi vận hành: fail loud, không trả placeholder để
+    agent chạy tiếp trên một bản cũ.
+    """
+    auth.require(request, "read")
+    contract_path = Path(__file__).resolve().parents[2] / "KNOWLEDGE_AGENT_CONTRACT.md"
+    if not contract_path.exists():
+        raise HTTPException(status_code=404, detail="Knowledge contract file missing on server")
+    content = contract_path.read_text(encoding="utf-8")
+
+    accept = request.headers.get("accept", "") if request else ""
+    fmt = (format or "").strip().lower()
+    if (fmt in {"raw", "markdown", "md", "text"}
+            or "text/markdown" in accept or "text/plain" in accept):
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(content, media_type="text/markdown")
+
+    return {
+        "title": "Knowledge Agent Contract",
+        "version": "1.0",
+        "raw_contract_url": "/api/v1/knowledge/contract?format=raw",
+        "web_url": "/library",
+        "production_base_url": "https://vidfac.gacdero.vn",
+        "auth": {"header": "Authorization: Bearer <KEY>", "minimum_scope": "read"},
+        "workflow": [
+            "GET /api/v1/knowledge/docs?q=... trước khi hỏi người",
+            "read_only=true -> POST /docs/{id}/fork roi sua ban fork",
+            "them log -> PATCH mode=append (khong can If-Match)",
+            "doi noi dung -> GET lay ETag -> PUT/PATCH + If-Match",
+            "412 -> doc lai, hop nhat, ghi lai (khong retry nguyen)",
+            "xoa/publish/restore -> nho owner (API key khong du quyen)",
+        ],
+        "endpoints": [
+            {"method": "GET", "path": "/api/v1/knowledge/contract", "scope": "read"},
+            {"method": "GET", "path": "/api/v1/knowledge/sources", "scope": "read"},
+            {"method": "GET", "path": "/api/v1/knowledge/docs", "scope": "read"},
+            {"method": "GET", "path": "/api/v1/knowledge/stats", "scope": "read"},
+            {"method": "GET", "path": "/api/v1/knowledge/docs/{id}", "scope": "read"},
+            {"method": "GET", "path": "/api/v1/knowledge/docs/{id}/raw", "scope": "read"},
+            {"method": "GET", "path": "/api/v1/knowledge/docs/{id}/versions", "scope": "read"},
+            {"method": "POST", "path": "/api/v1/knowledge/docs", "scope": "ingest"},
+            {"method": "POST", "path": "/api/v1/knowledge/docs/{id}/fork", "scope": "ingest"},
+            {"method": "PUT", "path": "/api/v1/knowledge/docs/{id}", "scope": "ingest"},
+            {"method": "PATCH", "path": "/api/v1/knowledge/docs/{id}", "scope": "ingest"},
+            {"method": "DELETE", "path": "/api/v1/knowledge/docs/{id}", "scope": "owner"},
+            {"method": "POST", "path": "/api/v1/knowledge/docs/{id}/restore", "scope": "owner"},
+            {"method": "POST", "path": "/api/v1/knowledge/docs/{id}/versions/{n}/restore", "scope": "owner"},
+            {"method": "POST", "path": "/api/v1/knowledge/docs/{id}/publish", "scope": "owner"},
+            {"method": "POST", "path": "/api/v1/knowledge/sync", "scope": "admin"},
+        ],
+        "error_reflex": {
+            "403 read_only": "POST /docs/{id}/fork",
+            "403 owner_only": "stop and ask owner",
+            "410 doc_trashed": "POST /docs/{id}/restore (owner only)",
+            "412 hash_mismatch": "re-read, merge, write again — never blind retry",
+            "422 secret_detected": "replace token with placeholder",
+            "428 missing_if_match": "GET doc, copy ETag, retry with If-Match",
+        },
+        "full_guide": "read_me/09_knowledge_library.md",
+        "endpoint_table": "read_me/02_api_contracts.md section 4b",
+    }
+
+
 @app.get("/api/v1/knowledge/sources")
 def knowledge_sources(request: Request = None):
     auth.require(request, "read")

@@ -3,6 +3,9 @@
 > Kho tổng hợp **tất cả** tài liệu Markdown của hệ thống, đọc được trên web và qua API.
 > Đây là nơi agent tra cứu trước khi hỏi người, và là nơi ghi lại tri thức mới.
 > Bảng endpoint đầy đủ: `read_me/02_api_contracts.md` mục **4b**.
+> **Contract gọn cho agent (có URL riêng):** `KNOWLEDGE_AGENT_CONTRACT.md` →
+> `GET /api/v1/knowledge/contract?format=raw`. Nếu chỉ được đưa một tài liệu cho agent mới,
+> hãy đưa cái này — file này là guide giải thích chi tiết.
 
 ---
 
@@ -237,8 +240,11 @@ curl -sX POST "$BASE/api/v1/knowledge/sync" -H "Authorization: Bearer $ADMIN_KEY
 
 - File agent ghi thẳng bằng shell/`PATCH /read-me` cũng được index ở lần sync kế tiếp —
   không cần gọi API library để "đăng ký".
-- `prune_missing` (mặc định `true`) chỉ xoá row của source **`ro`** khi file biến mất.
-  Row `rw` không bị xoá tự động (tránh mất lịch sử khi ai đó `mv` file).
+- `prune_missing` (mặc định `true`) xoá row khi file biến mất — áp dụng **cả source `rw`**
+  (nếu không, `DELETE /read-me/x.md` legacy để lại row ma: list hiện, mở thì 404).
+  Ngoại lệ: row đã xoá mềm qua knowledge API (có `trashed_path`) được giữ để `/restore`.
+  Với source `ro`, snapshot version bị xoá cùng row (nội dung vẫn có trong git); với `rw`,
+  snapshot được giữ lại làm bản cuối cùng để khôi phục tay.
 
 ### Biến môi trường
 
