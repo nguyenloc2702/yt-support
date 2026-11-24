@@ -88,3 +88,51 @@ sudo systemctl daemon-reload && sudo systemctl enable --now vidfac-caddy-guard.t
 
 **Sửa tận gốc:** thêm block này vào repo `entre-tb`. Guard chỉ là lưới an toàn —
 nếu repo `entre-tb` có block thì guard không làm gì cả.
+
+## Archive lên Google Drive + backup DB
+
+Hai tầng lưu trữ, không phải "đẩy hết lên Drive":
+
+| Tầng | Nơi lưu | Dùng cho |
+|---|---|---|
+| Nóng | `data/objects` trên VPS | File đang được phục vụ — `FileResponse` cần file local, seek liên tục |
+| Lạnh | `gdrive:video_system_assets/<unit>` | Unit cũ, chỉ tải lại khi có người thực sự mở |
+
+**Vì sao không mount Drive làm filesystem:** FUSE thêm 100–300 ms mỗi lần đọc; video
+player seek liên tục nên mỗi range request thành một round-trip mạng. Đo thực tế
+upload VPS → Drive chỉ **97 KiB/s** (do rclone dùng client_id mặc định bị Google
+rate-limit 403; băng thông VPS thật là 2.5 MB/s).
+
+### `video-archive.timer` — 04:40 hằng ngày
+
+Đơn vị archive là một **unit** dưới `data/objects`: `itm_*` hoặc `shorts/sho_*`.
+Chỉ archive unit có file mới nhất cũ hơn `--days` (mặc định 14). Quy trình:
+
+1. `rclone copy` unit → `gdrive:video_system_assets/<unit>`
+2. `rclone check --one-way --size-only` — **không khớp thì KHÔNG xoá local**
+3. Xoá local, ghi vào bảng `archived_units`
+
+Khi có request cho file đã archive, `ensure_local()` tự `rclone copyto` **đúng file
+đó** về (không kéo cả unit), nên mở 1 subtitle 2 KB không phải chờ tải 300 MB.
+
+Chạy tay / xem trước:
+
+```bash
+cd /opt/video-system
+.venv/bin/python -m backend.app.service_archive --days 14 --dry-run
+.venv/bin/python -m backend.app.service_archive --days 7 --limit 2
+```
+
+### `video-dbbackup.timer` — 02:40 hằng ngày
+
+DB là thứ duy nhất không dựng lại được từ code. Dùng API `sqlite3.Connection.backup()`
+(không copy file) vì DB đang chạy ở WAL — copy thô sẽ ra bản không nhất quán.
+Snapshot được `PRAGMA integrity_check` trước khi upload; giữ 14 bản gần nhất trên
+`gdrive:video_system_backups/db/`.
+
+`.env` **không** được đưa lên Drive (chứa API key). Config yaml thì có.
+
+```bash
+.venv/bin/python -m backend.app.service_dbbackup --dry-run
+.venv/bin/python -m backend.app.service_dbbackup --list
+```

@@ -1,0 +1,13 @@
+[Unit]
+Description=Backup DB SQLite len Google Drive
+Documentation=https://vidfac.gacdero.vn
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/video-system
+EnvironmentFile=/opt/video-system/.env
+ExecStart=/opt/video-system/.venv/bin/python -m backend.app.service_dbbackup --keep-days 14
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1h

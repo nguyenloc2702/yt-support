@@ -1984,6 +1984,19 @@ class TodoService:
 
     # -- Asset File Path Resolution ------------------------------------------
 
+    def _ensure_local(self, p: Path) -> Path:
+        """Kéo file từ Drive nếu unit đã archive; không đổi gì khi file có sẵn.
+
+        Nuốt lỗi: archive/restore là tối ưu dung lượng, không được phép làm sập
+        endpoint đang phục vụ item bình thường.
+        """
+        try:
+            from .service_archive import ensure_local
+            ensure_local(self.store, p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ensure_local lỗi cho %s: %s", p, exc)
+        return p
+
     def resolve_audio_path(self, item_id: str) -> Path:
         item = self.items.get(item_id)
         if not item:
@@ -1991,7 +2004,8 @@ class TodoService:
         if item.get("audio_asset_id"):
             ast = self.store.query_one("SELECT storage_key FROM assets WHERE id=?", (item["audio_asset_id"],))
             if ast:
-                p = data_dir() / "objects" / ast["storage_key"].removeprefix("items/")
+                p = self._ensure_local(
+                    data_dir() / "objects" / ast["storage_key"].removeprefix("items/"))
                 if p.exists():
                     return p
         # Fallback paths
@@ -2000,12 +2014,14 @@ class TodoService:
             data_dir() / "objects" / item_id / "imports" / "audio.bin",
             data_dir() / "objects" / item_id / "seed_audio.wav",
         ]:
+            cand = self._ensure_local(cand)
             if cand.exists():
                 return cand
         raise FileNotFoundError(f"Audio file not found for item {item_id}")
 
     def resolve_script_path(self, item_id: str) -> Path:
-        p = data_dir() / "objects" / item_id / "todo" / "script_en.json"
+        p = self._ensure_local(
+            data_dir() / "objects" / item_id / "todo" / "script_en.json")
         if p.exists():
             return p
         # Dynamically materialize from DB if item was created via legacy import
@@ -2024,7 +2040,8 @@ class TodoService:
 
     def resolve_subtitle_path(self, item_id: str, fmt: str = "srt") -> Path:
         ext = "ass" if fmt == "ass" else "srt"
-        p = data_dir() / "objects" / item_id / "todo" / f"subtitles_en.{ext}"
+        p = self._ensure_local(
+            data_dir() / "objects" / item_id / "todo" / f"subtitles_en.{ext}")
         if p.exists():
             return p
         from .pipeline_en.audio_generator_en import write_subtitles_en
@@ -2048,7 +2065,8 @@ class TodoService:
         )
         if not row:
             raise KeyError(f"seq_num {seq_num} not found")
-        p = data_dir() / "objects" / item_id / "videos" / f"seq_{int(seq_num):04d}.mp4"
+        p = self._ensure_local(
+            data_dir() / "objects" / item_id / "videos" / f"seq_{int(seq_num):04d}.mp4")
         if not p.exists():
             raise FileNotFoundError(f"Video file not found on disk: {p}")
         return p
@@ -2057,7 +2075,8 @@ class TodoService:
         item = self.items.get(item_id)
         if not item or item["status"] == "deleted":
             raise KeyError(item_id)
-        p = data_dir() / "objects" / item_id / "exports" / "final_en.mp4"
+        p = self._ensure_local(
+            data_dir() / "objects" / item_id / "exports" / "final_en.mp4")
         if not p.exists():
             raise FileNotFoundError(f"Final video not yet assembled for item {item_id}")
         return p

@@ -1254,6 +1254,15 @@ class ShortService:
         return self.get(short_id)
 
     # ------------------------------------------------------------------ files
+    def _ensure_local(self, p: Path) -> Path:
+        """Kéo file từ Drive nếu unit đã archive; không đổi gì khi file có sẵn."""
+        try:
+            from .service_archive import ensure_local
+            ensure_local(self.store, p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ensure_local lỗi cho %s: %s", p, exc)
+        return p
+
     def _resolve(self, short_id: str, asset_col: str) -> Path:
         row = self.store.query_one(f"SELECT {asset_col} FROM shorts WHERE id=?", (short_id,))
         if not row or not row[asset_col]:
@@ -1262,7 +1271,7 @@ class ShortService:
                                    (row[asset_col],))
         if not ast:
             raise FileNotFoundError("Asset row không tồn tại.")
-        p = data_dir() / "objects" / ast["storage_key"]
+        p = self._ensure_local(data_dir() / "objects" / ast["storage_key"])
         if not p.exists():
             raise FileNotFoundError(f"File artifact không tồn tại: {p}")
         return p
@@ -1297,6 +1306,7 @@ class ShortService:
         if not ast:
             raise KeyError(short_id)
         p = data_dir() / "objects" / ast["storage_key"]
+        self._ensure_local(p)
         if not p.exists():
             raise FileNotFoundError(f"File clip không tồn tại: {p}")
         return p
@@ -1314,6 +1324,7 @@ class ShortService:
                                        (row["image_asset_id"],))
             if ast:
                 p = data_dir() / "objects" / ast["storage_key"]
+                self._ensure_local(p)
                 if p.exists():
                     return p
         if row["bank_used"]:

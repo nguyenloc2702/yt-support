@@ -1,0 +1,13 @@
+[Unit]
+Description=Archive unit cu trong data/objects len Google Drive
+Documentation=https://vidfac.gacdero.vn
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/video-system
+EnvironmentFile=/opt/video-system/.env
+ExecStart=/opt/video-system/.venv/bin/python -m backend.app.service_archive --days 14 --limit 5
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=8h

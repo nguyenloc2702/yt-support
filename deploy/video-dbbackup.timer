@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup DB len Drive moi ngay luc 02:40
+
+[Timer]
+OnCalendar=*-*-* 02:40:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

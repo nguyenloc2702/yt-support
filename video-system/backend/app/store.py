@@ -480,6 +480,15 @@ CREATE TABLE IF NOT EXISTS script_decisions (
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_brief ON script_decisions(brief_id, created_at);
+CREATE TABLE IF NOT EXISTS archived_units (
+  unit_key TEXT PRIMARY KEY,            -- "itm_xxx" hoặc "shorts/sho_xxx"
+  remote_path TEXT NOT NULL,            -- gdrive:video_system_assets/...
+  size_bytes INTEGER,
+  files INTEGER,
+  archived_at REAL,
+  last_restored_at REAL,
+  restore_count INTEGER DEFAULT 0
+);
 """
 
 _ITEM_MIGRATION_COLS = [
