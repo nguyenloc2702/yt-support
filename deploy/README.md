@@ -63,3 +63,28 @@ Log: `/var/log/video-tmp-sweep.log`, `/var/log/docker-disk-prune.log`.
 
 **Không dùng `/tmp` để chứa thành phẩm** — hệ điều hành tự xoá khi reboot.
 Video final phải nằm trong `data/exports/` hoặc `data/objects/`.
+
+## vidfac.gacdero.vn đi qua Caddy của project `entre-tb` (dễ vỡ)
+
+`video-system` chạy bằng systemd trên host, bind `0.0.0.0:8090`. TLS cho
+`vidfac.gacdero.vn` **không** do nginx (đang `inactive`, disabled) mà do container
+`entre-tb-prod-caddy-1`, đọc `/opt/entre-tb/infra/caddy/Caddyfile` (bind mount
+read-only từ repo khác).
+
+Caddy chỉ đọc file lúc **khởi động**. Vì vậy nếu block `vidfac` bị xoá khỏi file
+mà container chưa restart, mọi thứ vẫn chạy bình thường — sự cố chỉ lộ ra khi
+container restart, lúc đó HTTPS của vidfac chết (`alert 80` trong TLS handshake).
+Đúng chuyện này đã xảy ra ngày 2026-11-24.
+
+`vidfac-caddy-guard.timer` (5 phút/lần) kiểm tra và tự thêm lại block nếu thiếu,
+rồi reload Caddy (graceful, không downtime site khác). Upstream lấy gateway của
+network `entre-tb-prod_frontend` tại thời điểm chạy, không hardcode.
+
+```bash
+sudo install -m 755 deploy/vidfac-caddy-guard.sh /usr/local/bin/
+sudo install -m 644 deploy/vidfac-caddy-guard.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now vidfac-caddy-guard.timer
+```
+
+**Sửa tận gốc:** thêm block này vào repo `entre-tb`. Guard chỉ là lưới an toàn —
+nếu repo `entre-tb` có block thì guard không làm gì cả.

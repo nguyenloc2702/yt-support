@@ -1,0 +1,8 @@
+[Unit]
+Description=Bao dam block vidfac.gacdero.vn con trong Caddyfile cua entre-tb
+Documentation=https://vidfac.gacdero.vn
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vidfac-caddy-guard
+Nice=10
