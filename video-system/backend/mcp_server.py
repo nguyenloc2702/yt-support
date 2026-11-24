@@ -5,8 +5,11 @@ Chạy: ``python -m backend.mcp_server`` (transport stdio).
 Cấu hình qua env, đọc tại thời điểm gọi (test monkeypatch được):
 
 - ``VIDFAC_BASE_URL``  — mặc định ``http://127.0.0.1:8090``
-- ``VIDFAC_API_KEY``   — bắt buộc; thiếu thì tool trả lỗi rõ ràng
+- ``VIDFAC_API_KEY``   — key cho writer / critic / read
+- ``VIDFAC_PIN``       — PIN 6 số cho process owner (đăng nhập session cookie)
 - ``VIDFAC_TIMEOUT``   — mặc định 20 giây
+
+Một process chỉ nên dùng **một** cách: key hoặc PIN.
 """
 from __future__ import annotations
 
@@ -43,16 +46,17 @@ _CLIENT: VidfacClient | None = None
 _TRANSPORT: httpx.BaseTransport | None = None
 
 
-def _settings() -> tuple[str, str, float]:
+def _settings() -> tuple[str, str, str, float]:
     """Đọc env tại thời điểm gọi — không cache để test đổi env là ăn ngay."""
     base = os.environ.get("VIDFAC_BASE_URL", DEFAULT_BASE_URL).strip()
     key = os.environ.get("VIDFAC_API_KEY", "").strip()
+    pin = os.environ.get("VIDFAC_PIN", "").strip()
     raw_timeout = os.environ.get("VIDFAC_TIMEOUT", "").strip()
     try:
         timeout = float(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT
     except ValueError:
         timeout = DEFAULT_TIMEOUT
-    return (base or DEFAULT_BASE_URL), key, timeout
+    return (base or DEFAULT_BASE_URL), key, pin, timeout
 
 
 class VidfacClient:
@@ -61,19 +65,40 @@ class VidfacClient:
     ``base_url`` có thể là host hoặc base API; nếu chưa kết thúc bằng
     ``/api/v1`` thì tự thêm, nhờ vậy default ``http://127.0.0.1:8090``
     vẫn gọi đúng route.
+
+    ``api_key`` dùng Bearer; ``pin`` đăng nhập một lần lấy session cookie
+    (identity ``owner``). Một client chỉ nên dùng một trong hai.
     """
 
     def __init__(self, base_url: str, api_key: str, transport=None,
-                 timeout: float = DEFAULT_TIMEOUT):
+                 timeout: float = DEFAULT_TIMEOUT, pin: str | None = None):
         base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         if not base.endswith(API_PREFIX):
             base += API_PREFIX
         self.base_url = base
         self._api_key = api_key
+        self._has_pin = bool(pin)
         kwargs: dict = {"base_url": base, "timeout": timeout}
         if transport is not None:
             kwargs["transport"] = transport
         self._client = httpx.Client(**kwargs)
+        if pin:
+            try:
+                self._login(pin)
+            except ToolError:
+                self._client.close()
+                raise
+
+    def _login(self, pin: str) -> None:
+        """Đăng nhập PIN một lần; httpx.Client tự giữ Set-Cookie."""
+        try:
+            resp = self._client.post("/auth/login", json={"pin": pin})
+        except httpx.HTTPError as exc:
+            raise ToolError(
+                f"PIN login failed: {type(exc).__name__}") from None
+        if resp.status_code >= 400:
+            # Không đưa PIN vào message.
+            raise ToolError(f"HTTP {resp.status_code}: PIN login failed")
 
     def close(self) -> None:
         self._client.close()
@@ -84,15 +109,16 @@ class VidfacClient:
         Body 2xx không phải JSON object được bọc thành ``{"raw": body}`` để tool
         luôn trả ``dict`` đúng annotation.
 
-        Không bao giờ đưa API key vào message hay log.
+        Có key → Bearer; chỉ có PIN → dựa vào cookie session.
+        Không bao giờ đưa API key/PIN vào message hay log.
         """
-        if not self._api_key:
+        merged = {"Content-Type": "application/json"}
+        if self._api_key:
+            merged["Authorization"] = f"Bearer {self._api_key}"
+        elif not self._has_pin:
             raise ToolError(
-                "Thiếu VIDFAC_API_KEY — đặt biến môi trường trước khi gọi tool.")
-        merged = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+                "Thiếu VIDFAC_API_KEY hoặc VIDFAC_PIN — đặt một trong hai "
+                "biến môi trường trước khi gọi tool.")
         if headers:
             merged.update(headers)
         try:
@@ -119,11 +145,13 @@ def _client() -> VidfacClient:
     """Client theo env hiện tại; test có thể monkeypatch ``_CLIENT``."""
     if _CLIENT is not None:
         return _CLIENT
-    base, key, timeout = _settings()
-    if not key:
+    base, key, pin, timeout = _settings()
+    if not key and not pin:
         raise ToolError(
-            "Thiếu VIDFAC_API_KEY — đặt biến môi trường này trước khi gọi tool.")
-    return VidfacClient(base, key, transport=_TRANSPORT, timeout=timeout)
+            "Thiếu VIDFAC_API_KEY hoặc VIDFAC_PIN — đặt một trong hai biến "
+            "môi trường này trước khi gọi tool.")
+    return VidfacClient(base, key, transport=_TRANSPORT, timeout=timeout,
+                        pin=pin)
 
 
 def _request(method: str, path: str, json=None, headers=None):

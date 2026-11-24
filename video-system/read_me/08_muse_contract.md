@@ -356,6 +356,8 @@ Mỗi lượt làm ĐÚNG 1 việc:
 - **MCP bridge** — 9 tool có schema bọc đúng các endpoint ở mục 4, chạy bằng
   `python -m backend.mcp_server` (stdio, agent client tự spawn). Config client,
   bảng tool, chọn key và xử lý lỗi: xem `read_me/10_mcp_agent_bridge.md`.
+  Process owner dùng `VIDFAC_PIN` (PIN 6 số) để đăng nhập session, **không cần key
+  `owner`** — prod không có key nào mang identity `owner`.
 - **Webhook** — đăng ký `POST /api/v1/webhooks` (admin) với
   `{url, events, secret?, item_id?}`. Event `agreement.next_action_changed` phát
   khi `next_action` đổi (xem mục 8). Receiver phải verify `X-Signature`

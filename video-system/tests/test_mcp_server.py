@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from backend import mcp_server
+from backend.app.config import web_pin
 from script_helpers import agents  # noqa: F401 — fixture dùng chung
 from script_helpers import make_shots
 
@@ -221,12 +222,70 @@ def test_412_hash_mismatch_maps_to_tool_error(
 
 def test_missing_api_key_is_clear_and_does_not_crash(monkeypatch):
     monkeypatch.delenv("VIDFAC_API_KEY", raising=False)
+    monkeypatch.delenv("VIDFAC_PIN", raising=False)
     monkeypatch.setattr(mcp_server, "_CLIENT", None)
 
     with pytest.raises(mcp_server.ToolError) as err:
         mcp_server.knowledge_search("x")
 
-    assert "VIDFAC_API_KEY" in str(err.value)
+    msg = str(err.value)
+    assert "VIDFAC_API_KEY" in msg
+    assert "VIDFAC_PIN" in msg
+
+
+def test_pin_login_grants_owner_identity(transport, monkeypatch):
+    """PIN login lấy session cookie → identity owner, không cần key `owner`."""
+    rec = _RecordingTransport(transport)
+    owner = mcp_server.VidfacClient(
+        "http://test", "", pin=web_pin(), transport=rec)
+    assert owner._client.cookies.get("vs_session")
+    monkeypatch.setattr(mcp_server, "_CLIENT", owner)
+
+    brief = mcp_server.brief_create(
+        "PIN owner brief", target_duration_sec=120)
+    assert brief["created_by"] == "owner"
+
+    assigned = mcp_server.brief_assign_critic(brief["id"], "agent-b")
+    assert assigned["critic"] == "agent-b"
+
+    approved = mcp_server.brief_approve(brief["id"])
+    assert approved["id"] == brief["id"]
+    assert approved["status"] == "approved"
+
+    # Request owner đi bằng cookie, không bằng Bearer.
+    last = rec.requests[-1]
+    assert "authorization" not in last.headers
+    assert "vs_session=" in last.headers["cookie"]
+
+
+def test_wrong_pin_raises_toolerror(transport):
+    wrong = "000001" if web_pin() != "000001" else "000002"
+
+    with pytest.raises(mcp_server.ToolError) as err:
+        mcp_server.VidfacClient(
+            "http://test", "", pin=wrong, transport=transport)
+
+    msg = str(err.value)
+    assert "HTTP 401" in msg
+    assert "PIN login failed" in msg
+    assert wrong not in msg
+
+
+def test_no_key_no_pin_raises(transport, monkeypatch):
+    monkeypatch.delenv("VIDFAC_API_KEY", raising=False)
+    monkeypatch.delenv("VIDFAC_PIN", raising=False)
+    client = mcp_server.VidfacClient("http://test", "", transport=transport)
+
+    with pytest.raises(mcp_server.ToolError) as err:
+        client.request("GET", "/knowledge/docs")
+
+    msg = str(err.value)
+    assert "VIDFAC_API_KEY" in msg
+    assert "VIDFAC_PIN" in msg
+
+    # Đường tool cũng phải fail-closed, không crash process.
+    with pytest.raises(mcp_server.ToolError):
+        mcp_server.knowledge_search("x")
 
 
 class _PlainTextTransport(httpx.BaseTransport):

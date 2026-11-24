@@ -11,7 +11,8 @@ URL, tự nhớ scope, tự đoán field. Dễ sai và khó kiểm.
 
 MCP bridge bọc 9 thao tác thường dùng thành **tool có schema**. Agent client khai báo
 server một lần, sau đó gọi tool bằng tên + JSON arguments; bridge tự thêm
-`Authorization`, tự thêm `/api/v1`, tự sinh `Idempotency-Key` khi thiếu.
+`Authorization` (khi dùng key) hoặc session cookie (khi dùng PIN), tự thêm `/api/v1`,
+tự sinh `Idempotency-Key` khi thiếu.
 
 Bridge **không thay đổi** hợp đồng API. Nó chỉ là lớp gọi HTTP mỏng:
 `tool → VidfacClient → https://<host>/api/v1/...`. Mọi luật nghiệp vụ (scope, state
@@ -24,7 +25,10 @@ machine, validator) vẫn nằm ở backend.
 ```bash
 cd video-system
 export VIDFAC_BASE_URL=https://vidfac.gacdero.vn
+# writer / critic / read: dùng key
 export VIDFAC_API_KEY=<key>
+# owner: dùng PIN 6 số (không cần key `owner`)
+# export VIDFAC_PIN=<6 số>
 ./.venv/Scripts/python.exe -m backend.mcp_server
 ```
 
@@ -38,8 +42,13 @@ export VIDFAC_API_KEY=<key>
 | Env | Mặc định | Ghi chú |
 |---|---|---|
 | `VIDFAC_BASE_URL` | `http://127.0.0.1:8090` | Host hoặc base API. Thiếu `/api/v1` thì client tự thêm. |
-| `VIDFAC_API_KEY` | *(trống)* | Bắt buộc. Thiếu → tool trả lỗi rõ ràng, không crash. |
+| `VIDFAC_API_KEY` | *(trống)* | Key cho writer / critic / read. Không dùng chung với PIN. |
+| `VIDFAC_PIN` | *(trống)* | PIN 6 số cho process owner — đăng nhập một lần lấy session cookie. Không dùng chung với key. |
 | `VIDFAC_TIMEOUT` | `20` | Giây. |
+
+Cần **ít nhất một** trong `VIDFAC_API_KEY` / `VIDFAC_PIN`; thiếu cả hai → tool trả
+lỗi rõ ràng, không crash process. Một process chỉ nên dùng **một** cách: key cho
+writer/critic/read, PIN cho owner.
 
 ---
 
@@ -58,7 +67,7 @@ Muse chỉ là một MCP client bất kỳ nếu nó spawn được process.
       "cwd": "C:/app/work/support-video-edit/video-system",
       "env": {
         "VIDFAC_BASE_URL": "https://vidfac.gacdero.vn",
-        "VIDFAC_API_KEY": "owner",
+        "VIDFAC_PIN": "<6 số>",
         "PYTHONPATH": "C:/app/work/support-video-edit/video-system"
       }
     }
@@ -69,7 +78,9 @@ Muse chỉ là một MCP client bất kỳ nếu nó spawn được process.
 - Dùng **đường dẫn tuyệt đối** cho `command`. Client không kế thừa `PATH`/venv của bạn.
 - `cwd` cần trỏ vào `video-system/` để `-m backend.mcp_server` import được. Client
   không hỗ trợ `cwd` thì thêm `PYTHONPATH` như trên.
-- Mỗi entry `mcpServers` là **một process = một key**. Muốn 2 vai thì 2 entry.
+- Mỗi entry `mcpServers` là **một process = một danh tính** (key hoặc PIN). Muốn 2
+  vai thì 2 entry. Key dành cho writer/critic/read; **owner dùng `VIDFAC_PIN`**, không
+  cần key `owner` (prod không có key nào mang identity `owner`).
 
 ---
 
@@ -92,25 +103,28 @@ Muse chỉ là một MCP client bất kỳ nếu nó spawn được process.
 
 ---
 
-## 5. Chọn key — một process, một key
+## 5. Chọn danh tính — một process, một cách
 
-| Việc | Key nên dùng |
+| Việc | Danh tính nên dùng |
 |---|---|
-| `brief_create`, `brief_assign_critic`, `brief_approve` | `owner` |
+| `brief_create`, `brief_assign_critic`, `brief_approve` | **PIN** (`VIDFAC_PIN`) — session cho identity `owner` |
 | `proposal_submit`, `finding_write`, `proposal_sign` | key `ingest` của từng agent (vd `muse-writer`, `muse-critic`) |
 | `knowledge_search`, `knowledge_read`, `agreement_read` | key `read` (hoặc key `ingest` — scope cao hơn bao gồm read) |
 
-`brief_create` về kỹ thuật chỉ cần `ingest`, nhưng giữ luồng brief ở key `owner` để
-không phải đổi key giữa chừng và để owner là người duyệt duy nhất.
+Prod chỉ có key `sk-video-agent-prod:ingest` và `sk-video-admin-prod:admin`; **không
+có key nào mang identity `owner`**. Vì `brief_assign_critic` / `brief_approve` đòi
+identity đúng bằng `owner`, process owner phải đăng nhập bằng `VIDFAC_PIN` (session
+cookie), không dùng key. `brief_create` về kỹ thuật chỉ cần `ingest`, nhưng giữ luồng
+brief ở process owner để owner là người duyệt duy nhất.
 
-> **Quan trọng:** bridge đọc key từ env **một lần lúc spawn**. Một process MCP chỉ
-> mang **một** key. Muốn agent đóng cả vai writer và critic trong cùng phiên thì phải
-> chạy **2 process với 2 key khác nhau** (2 entry `mcpServers`). Không có cách đổi
-> key theo từng tool call.
+> **Quan trọng:** bridge đọc danh tính từ env **một lần lúc spawn**. Một process MCP
+> chỉ mang **một** danh tính: key **hoặc** PIN, không trộn. Muốn agent đóng cả vai
+> writer và critic trong cùng phiên thì phải chạy **2 process với 2 key khác nhau**
+> (2 entry `mcpServers`). Không có cách đổi danh tính theo từng tool call.
 
 Lý do: backend bắt buộc **2 chữ ký từ 2 identity khác nhau** (author + critic), chặn
 critic trùng người tạo (`422 critic_is_author`) và chặn author tự ghi finding
-(`422 self_review`). Một key chỉ tạo được một identity → dùng chung key sẽ khoá luồng.
+(`422 self_review`). Một danh tính chỉ tạo được một identity → dùng chung sẽ khoá luồng.
 
 ---
 
@@ -173,12 +187,13 @@ Chỉ `blocking=true` khi sai sự thật hoặc lệch thời lượng nặng. 
 ## 7. Lỗi thường gặp & cách phản xạ
 
 Bridge biến HTTP lỗi thành `ToolError` dạng `HTTP <status> <code>: <detail>`. Message
-**không bao giờ** chứa API key.
+**không bao giờ** chứa API key hay PIN.
 
 | Triệu chứng | Nghĩa | Phản xạ |
 |---|---|---|
-| `Thiếu VIDFAC_API_KEY` | Process không có env key. | Set `VIDFAC_API_KEY` rồi **spawn lại** process MCP. Không retry tool. |
-| `HTTP 403 owner_only` | Key không phải identity `owner` nhưng gọi `brief_assign_critic` / `brief_approve`. | Đổi sang process mang key `owner`. Đừng thử lại bằng key agent. |
+| `Thiếu VIDFAC_API_KEY hoặc VIDFAC_PIN` | Process không có env key lẫn PIN. | Set `VIDFAC_API_KEY` (writer/critic/read) hoặc `VIDFAC_PIN` (owner) rồi **spawn lại** process MCP. Không retry tool. |
+| `HTTP 401: PIN login failed` | `VIDFAC_PIN` sai hoặc hết hiệu lực. | Kiểm tra PIN 6 số; spawn lại process. Message không chứa PIN. |
+| `HTTP 403 owner_only` | Danh tính không phải `owner` nhưng gọi `brief_assign_critic` / `brief_approve`. | Đổi sang process owner dùng `VIDFAC_PIN`. Đừng thử lại bằng key agent. |
 | `HTTP 403 critic_owner_only` | Gửi `critic` khi tạo brief bằng key không phải owner. | Bỏ field `critic`; owner gọi `brief_assign_critic` sau. (Tool `brief_create` không có tham số này, nên lỗi này chỉ gặp khi gọi API trực tiếp.) |
 | `HTTP 403 not_critic` / `HTTP 409 critic_not_assigned` | Key hiện tại không phải critic của brief / brief chưa có critic. | Kiểm tra `brief.critic`; báo owner gán critic. Không retry. |
 | `HTTP 409 proposal_locked` | Proposal đã `agreed`/`superseded`. | Dừng; đọc `agreement_read`. Muốn mở lại phải qua owner decision. |
@@ -193,12 +208,14 @@ Bridge biến HTTP lỗi thành `ToolError` dạng `HTTP <status> <code>: <detai
 
 ## 8. Bảo mật
 
-- **Không** đưa key vào prompt, log, hay nội dung tool call. Key chỉ nằm trong env
-  của process MCP.
-- Mỗi agent một key riêng, quyền tối thiểu: writer/critic `ingest`, reader `read`,
-  owner `admin`. Key dùng chung làm mất audit trail (`created_by`, `signer`,
-  `reviewer`) và có thể khoá luồng 2 người.
-- Key `owner` không đưa cho agent tự động. Nếu agent cần owner decision, để owner
-  chạy process riêng.
-- Không log `Authorization`, không log `VIDFAC_API_KEY`. Bridge đã lọc key khỏi
-  message lỗi; đừng tự thêm log làm rò rỉ.
+- **Không** đưa key hay PIN vào prompt, log, hay nội dung tool call. Chúng chỉ nằm
+  trong env của process MCP.
+- Mỗi agent một danh tính riêng, quyền tối thiểu: writer/critic `ingest`, reader
+  `read`; owner dùng **PIN** (session cookie, identity `owner`, scope `admin`).
+  Dùng chung danh tính làm mất audit trail (`created_by`, `signer`, `reviewer`) và
+  có thể khoá luồng 2 người.
+- Không có key `owner` trên prod. Process owner đăng nhập bằng `VIDFAC_PIN`; bridge
+  gọi `POST /auth/login` một lần khi tạo client và giữ cookie session. Nếu agent cần
+  owner decision, để owner chạy process riêng với PIN.
+- Không log `Authorization`, `Cookie`, `VIDFAC_API_KEY` hay `VIDFAC_PIN`. Bridge đã
+  lọc key/PIN khỏi message lỗi; đừng tự thêm log làm rò rỉ.
