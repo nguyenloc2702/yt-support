@@ -127,6 +127,28 @@ def test_archive_refuses_young_unit(monkeypatch):
     assert (data_dir() / "objects" / "itm_young01" / "artifact.bin").exists()
 
 
+def test_ensure_local_short_remote_path_not_doubled(monkeypatch):
+    """Bug thật đã gặp: unit_key đã chứa "shorts/" nên nếu tính rel từ objects/
+    thì remote thành .../sho_x/shorts/sho_x/final.mp4."""
+    unit = "shorts/sho_dup01"
+    arch_store().execute(
+        "INSERT OR REPLACE INTO archived_units (unit_key, remote_path, size_bytes, "
+        "files, archived_at) VALUES (?,?,?,?,?)",
+        (unit, "gdrive:test/" + unit, 1, 1, time.time()))
+    target = data_dir() / "objects" / "shorts" / "sho_dup01" / "final_sho_dup01.mp4"
+    seen = []
+
+    def fake(args, timeout):
+        seen.append(args)
+        Path(args[2]).parent.mkdir(parents=True, exist_ok=True)
+        Path(args[2]).write_bytes(b"v")
+        return 0, "ok"
+
+    monkeypatch.setattr(arch, "_run_rclone", fake)
+    assert arch.ensure_local(arch_store(), target) is True
+    assert seen[0][1] == "gdrive:test/shorts/sho_dup01/final_sho_dup01.mp4"
+
+
 # -- ensure_local -------------------------------------------------------------
 
 def test_ensure_local_true_when_file_exists():
@@ -162,7 +184,8 @@ def test_ensure_local_restores_single_file(monkeypatch):
     assert arch.ensure_local(arch_store(), target) is True
     assert target.exists()
     assert seen[0][0] == "copyto"
-    assert seen[0][1].endswith(f"{unit}/todo/subtitles_en.srt")
+    # đường dẫn remote phải tính từ thư mục unit: <remote>/todo/subtitles_en.srt
+    assert seen[0][1] == f"gdrive:test/{unit}/todo/subtitles_en.srt"
     row = arch_store().query_one(
         "SELECT restore_count FROM archived_units WHERE unit_key=?", (unit,))
     assert row["restore_count"] == 1

@@ -254,8 +254,13 @@ def ensure_local(store: Store, path: Path) -> bool:
     if not row:
         return False
 
+    # remote_path trỏ tới thư mục unit, và nội dung unit được copy vào đó (không
+    # phải copy cả thư mục unit vào trong). Vì vậy đường dẫn tương đối phải tính
+    # từ thư mục unit, KHÔNG phải từ objects/ — nếu tính từ objects/ thì
+    # "shorts/sho_x/final.mp4" sẽ thành ".../sho_x/shorts/sho_x/final.mp4".
+    unit_dir = local_for(unit_key)
     try:
-        rel = path.resolve().relative_to(objects_root().resolve()).as_posix()
+        rel = path.resolve().relative_to(unit_dir.resolve()).as_posix()
     except (ValueError, OSError):
         return False
 
