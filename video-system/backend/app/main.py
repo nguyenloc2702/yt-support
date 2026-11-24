@@ -78,6 +78,7 @@ from .schemas import (AffiliateProductCreate, AffiliateProductPatch, BioPageUpda
 from .service_chat import ChatService, ChatError
 from .service_briefs import BriefError, BriefService
 from .service_script_duel import ScriptDuelError, ScriptDuelService
+from .agreement_notifier import AgreementNotifier
 from .store import SQLiteStore, new_id, now
 from .webhooks import WebhookService
 
@@ -99,6 +100,9 @@ importer = ImportGate(store, items)
 todos = TodoService(store, items)
 assembler = AssemblerService(store, items, todos)
 webhooks = WebhookService(store)
+# next_action của agreement đổi -> phát webhook (dedupe theo brief_agreement_state).
+# `duel` tạo ở trên nên truyền thẳng callable, không cần import service trong notifier.
+agreement_notifier = AgreementNotifier(store, webhooks, agreement_fn=duel.agreement)
 auth = Auth()
 
 # -- Short Studio adapters (Phụ lục G.4): fail-closed, chỉ wire khi có key ----
@@ -137,6 +141,10 @@ def _start_news_scheduler() -> None:
     chat.start_retention_worker()
     # Brief: tự duyệt objection-window trong giờ làm việc (scheduler, không read-path)
     briefs.start_objection_scheduler()
+    # Bắt các chuyển next_action do scheduler/auto-approve, không chỉ route API
+    agreement_notifier.start_sweeper(30)
+    # Webhook: gửi lại delivery đã tới hạn (backoff theo BACKOFF trong webhooks.py)
+    webhooks.start_retry_worker(60)
 
 # -- Web PIN gate (chặn mọi request không có session/bearer hợp lệ) -----------
 # Mở: health, 3 endpoint auth/*, OPTIONS (preflight), "/favicon.ico", và "/" (shell HTML chứa
@@ -2041,6 +2049,18 @@ def _require_owner(request: Request) -> str:
     return identity
 
 
+def _sync_agreement(brief_id: str, reason: str) -> None:
+    """Side-effect webhook sau mutation: không bao giờ được làm hỏng response.
+
+    `AgreementNotifier.sync` đã tự bọc try/except; bọc thêm ở đây vì `duel.agreement`
+    cũng có thể ném (brief vừa bị xoá/huỷ giữa 2 bước).
+    """
+    try:
+        agreement_notifier.sync(brief_id, duel.agreement(brief_id), reason)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agreement sync thất bại (%s, %s): %s", brief_id, reason, exc)
+
+
 @app.post("/api/v1/briefs")
 def create_brief(body: BriefCreate, request: Request = None):
     """Tạo brief (Phase 0). Brief phải approved trước khi nộp script proposal."""
@@ -2058,7 +2078,7 @@ def create_brief(body: BriefCreate, request: Request = None):
 
     def run() -> dict:
         try:
-            return briefs.create(
+            brief = briefs.create(
                 title=body.title, created_by=identity, angle=body.angle,
                 target_duration_sec=body.target_duration_sec, language=body.language,
                 style_lock_version=body.style_lock_version,
@@ -2068,6 +2088,8 @@ def create_brief(body: BriefCreate, request: Request = None):
                 critic=body.critic)
         except BriefError as e:
             _fail(e)
+        _sync_agreement(brief["id"], "brief.created")
+        return brief
 
     return _idempotent_call(request, payload, run, 201)
 
@@ -2091,18 +2113,22 @@ def get_brief(brief_id: str, request: Request = None):
 def approve_brief(brief_id: str, request: Request = None):
     actor = _require_owner(request)
     try:
-        return briefs.approve(brief_id, approved_by=actor)
+        brief = briefs.approve(brief_id, approved_by=actor)
     except BriefError as e:
         _fail(e)
+    _sync_agreement(brief_id, "brief.approved")
+    return brief
 
 
 @app.post("/api/v1/briefs/{brief_id}/cancel")
 def cancel_brief(brief_id: str, request: Request = None):
     actor = _require_owner(request)
     try:
-        return briefs.cancel(brief_id, actor=actor)
+        brief = briefs.cancel(brief_id, actor=actor)
     except BriefError as e:
         _fail(e)
+    _sync_agreement(brief_id, "brief.cancelled")
+    return brief
 
 
 @app.post("/api/v1/briefs/{brief_id}/critic")
@@ -2110,9 +2136,11 @@ def set_brief_critic(brief_id: str, body: BriefCriticSet, request: Request = Non
     """Owner chỉ định critic trước chữ ký đầu tiên (chưa có registry)."""
     actor = _require_owner(request)
     try:
-        return briefs.set_critic(brief_id, critic=body.critic, actor=actor)
+        brief = briefs.set_critic(brief_id, critic=body.critic, actor=actor)
     except BriefError as e:
         _fail(e)
+    _sync_agreement(brief_id, "brief.critic_assigned")
+    return brief
 
 
 @app.post("/api/v1/briefs/{brief_id}/decisions")
@@ -2121,10 +2149,12 @@ def decide_brief_script(brief_id: str, body: BriefDecisionCreate,
     """Owner phá bế tắc: force_agree đúng hash hiện tại, hoặc reject kèm lý do."""
     actor = _require_owner(request)
     try:
-        return duel.decide(brief_id, decided_by=actor, decision=body.decision,
-                           proposal_id=body.proposal_id, reason=body.reason)
+        proposal = duel.decide(brief_id, decided_by=actor, decision=body.decision,
+                               proposal_id=body.proposal_id, reason=body.reason)
     except (ScriptDuelError, BriefError) as e:
         _fail(e)
+    _sync_agreement(brief_id, "brief.decision")
+    return proposal
 
 
 @app.post("/api/v1/script-proposals")
@@ -2136,12 +2166,14 @@ def create_script_proposal(body: ScriptProposalCreate, request: Request = None):
 
     def run() -> dict:
         try:
-            return duel.create_proposal(
+            proposal = duel.create_proposal(
                 brief_id=body.brief_id, author=identity,
                 shots=[s.model_dump() for s in body.shots],
                 script_text=body.script_text, parent_id=body.parent_id)
         except (ScriptDuelError, BriefError) as e:
             _fail(e)
+        _sync_agreement(body.brief_id, "proposal.created")
+        return proposal
 
     return _idempotent_call(request, payload, run, 201)
 
@@ -2172,12 +2204,21 @@ def add_script_finding(proposal_id: str, body: ScriptFindingCreate, request: Req
     auth.require(request, "ingest")
     identity, _ = auth.identity_for(request)
     try:
-        return duel.add_finding(
+        finding = duel.add_finding(
             proposal_id, reviewer=identity, category=body.category,
             severity=body.severity, evidence=body.evidence, blocking=body.blocking,
             is_owner=identity == "owner")
     except ScriptDuelError as e:
         _fail(e)
+    # Response của finding không mang brief_id (giữ nguyên shape) — tra 1 lần.
+    try:
+        brief_id = duel.get_proposal(proposal_id)["brief_id"]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("finding: không tra được brief của %s: %s", proposal_id, exc)
+        brief_id = None
+    if brief_id:
+        _sync_agreement(brief_id, "finding.created")
+    return finding
 
 
 @app.get("/api/v1/script-proposals/{proposal_id}/findings")
@@ -2196,10 +2237,12 @@ def sign_script_proposal(proposal_id: str, body: ScriptSignatureCreate,
     auth.require(request, "ingest")
     identity, _ = auth.identity_for(request)
     try:
-        return duel.sign(proposal_id, signer=identity, verdict=body.verdict,
-                         note=body.note, is_owner=identity == "owner")
+        proposal = duel.sign(proposal_id, signer=identity, verdict=body.verdict,
+                             note=body.note, is_owner=identity == "owner")
     except ScriptDuelError as e:
         _fail(e)
+    _sync_agreement(proposal["brief_id"], "proposal.signed")
+    return proposal
 
 
 @app.get("/api/v1/briefs/{brief_id}/agreement")

@@ -122,3 +122,19 @@ agent sẽ gặp thường xuyên nhất.
 Chỉ chấp nhận ETag đúng định dạng hoặc `If-Match: *` (khi chắc chắn mình là writer duy nhất) —
 **prefix cắt ngắn, `""` hay `-v0` bị từ chối 412**, nếu không stale writer có thể đè bản mới.
 
+---
+
+## 5. Webhook (`/api/v1/webhooks`)
+
+| Method | Endpoint | Scope | Mô tả |
+|---|---|---|---|
+| `POST` | `/api/v1/webhooks` | `admin` | Đăng ký receiver. Body `{url, events, secret?, item_id?}`; `events` rỗng/thiếu = nhận mọi event. Trả `{webhook_id}`. Secret lấy từ body hoặc `VIDEO_WEBHOOK_SECRET` (bắt buộc). |
+
+**Delivery:** `POST` JSON tới `url`, header `X-Signature` = HMAC-SHA256(secret, body)
+và `X-Event-Id`. Envelope `{event, event_id, item_id, shot_id, version, data, timestamp}`.
+`item_id` rỗng = hook global (nhận mọi item). Lỗi giao được retry có backoff.
+
+| Event | Phát khi |
+|---|---|
+| `agreement.next_action_changed` | `next_action` của brief **đổi** (dedupe theo `brief_agreement_state`, sweep 30s). `data = {brief_id, next_action, agreement, reason}`. |
+| `item.*` · `shot.*` · `youtube.*` · `instagram.*` · `affiliate.*` | Vòng đời job/shot và connector — danh sách đầy đủ ở `backend/app/webhooks.py` (`EVENTS`). |

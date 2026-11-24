@@ -4,13 +4,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import threading
-import time
 import urllib.request
 
 from . import new_id, now
 from .config import webhook_secret
 from .store import Store
+
+logger = logging.getLogger("video-system.webhooks")
 
 BACKOFF = [60, 300, 1800, 7200]
 GIVE_UP_AFTER = 24 * 3600
@@ -37,6 +39,7 @@ EVENTS = {
     "instagram.account.connected", "instagram.account.disconnected",
     "instagram.publish.completed", "instagram.publish.failed",
     "affiliate.link.attached", "affiliate.link.clicked", "affiliate.conversion.synced",
+    "agreement.next_action_changed",
 }
 
 
@@ -63,6 +66,7 @@ def sign(secret: str, body: bytes) -> str:
 class WebhookService:
     def __init__(self, store: Store) -> None:
         self.store = store
+        self._retry_thread: threading.Thread | None = None
 
     def register(self, url: str, secret: str | None = None, events: list[str] | None = None,
                  item_id: str | None = None) -> dict:
@@ -132,3 +136,58 @@ class WebhookService:
             "UPDATE webhook_deliveries SET attempts=?, last_status=?, next_attempt_at=? "
             "WHERE id=?", (attempts, str(status), now() + BACKOFF[attempts - 1],
                            delivery_id))
+
+    # -- retry worker -------------------------------------------------------
+
+    def retry_pending(self, limit: int = 50) -> int:
+        """Gửi lại các delivery đã tới hạn (`next_attempt_at <= now`). Trả số đã thử.
+
+        `_attempt` tự tính backoff tiếp theo và set `next_attempt_at=NULL` khi
+        thành công / hết lượt, nên worker chỉ cần chọn row đang due.
+        """
+        try:
+            rows = self.store.query(
+                "SELECT d.id AS delivery_id, d.event_id AS event_id, "
+                "w.url AS url, w.secret AS secret "
+                "FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id "
+                "WHERE w.active=1 AND d.next_attempt_at IS NOT NULL "
+                "AND d.next_attempt_at <= ? "
+                "ORDER BY d.next_attempt_at ASC LIMIT ?",
+                (now(), max(1, int(limit))))
+        except Exception:  # noqa: BLE001 — worker không được chết vì query hỏng
+            return 0
+        secret_global = webhook_secret()
+        tried = 0
+        for r in rows:
+            event = self.store.query_one(
+                "SELECT * FROM events WHERE id=?", (r["event_id"],))
+            if not event:
+                continue
+            secret = r["secret"] or secret_global
+            if not secret:
+                continue
+            body = build_payload(dict(event))
+            self._attempt(r["delivery_id"], r["url"], secret, body)
+            tried += 1
+        return tried
+
+    def start_retry_worker(self, interval_sec: int = 60) -> threading.Thread | None:
+        """Thread daemon retry — chỉ 1 worker cho mỗi process."""
+        if self._retry_thread is not None and self._retry_thread.is_alive():
+            return self._retry_thread
+        th = threading.Thread(target=self._retry_loop, args=(interval_sec,),
+                              name="webhook-retry", daemon=True)
+        self._retry_thread = th
+        th.start()
+        return th
+
+    def _retry_loop(self, interval_sec: int) -> None:
+        while True:
+            try:
+                tried = self.retry_pending()
+                if tried:
+                    logger.info("webhook retry: thử lại %s delivery", tried)
+            except Exception as exc:  # noqa: BLE001 — thread không được chết
+                logger.warning("webhook retry lỗi: %s", exc)
+            # Không cần stop event: process chết là thread daemon chết theo.
+            threading.Event().wait(max(10, int(interval_sec)))

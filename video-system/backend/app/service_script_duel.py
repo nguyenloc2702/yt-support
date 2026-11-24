@@ -502,7 +502,7 @@ class ScriptDuelService:
         return self._with_agreement(self._public(self._row(proposal_id)))
 
     def agreement(self, brief_id: str) -> dict:
-        self.briefs.get(brief_id)
+        brief = self.briefs.get(brief_id)
         proposals = self.list_proposals(brief_id)
         agreed = [p for p in proposals if p["status"] == "agreed"]
         latest = proposals[-1] if proposals else None
@@ -527,7 +527,7 @@ class ScriptDuelService:
             # Phase 2 (POST /jobs/from-agreement) chưa mở: agreed là terminal,
             # owner phải build job thủ công.
             "phase2_open": False,
-            "next_action": self._next_action(agreed, latest, rounds),
+            "next_action": self._next_action(brief["status"], agreed, latest, rounds),
         }
 
     # -- internals ----------------------------------------------------------
@@ -600,8 +600,20 @@ class ScriptDuelService:
                 f"Chỉ critic {critic} (hoặc owner) được review brief này.",
                 403, "not_critic")
 
-    def _next_action(self, agreed: list[dict], latest: dict | None,
+    def _next_action(self, brief_status: str, agreed: list[dict], latest: dict | None,
                      rounds_used: int = 0) -> str:
+        """Bước kế tiếp cho agent — trạng thái brief đứng trước trạng thái proposal.
+
+        Brief `draft` chưa duyệt thì author chưa được nộp; brief `cancelled` thì
+        dừng hẳn. Không chặn ở đây thì webhook đẩy writer chạy sớm, và lúc owner
+        duyệt lại không có event vì `next_action` không đổi.
+        """
+        if brief_status == "cancelled":
+            return "brief_cancelled"
+        if brief_status == "draft":
+            return "await_brief_approval"
+        if brief_status == "done":
+            return "build_job"
         if agreed:
             return "build_job"
         if not latest:

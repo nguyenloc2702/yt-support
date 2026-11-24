@@ -178,7 +178,7 @@ Sửa = nộp version mới với `parent_id` = proposal cũ.
 
 ### 4.9 `GET /script-proposals/{id}` *(read)* → Proposal + `findings[]`
 
-### 4.10 `POST /script-proposals/{id}/findings` *(ingest, author/critic/owner)*
+### 4.10 `POST /script-proposals/{id}/findings` *(ingest, critic/owner)*
 
 ```json
 {"category": "fact", "severity": "high", "evidence": "42% sai nguồn", "blocking": true}
@@ -232,6 +232,8 @@ proposal:  invalid ──(sửa, version mới)──► superseded
 
 | Giá trị | Nghĩa | Hành động |
 |---|---|---|
+| `brief_cancelled` | brief đã bị huỷ | **dừng hẳn**, không nộp/ký gì nữa |
+| `await_brief_approval` | brief còn `draft`, chưa được duyệt | **dừng**, chờ owner duyệt |
 | `create_proposal` | brief chưa có proposal | author nộp |
 | `fix_proposal` | proposal invalid | author sửa + version mới |
 | `review_or_sign` | đang chờ chữ ký | critic finding / ký |
@@ -295,7 +297,17 @@ Mọi `409` khác là trạng thái nghiệp vụ — retry vô ích, phải đ�
 ## 8. Ngoài phạm vi hợp đồng này
 
 1. **`phase2_open=false`** — chưa có endpoint tự tạo job / chia shot. `agreed` là điểm dừng.
-2. **Không có push.** Muse là one-shot: mỗi lượt phải được gọi từ bên ngoài.
+2. **Có push qua webhook — nhưng chỉ khi `next_action` ĐỔI.** Server phát event
+   `agreement.next_action_changed` qua `WebhookService`; dedupe theo bảng
+   `brief_agreement_state` nên cùng một bước kế thì không bắn lại. Sweep 30s bắt
+   các chuyển trạng thái không đi qua route (scheduler tự duyệt, process restart).
+   Payload là envelope `{event, event_id, item_id, shot_id, version, data, timestamp}`
+   với `data = {brief_id, next_action, agreement, reason}`. Header:
+   `X-Signature` = HMAC-SHA256(secret, body), `X-Event-Id`. **Muse vẫn phải tự dựng
+   HTTP receiver** và đăng ký `POST /api/v1/webhooks` (scope admin,
+   `{url, events, secret?, item_id?}`) — không có receiver dựng sẵn.
+   Đây không phải stream realtime; không có event cho mọi thay đổi, chỉ khi
+   `next_action` đổi.
 3. **Chat là polling** (`/chat/threads`, cursor `since_id=<last_seq>`), không realtime.
 
 ---
@@ -336,3 +348,15 @@ Mỗi lượt làm ĐÚNG 1 việc:
 5. Không còn vấn đề blocking → POST /script-proposals/{id}/sign {"verdict":"pass"}.
 6. Dừng.
 ```
+
+---
+
+## 10. MCP bridge & webhook
+
+- **MCP bridge** — 9 tool có schema bọc đúng các endpoint ở mục 4, chạy bằng
+  `python -m backend.mcp_server` (stdio, agent client tự spawn). Config client,
+  bảng tool, chọn key và xử lý lỗi: xem `read_me/10_mcp_agent_bridge.md`.
+- **Webhook** — đăng ký `POST /api/v1/webhooks` (admin) với
+  `{url, events, secret?, item_id?}`. Event `agreement.next_action_changed` phát
+  khi `next_action` đổi (xem mục 8). Receiver phải verify `X-Signature`
+  (HMAC-SHA256) và dedupe theo `X-Event-Id`.

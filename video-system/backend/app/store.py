@@ -480,6 +480,14 @@ CREATE TABLE IF NOT EXISTS script_decisions (
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_brief ON script_decisions(brief_id, created_at);
+
+-- Trạng thái next_action cuối cùng đã phát webhook cho từng brief (dedupe) -----
+CREATE TABLE IF NOT EXISTS brief_agreement_state (
+  brief_id TEXT PRIMARY KEY,
+  next_action TEXT NOT NULL,
+  updated_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS archived_units (
   unit_key TEXT PRIMARY KEY,            -- "itm_xxx" hoặc "shorts/sho_xxx"
   remote_path TEXT NOT NULL,            -- gdrive:video_system_assets/...
