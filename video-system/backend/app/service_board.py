@@ -49,6 +49,19 @@ def compute_score_and_verdict(
     return score, verdict
 
 
+def defect_codes_public() -> list[dict[str, Any]]:
+    """Bảng §4.2 cho UI render checkbox — UI không được hardcode số trừ."""
+    return [
+        {
+            "code": code,
+            "deduction": deduction,
+            "fail_level": fail_level,
+            "description": description,
+        }
+        for code, (deduction, fail_level, description) in DEFECT_TABLE.items()
+    ]
+
+
 class BoardService:
     def __init__(self, store: Store, items: ItemService) -> None:
         self.store = store
@@ -110,6 +123,50 @@ class BoardService:
             return None
         return json.loads(row["regen_brief_json"])
 
+    def _parse_comment(self, row: dict) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "item_id": row["item_id"],
+            "shot_index": row["shot_index"],
+            "video_version": int(row.get("video_version") or 0),
+            "author": row["author"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+        }
+
+    def _comments_block(
+        self,
+        shot: dict,
+        caller: str | None,
+        privileged: bool,
+        reviews: list[dict],
+    ) -> dict[str, Any]:
+        """Comment per-shot với visibility theo luật chấm mù C-4.
+
+        Thread đầy đủ chỉ cho: manager/admin, người gen/upload/claimed_by
+        (chính là agent quay lại gen sửa shot — đọc comment để sửa chuẩn),
+        và caller đã chấm version hiện tại. Worker chưa chấm chỉ thấy số
+        lượng: nội dung comment có thể hé lộ lỗi trước khi chấm, phá chấm
+        mù y như scores_summary.
+        """
+        rows = self.store.query(
+            "SELECT * FROM shot_comments WHERE item_id=? AND shot_index=? ORDER BY created_at ASC",
+            (shot["item_id"], shot["index_num"]),
+        )
+        visible = bool(privileged) or (
+            caller is not None
+            and (
+                caller
+                in {shot.get("uploaded_by"), shot.get("declared_generator"), shot.get("claimed_by")}
+                or any(r["reviewer"] == caller for r in reviews)
+            )
+        )
+        return {
+            "comments": [self._parse_comment(r) for r in rows] if visible else [],
+            "comments_visible": visible,
+            "comment_count": len(rows),
+        }
+
     def _format_shot(
         self,
         shot: dict,
@@ -124,6 +181,11 @@ class BoardService:
         )
         reviews: list[dict[str, Any]] = []
         scores_summary: dict[str, Any] | None = None
+        comments_info: dict[str, Any] = {
+            "comments": [],
+            "comments_visible": False,
+            "comment_count": 0,
+        }
         if include_reviews and shot.get("video_hash"):
             rows = self.store.query(
                 "SELECT * FROM shot_reviews "
@@ -147,6 +209,8 @@ class BoardService:
                 for rv in reviews:
                     rv["score"] = None
                     rv["defect_codes"] = None
+        if include_reviews:
+            comments_info = self._comments_block(shot, caller, privileged, reviews)
 
         regen_brief = (
             self._latest_regen_brief(shot["item_id"], shot["index_num"])
@@ -172,6 +236,9 @@ class BoardService:
             "regen_brief": regen_brief,
             "scores_summary": scores_summary,
             "reviews": reviews,
+            "comments": comments_info["comments"],
+            "comments_visible": comments_info["comments_visible"],
+            "comment_count": comments_info["comment_count"],
         }
 
     def get_shot(
@@ -607,6 +674,75 @@ class BoardService:
             "review": self._parse_review(rv_row),
             "shot": self.get_shot(item_id, shot_index, caller=caller),
         }
+
+    # -- comment per-shot (web Review Board) -----------------------------------
+
+    def _get_board_shot(self, item_id: str, shot_index: int) -> dict:
+        shot = self.store.query_one(
+            "SELECT * FROM shots WHERE item_id=? AND index_num=? AND status != 'superseded'",
+            (item_id, shot_index),
+        )
+        if not shot:
+            raise BoardError(404, f"Shot {shot_index} not found.", "shot_not_found")
+        return shot
+
+    def add_comment(
+        self, item_id: str, shot_index: int, caller: str, body: str
+    ) -> dict[str, Any]:
+        """Ghi comment của agent vào shot. Author = danh tính caller."""
+        self._require_item(item_id)
+        text = (body or "").strip()
+        if not text:
+            raise BoardError(422, "Nội dung comment không được rỗng.", "validation_error")
+        if len(text) > 2000:
+            raise BoardError(422, "Comment quá 2000 ký tự.", "comment_too_long")
+        shot = self._get_board_shot(item_id, shot_index)
+        cmt_id = new_id("cmt")
+        t = now()
+        with self.store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO shot_comments (id,item_id,shot_id,shot_index,video_version,"
+                "author,body,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    cmt_id,
+                    item_id,
+                    shot["id"],
+                    shot_index,
+                    int(shot.get("video_version") or 0),
+                    caller,
+                    text,
+                    t,
+                ),
+            )
+        row = self.store.query_one("SELECT * FROM shot_comments WHERE id=?", (cmt_id,))
+        return {
+            "comment": self._parse_comment(row),
+            "shot": self.get_shot(item_id, shot_index, caller=caller),
+        }
+
+    def list_comments(
+        self,
+        item_id: str,
+        shot_index: int,
+        caller: str | None = None,
+        privileged: bool = False,
+    ) -> dict[str, Any]:
+        """Thread comment của 1 shot, áp cùng luật visibility như _format_shot."""
+        self._require_item(item_id)
+        shot = self._get_board_shot(item_id, shot_index)
+        v_hash = shot.get("video_hash")
+        reviews: list[dict] = []
+        if v_hash:
+            rows = self.store.query(
+                "SELECT * FROM shot_reviews "
+                "WHERE item_id=? AND shot_index=? AND video_hash=? AND stale=0 "
+                "ORDER BY created_at ASC",
+                (item_id, shot_index, v_hash),
+            )
+            reviews = [self._parse_review(r) for r in rows]
+        info = self._comments_block(shot, caller, privileged, reviews)
+        info.update({"item_id": item_id, "shot_index": shot_index})
+        return info
 
     # -- C-6: grandfathered migration, summary & assemble gate ----------------
 

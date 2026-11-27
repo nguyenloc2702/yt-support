@@ -3053,6 +3053,38 @@ summary:focus-visible {
     max-width: 260px;
   }
 }
+/* ---- Review Board (Shot Board web UI) ---- */
+.rb-banner{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;border:1px solid var(--border-strong);border-radius:var(--r);padding:12px 14px;margin-bottom:14px;background:linear-gradient(90deg,rgba(37,99,235,.07),transparent 70%)}
+.rb-banner-info{font-size:12.5px;color:var(--fg);flex:1;min-width:220px}
+.rb-actions{display:flex;gap:8px;flex-wrap:wrap}
+.rb-layout{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:14px}
+@media (max-width:980px){.rb-layout{grid-template-columns:1fr}}
+.rb-defect-grid{display:grid;grid-template-columns:1fr;gap:6px;max-height:240px;overflow:auto}
+.rb-defect-item{display:flex;gap:8px;align-items:flex-start;padding:7px 9px;border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:12px}
+.rb-defect-item input{margin-top:2px;flex-shrink:0}
+.rb-defect-item.is-fail{border-color:rgba(220,38,38,.55);background:rgba(220,38,38,.05)}
+.rb-ded{font-size:10.5px;color:var(--fg-muted)}
+.rb-brief{display:none;border:1px dashed rgba(220,38,38,.6);border-radius:8px;padding:10px;margin-top:10px;background:rgba(220,38,38,.04)}
+.rb-brief.open{display:block}
+.rb-brief input,.rb-brief textarea{width:100%;margin:3px 0 8px;padding:7px 9px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px;background:rgba(255,255,255,.04);color:var(--fg)}
+.rb-preview{font-size:12px;font-weight:600;margin-top:8px}
+.rb-workcard{border:1px solid var(--border-strong);border-radius:var(--r);padding:12px 14px;margin-bottom:12px;background:rgba(255,255,255,.03)}
+.rb-empty{text-align:center;padding:20px;color:var(--fg-muted);border:1px dashed var(--border-strong);border-radius:var(--r)}
+.cmt-thread{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+.cmt-item{display:flex;gap:9px;align-items:flex-start}
+.cmt-avatar{width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.cmt-bubble{background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:10px;padding:7px 10px;font-size:12.5px;max-width:100%;flex:1;min-width:0;word-break:break-word}
+.cmt-meta{font-size:10.5px;color:var(--fg-muted);margin-bottom:2px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.cmt-input-row{display:flex;gap:8px;margin-top:10px;align-items:flex-end}
+.cmt-input-row textarea{flex:1;min-height:52px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px;resize:vertical;background:rgba(255,255,255,.04);color:var(--fg)}
+.rb-cmt-mount{display:none;margin-top:8px;border-top:1px dashed var(--border);padding-top:6px}
+.rb-cmt-mount.open{display:block}
+.shot-slot-card.is-red{border-color:var(--held);box-shadow:0 0 0 1px var(--held) inset}
+.rb-identity{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;padding:4px 10px 4px 5px;border-radius:999px;border:1px solid var(--border);background:rgba(37,99,235,.08)}
+.rb-identity .cmt-avatar{width:22px;height:22px;font-size:10px}
+.rb-identity .rb-scope{font-size:10px;color:var(--fg-muted);font-weight:500}
+.auth-mode-tabs{margin:10px 0 4px}
+.auth-hint{font-size:11px;color:var(--fg-muted);margin-top:6px}
 </style>
 </head>
 <body>
@@ -3062,7 +3094,11 @@ summary:focus-visible {
   <form class="auth-card" onsubmit="submitPin(event)" autocomplete="off">
     <div class="lock-badge"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" stroke="#1C1917" stroke-width="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3" stroke="#1C1917" stroke-width="2"/></svg></div>
     <h2 id="authTitle" style="margin:0 0 4px;font-size:16px;font-weight:600">Xác Thực Truy Cập Hệ Thống</h2>
-    <p style="margin:0;font-size:12px;color:var(--fg-muted)">Nhập mã PIN 6 chữ số để mở bảng điều phối sản xuất & danh sách công việc TODO</p>
+    <p id="authSubtitle" style="margin:0;font-size:12px;color:var(--fg-muted)">Nhập mã PIN 6 chữ số để mở bảng điều phối sản xuất & danh sách công việc TODO</p>
+    <div class="seg-tabs auth-mode-tabs" id="authModeTabs" role="group" aria-label="Kiểu đăng nhập">
+      <button type="button" class="seg-tab active" id="authModeOwner" onclick="setAuthMode('owner')">Owner (PIN)</button>
+      <button type="button" class="seg-tab" id="authModeAgent" onclick="setAuthMode('agent')">Agent (mã 6 số)</button>
+    </div>
     <div class="pin-boxes" id="pinBoxes">
       <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 1" id="pin0"/>
       <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 2" id="pin1"/>
@@ -3101,6 +3137,7 @@ summary:focus-visible {
       <button type="button" onclick="openAgentGuideModal()">📖 Xem Hướng Dẫn Agent</button>
       <button type="button" id="storageBadgeBtn" onclick="openStorageStatusModal()">☁️ Lưu Trữ: Đang kiểm tra...</button>
       <button type="button" id="refreshAllBtn" class="btn-primary" onclick="loadTodos({force:true, notify:true})">🔄 Làm mới dữ liệu</button>
+      <span class="rb-identity hidden" id="identityChip" title="Danh tính phiên đăng nhập"></span>
       <button type="button" id="logoutBtn" onclick="logout()" style="display:none">🔒 Khóa phiên</button>
     </div>
   </div>
@@ -3564,6 +3601,54 @@ document.addEventListener('keydown', (e) => {
 // --- PIN Gate Logic ---
 const pinInputs = () => Array.from(document.querySelectorAll('#pinBoxes input'));
 
+// Danh tính phiên hiện tại (từ /auth/whoami) — null = owner PIN chưa rõ / chưa load
+let VS_ME = null;
+let AUTH_MODE = 'owner'; // 'owner' (PIN) | 'agent' (mã 6 số)
+
+function setAuthMode(mode) {
+  AUTH_MODE = (mode === 'agent') ? 'agent' : 'owner';
+  const o = document.getElementById('authModeOwner');
+  const a = document.getElementById('authModeAgent');
+  if (o) o.classList.toggle('active', AUTH_MODE === 'owner');
+  if (a) a.classList.toggle('active', AUTH_MODE === 'agent');
+  const sub = document.getElementById('authSubtitle');
+  if (sub) {
+    sub.textContent = AUTH_MODE === 'owner'
+      ? 'Nhập mã PIN 6 chữ số để mở bảng điều phối sản xuất & danh sách công việc TODO'
+      : 'Nhập MÃ 6 SỐ của agent (đổi lấy token 30 ngày) — reviewer/agent dùng đường này';
+  }
+  const boxes = pinInputs();
+  boxes.forEach(b => { b.value = ''; b.classList.remove('filled'); });
+  document.getElementById('authErr').textContent = '';
+  if (boxes[0]) boxes[0].focus();
+}
+
+function renderIdentityChip() {
+  const chip = document.getElementById('identityChip');
+  if (!chip) return;
+  if (!VS_ME || !VS_ME.identity) { chip.classList.add('hidden'); chip.innerHTML = ''; return; }
+  const initial = String(VS_ME.identity).slice(0, 1).toUpperCase();
+  const isOwner = VS_ME.identity === 'owner';
+  chip.innerHTML = `<span class="cmt-avatar" style="background:${isOwner ? 'var(--ok)' : 'var(--accent)'}">${esc(initial)}</span>
+    <span>${esc(VS_ME.identity)} <span class="rb-scope">· ${esc(VS_ME.scope || '?')}</span></span>`;
+  chip.classList.remove('hidden');
+}
+
+async function loadWhoami() {
+  try {
+    const r = await apiFetch('/api/v1/auth/whoami', { timeoutMs: 10000 });
+    if (r.ok) {
+      VS_ME = await r.json();
+      renderIdentityChip();
+    } else {
+      VS_ME = null;
+      renderIdentityChip();
+    }
+  } catch (err) {
+    console.warn('[loadWhoami] Error:', err);
+  }
+}
+
 function setupPinBoxes() {
   const boxes = pinInputs();
   boxes.forEach((inp, idx) => {
@@ -3630,10 +3715,11 @@ async function submitPin(ev) {
   btn.disabled = true;
   btn.textContent = '⏳ Đang xác thực...';
   try {
+    const loginBody = AUTH_MODE === 'agent' ? { code: pin } : { pin };
     const r = await apiFetch('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin }),
+      body: JSON.stringify(loginBody),
       timeoutMs: 15000
     });
     const d = await r.json().catch(() => ({}));
@@ -3645,6 +3731,8 @@ async function submitPin(ev) {
       return;
     }
     hideLockScreen();
+    await loadWhoami();
+    rbRefreshInboxCache();
     await loadTodos({ force: true });
     setTimeout(() => { loadStorageHealth(); }, 150);
   } catch (err) {
@@ -3665,7 +3753,11 @@ async function logout() {
   } catch (err) {
     console.warn('[logout] Error:', err);
   } finally {
+    VS_ME = null;
+    renderIdentityChip();
     document.getElementById('logoutBtn').style.display = 'none';
+    document.getElementById('identityChip')?.classList.add('hidden');
+    setAuthMode('owner');
     showLockScreen('Đã khóa phiên làm việc.');
   }
 }
@@ -3743,7 +3835,7 @@ function setTodoSortOrder(sortKey) {
   renderFilteredTodos();
 }
 
-const VALID_DETAIL_TABS = ['overview', 'final_video', 'shots', 'checklist', 'images', 'upload_audio'];
+const VALID_DETAIL_TABS = ['overview', 'final_video', 'shots', 'checklist', 'images', 'upload_audio', 'review_board'];
 
 function normalizeDetailFlowTab(tabKey) {
   if (!tabKey) return 'overview';
@@ -5296,6 +5388,7 @@ function renderTodoSummaryCard(summaryItem) {
         : `<span class="pill pill-ghost">🎬 Chưa ráp thành phẩm</span>`}
       <span class="pill ${totalImgsCount > 0 ? 'pill-accent' : 'pill-ghost'}">🖼️ ${totalImgsCount} Ảnh tư liệu</span>
       <span class="pill ${checkedShots > 0 ? 'pill-ok' : 'pill-ghost'}">📋 ${checkedShots}/${totalShots} Checklist đã tick</span>
+      ${rbTodoChipHtml(itemId)}
     </div>
 
     ${item.youtube_upload ? renderTodoYoutubeStatusBanner(item, 'todo') : ''}
@@ -5576,6 +5669,13 @@ function renderDetailTabPaneHtml(summaryItem, requestedTab = '') {
       </div>`;
   }
 
+  if (activeTab === 'review_board') {
+    return `
+      <div class="lazy-tab-pane" data-active-pane="review_board">
+        ${renderReviewBoardSection(item, cl)}
+      </div>`;
+  }
+
   if (activeTab === 'checklist') {
     return `
       <div class="lazy-tab-pane" data-active-pane="checklist">
@@ -5641,6 +5741,7 @@ function renderTodoCard(summaryItem) {
           <span>Audio: <b class="mono">${fmtSec(item.audio_duration_sec)}</b></span>
           <span>Đã tick: <b class="mono">${cl.checked_shots_count}/${cl.total_shots}</b></span>
           <span>Cần gen thêm: <b class="mono" style="color:${cl.remaining_duration_to_generate_sec <= 0.5 ? 'var(--ok)' : 'var(--held)'}">+${fmtSec(cl.remaining_duration_to_generate_sec)}</b></span>
+          ${rbTodoChipHtml(itemId)}
         </div>
       </div>
       <div class="todo-actions">
@@ -5682,6 +5783,9 @@ function renderTodoCard(summaryItem) {
       </button>
       <button type="button" role="tab" aria-selected="${activeTab === 'upload_audio' ? 'true' : 'false'}" class="detail-flow-tab ${activeTab === 'upload_audio' ? 'active' : ''}" data-flow-tab="upload_audio" onclick="switchDetailFlowTab('upload_audio', '${esc(itemId)}')">
         📤 6. Tải lên & Tinh chỉnh Audio
+      </button>
+      <button type="button" role="tab" aria-selected="${activeTab === 'review_board' ? 'true' : 'false'}" class="detail-flow-tab ${activeTab === 'review_board' ? 'active' : ''}" data-flow-tab="review_board" onclick="switchDetailFlowTab('review_board', '${esc(itemId)}')">
+        🛡 7. Review Board${rbTabBadgeHtml(itemId)}
       </button>
     </div>
 
@@ -5877,11 +5981,13 @@ function renderFourColumnShotGridSection(item, cl) {
   const withVideoCount = shots.filter(s => s.has_video).length;
   const missingCount = shots.filter(s => !s.has_video).length;
   const driftCount = shots.filter(s => s.has_video && Math.abs(Number(s.delta_duration_sec || 0)) > 0.35).length;
+  const redCount = shots.filter(s => s.board_status === 'red').length;
 
   const filteredShots = shots.filter(s => {
     if (mode === 'missing') return !s.has_video;
     if (mode === 'has_video') return !!s.has_video;
     if (mode === 'drift') return s.has_video && Math.abs(Number(s.delta_duration_sec || 0)) > 0.35;
+    if (mode === 'red') return s.board_status === 'red';
     return true;
   });
 
@@ -5919,6 +6025,10 @@ function renderFourColumnShotGridSection(item, cl) {
         <button type="button" class="seg-tab ${mode === 'drift' ? 'active' : ''}" onclick="setShotGridFilter('${esc(itemId)}', 'drift')">
           Lệch thời lượng (${driftCount})
         </button>
+        ${redCount > 0 ? `
+        <button type="button" class="seg-tab ${mode === 'red' ? 'active' : ''}" onclick="setShotGridFilter('${esc(itemId)}', 'red')" style="border-color:var(--held);color:var(--held)">
+          ⛔ Đỏ (${redCount})
+        </button>` : ''}
       </div>
     </div>
 
@@ -5958,11 +6068,12 @@ function renderShotSlotCard(itemId, s) {
 
   if (hasVideo) {
     return `
-    <div class="shot-slot-card has-video ${isChecked ? 'is-checked' : ''} ${delta < -0.35 ? 'is-shortfall' : ''}" id="shot-card-${esc(itemId)}-${idx}">
+    <div class="shot-slot-card has-video ${isChecked ? 'is-checked' : ''} ${delta < -0.35 ? 'is-shortfall' : ''} ${s.board_status === 'red' ? 'is-red' : ''}" id="shot-card-${esc(itemId)}-${idx}">
       <div class="slot-head">
         <div class="slot-title">
           <span class="mono">Shot #${padIdx}</span>
           <span class="pill pill-ghost">${esc(shotTypeLabel)}</span>
+          ${getBoardStatusPill(s)}
         </div>
         <label class="slot-check-label ${isChecked ? 'checked' : ''}" title="Tick xác nhận Shot này đã gen xong cho Agent biết">
           <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleShotCheck('${esc(itemId)}', ${idx}, this.checked)"/>
@@ -6022,12 +6133,16 @@ function renderShotSlotCard(itemId, s) {
           <button type="button" class="btn-xs" onclick="triggerQuickSlotUpload('${esc(itemId)}', ${idx})">
             🔄 Thay
           </button>
+          <button type="button" class="btn-xs" onclick="toggleShotComments('${esc(itemId)}', ${idx})" title="Góp ý của các agent cho shot này (agent gen lại đọc để sửa)">
+            💬 Góp ý
+          </button>
           ${s.video_seq_num ? `
             <button type="button" class="btn-xs btn-danger" onclick="deleteVideo('${esc(itemId)}', ${Number(s.video_seq_num)})" title="Xóa video khỏi Shot #${padIdx}">
               🗑
             </button>
           ` : ''}
         </div>
+        <div class="rb-cmt-mount" id="cmt-card-${esc(itemId)}-${idx}"></div>
       </div>
     </div>`;
   }
@@ -6090,10 +6205,14 @@ function renderShotSlotCard(itemId, s) {
         <button type="button" class="btn-xs" onclick="playAudioSegment('${esc(itemId)}', ${Number(s.audio_start_sec || 0)}, ${Number(s.audio_end_sec || 0)}, ${idx})">
           🔊 Nghe mẫu (${expected.toFixed(1)}s)
         </button>
+        <button type="button" class="btn-xs" onclick="toggleShotComments('${esc(itemId)}', ${idx})" title="Góp ý của các agent cho shot này">
+          💬 Góp ý
+        </button>
         <span class="mono" style="font-size:11px;color:var(--held);font-weight:600">
           Lệch: -${expected.toFixed(2)}s
         </span>
       </div>
+      <div class="rb-cmt-mount" id="cmt-card-${esc(itemId)}-${idx}"></div>
     </div>
   </div>`;
 }
@@ -6102,6 +6221,529 @@ function setShotGridFilter(itemId, mode) {
   gridFilterByItem[itemId] = mode;
   shotRenderLimitByItem[itemId] = SHOT_LAZY_BATCH_SIZE;
   rerenderActiveDetailTab(itemId);
+}
+
+// =====================================================================
+// REVIEW BOARD (Shot Board web UI) — chấm mù 2 lượt/shot + comment per-shot
+// Luật: điểm do server tính từ defect_codes (client gửi score bị từ chối);
+// comment/điểm người khác bị ẩn cho tới khi caller chấm version này (C-4),
+// trừ khi caller là người gen/upload hoặc manager/admin.
+// =====================================================================
+let RB_INBOX_CACHE = null;        // {reviewable_counts: {item_id: n}, ...}
+let RB_DEFECT_CODES = null;       // [{code, deduction, fail_level, description}]
+let RB_DEFECT_MAP = null;         // code -> entry
+let RB_CURRENT = null;            // việc đang mở trong panel review
+
+function rbReviewableCount(itemId) {
+  return (RB_INBOX_CACHE && RB_INBOX_CACHE.reviewable_counts)
+    ? RB_INBOX_CACHE.reviewable_counts[itemId] : null;
+}
+
+function rbTabBadgeHtml(itemId) {
+  const n = rbReviewableCount(itemId);
+  if (n == null || n <= 0) return '';
+  return `<span style="background:var(--accent);color:#fff;border-radius:9px;font-size:10px;padding:1px 6px;margin-left:5px">Chấm: ${n}</span>`;
+}
+
+function rbTodoChipHtml(itemId) {
+  const n = rbReviewableCount(itemId);
+  if (n == null || n <= 0) return '';
+  return `<span class="pill pill-accent" title="Số shot bạn đủ điều kiện chấm trên Shot Board (đã loại shot của chính bạn)">🛡 Chấm: ${n}</span>`;
+}
+
+async function rbRefreshInboxCache() {
+  try {
+    const r = await apiFetch('/api/v1/agent/inbox', { timeoutMs: 20000 });
+    if (r.ok) {
+      RB_INBOX_CACHE = await r.json();
+      renderFilteredTodos();
+    }
+  } catch (err) {
+    console.warn('[rbRefreshInboxCache] Error:', err);
+  }
+}
+
+async function rbLoadDefectCodes() {
+  if (RB_DEFECT_CODES) return RB_DEFECT_CODES;
+  const r = await apiFetch('/api/v1/board/defect-codes', { timeoutMs: 12000 });
+  if (!r.ok) throw new Error(await extractApiError(r, 'Không tải được bảng defect codes'));
+  const d = await r.json();
+  RB_DEFECT_CODES = d.codes || [];
+  RB_DEFECT_MAP = {};
+  RB_DEFECT_CODES.forEach(c => { RB_DEFECT_MAP[c.code] = c; });
+  return RB_DEFECT_CODES;
+}
+
+function rbShotLocal(itemId, idx) {
+  const item = detailsCache[itemId] || allTodos.find(t => t.item_id === itemId) || {};
+  const cl = buildChecklistFallback(item);
+  const shots = (cl && Array.isArray(cl.shots) && cl.shots.length) ? cl.shots : (item.shots || []);
+  return shots.find(s => Number(s.index) === Number(idx)) || null;
+}
+
+function rbFmtTime(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '';
+  const ms = n > 1e12 ? n : n * 1000;
+  const d = new Date(ms);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + d.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
+}
+
+function rbErrorHtml(detail, code) {
+  return `<div class="rb-empty">❌ ${esc(detail || 'Lỗi không xác định')}${code ? ` <span class="mono rb-ded">(${esc(code)})</span>` : ''}</div>`;
+}
+
+function getBoardStatusPill(s) {
+  if (s.board_status === 'green') return '<span class="pill pill-ok" title="Shot Board: đã đủ 2 pass từ 2 agent khác nhau">Xanh</span>';
+  if (s.board_status === 'red') return '<span class="pill pill-danger" title="Shot đỏ — phải gen lại theo regen brief">Đỏ</span>';
+  if (s.grandfathered) return '<span class="pill pill-ghost" title="Video cũ trước khi bật board — không bắt buộc chấm, không tính xanh">Cũ (chưa chấm)</span>';
+  if (s.has_video) return '<span class="pill pill-warn" title="Chưa đủ 2 pass trên Shot Board">Chưa chấm</span>';
+  return '';
+}
+
+// ---- Tab Review Board ----
+function renderReviewBoardSection(item) {
+  const itemId = item.item_id;
+  const reviewable = rbReviewableCount(itemId);
+  const meLabel = VS_ME && VS_ME.identity ? `${esc(VS_ME.identity)} · ${esc(VS_ME.scope || '?')}` : 'chưa rõ danh tính';
+  return `
+  <section class="panel" id="review-board-panel-${esc(itemId)}">
+    <div class="panel-header">
+      <div>
+        <h3 class="panel-title">
+          <span>🛡 Review Board — Chấm mù 2 lượt / shot</span>
+          ${reviewable != null && reviewable > 0 ? `<span class="pill pill-accent">Còn ${reviewable} việc chấm cho bạn</span>` : '<span class="pill pill-ghost">Hết việc chấm (hoặc chưa tải inbox)</span>'}
+        </h3>
+        <div class="panel-subtitle">
+          Server nhả đúng 1 shot bạn đủ điều kiện (không phải shot bạn gen/upload, chưa chấm version này, ưu tiên shot đã có 1 pass — chấm thêm 1 lượt là xanh ngay). Điểm do server tính — bạn chỉ tick lỗi.
+        </div>
+      </div>
+      <span class="rb-identity"><span class="cmt-avatar">${esc(VS_ME && VS_ME.identity ? VS_ME.identity.slice(0, 1).toUpperCase() : '?')}</span><span>${meLabel}</span></span>
+    </div>
+
+    <div class="rb-banner">
+      <div class="rb-banner-info" id="rb-banner-info-${esc(itemId)}">Bấm "Chấm việc tiếp theo" để nhận shot cần chấm. "Việc của tôi" để nhận shot đỏ cần gen lại (kèm brief + góp ý).</div>
+      <div class="rb-actions">
+        <button type="button" class="btn-primary btn-sm" onclick="rbTakeReviewJob('${esc(itemId)}')">▶ Chấm việc tiếp theo</button>
+        <button type="button" class="btn-sm" onclick="rbTakeMyJob('${esc(itemId)}')">📋 Việc của tôi (gen lại)</button>
+      </div>
+    </div>
+
+    <div id="rb-workarea-${esc(itemId)}">
+      <div class="rb-empty">Chưa có việc nào được nhận. Một lượt chấm = xem video → tick lỗi (hoặc bỏ trống nếu sạch) → Gửi.</div>
+    </div>
+  </section>`;
+}
+
+// ---- Nhận việc chấm (mode=review) ----
+async function rbTakeReviewJob(itemId) {
+  const area = document.getElementById(`rb-workarea-${itemId}`);
+  const info = document.getElementById(`rb-banner-info-${itemId}`);
+  if (!area) return;
+  area.innerHTML = '<div class="rb-empty"><span class="spinner-ring"></span> Đang xin việc chấm từ server...</div>';
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/shots/next?mode=review`, { timeoutMs: 15000 });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { area.innerHTML = rbErrorHtml(d.detail, d.code); return; }
+    if (info) info.textContent = d.shot
+      ? `Đã nhận Shot #${String(d.shot.index).padStart(2, '0')} — chấm xong sẽ tự sang việc kế tiếp.`
+      : 'Hết việc chấm cho bạn lúc này.';
+    if (!d.shot) {
+      area.innerHTML = `<div class="rb-empty">🎉 Hết việc chấm phù hợp với bạn lúc này (${esc(d.reason || 'no_review_work')}).${d.retry_after_sec ? ` Server gợi ý thử lại sau ~${d.retry_after_sec}s.` : ''}<div style="margin-top:10px"><button type="button" class="btn-primary btn-sm" onclick="rbTakeReviewJob('${esc(itemId)}')">🔁 Thử lại</button></div></div>`;
+      return;
+    }
+    await rbRenderReviewPanel(itemId, d.shot, area);
+  } catch (err) {
+    area.innerHTML = rbErrorHtml(err.message);
+  }
+}
+
+// ---- Nhận việc gen theo dispatch mặc định (red_regen/empty_ready/...) ----
+async function rbTakeMyJob(itemId) {
+  const area = document.getElementById(`rb-workarea-${itemId}`);
+  const info = document.getElementById(`rb-banner-info-${itemId}`);
+  if (!area) return;
+  area.innerHTML = '<div class="rb-empty"><span class="spinner-ring"></span> Đang dò việc của bạn...</div>';
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/shots/next`, { timeoutMs: 15000 });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { area.innerHTML = rbErrorHtml(d.detail, d.code); return; }
+    if (!d.shot) {
+      if (info) info.textContent = 'Không còn việc nào ở mọi luồng.';
+      area.innerHTML = '<div class="rb-empty">Không còn việc nào trong mọi luồng (red_regen / empty_ready / waiting_review / missing_info).</div>';
+      return;
+    }
+    const s = d.shot;
+    const padIdx = String(s.index).padStart(2, '0');
+    if (info) info.textContent = `Việc của bạn: ${d.reason} — Shot #${padIdx}.`;
+    if (d.reason === 'waiting_review') { await rbRenderReviewPanel(itemId, s, area); return; }
+    if (d.reason === 'red_regen') { area.innerHTML = rbRegenPanelHtml(itemId, s); return; }
+    if (d.reason === 'empty_ready') { area.innerHTML = rbGenReadyPanelHtml(itemId, s); return; }
+    area.innerHTML = `<div class="rb-empty">Shot #${padIdx} thiếu thông tin gen (prompt/narration) — cần owner bổ sung ở Tab 1 trước khi gen.</div>`;
+  } catch (err) {
+    area.innerHTML = rbErrorHtml(err.message);
+  }
+}
+
+// ---- Panel chấm 2 cột ----
+async function rbRenderReviewPanel(itemId, shot, area) {
+  const idx = Number(shot.index);
+  const local = rbShotLocal(itemId, idx) || {};
+  RB_CURRENT = {
+    itemId, idx,
+    videoHash: shot.video_hash,
+    idemKey: (crypto.randomUUID ? crypto.randomUUID() : `rv-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  };
+  const padIdx = String(idx).padStart(2, '0');
+  const videoUrl = local.video_url || '';
+  const narration = shot.narration || local.narration || '';
+  const expDur = Number(shot.expected_duration_sec || local.expected_duration_sec || local.duration_sec || 0);
+  const visualPrompt = shot.visual_prompt || local.visual_prompt || '';
+
+  let codesHtml = '';
+  try {
+    const codes = await rbLoadDefectCodes();
+    codesHtml = codes.map(c => `
+      <label class="rb-defect-item ${c.fail_level ? 'is-fail' : ''}">
+        <input type="checkbox" class="rb-dc" data-code="${esc(c.code)}" data-fail="${c.fail_level ? '1' : ''}" data-ded="${c.deduction}" onchange="rbSyncBriefUI('${esc(itemId)}')"/>
+        <span><b>${esc(c.code)}</b> ${c.fail_level ? '<span class="pill pill-danger" style="font-size:9px;padding:1px 5px">FAIL</span>' : ''}<br/>
+        <span class="rb-ded">${esc(c.description)} (${c.deduction > 0 ? '−' + c.deduction : '0'})</span></span>
+      </label>`).join('');
+  } catch (err) {
+    codesHtml = `<div class="rb-empty">Không tải được bảng defect codes: ${esc(err.message)}</div>`;
+  }
+
+  const existingReviews = rbReviewsListHtml(shot);
+  const redBrief = shot.status === 'red' && shot.regen_brief ? rbBriefViewHtml(shot.regen_brief) : '';
+
+  area.innerHTML = `
+  <div class="rb-workcard" id="rb-panel-${esc(itemId)}-${idx}">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span class="pill pill-accent mono">Shot #${padIdx}</span>
+        ${getBoardStatusPill({ ...shot, has_video: true })}
+        <span class="rb-ded mono">version ${shot.video_version || 1} · hash ${esc(String(shot.video_hash || '').slice(0, 12))}…</span>
+      </div>
+      <button type="button" class="btn-xs" onclick="rbTakeReviewJob('${esc(itemId)}')" title="Bỏ qua shot này, lấy việc khác">⏭ Bỏ qua, lấy việc khác</button>
+    </div>
+
+    <div class="rb-layout">
+      <div>
+        ${videoUrl ? `
+          <video controls preload="metadata" playsinline src="${esc(videoUrl)}#t=0.05" style="width:100%;border-radius:10px;border:1px solid var(--border);background:#000"></video>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button type="button" class="btn-xs" onclick="playAudioSegment('${esc(itemId)}', ${Number(local.audio_start_sec || 0)}, ${Number(local.audio_end_sec || 0)}, ${idx})">🔊 Nghe câu audio chuẩn (${expDur.toFixed(1)}s)</button>
+            <button type="button" class="btn-xs" onclick="openCinemaShotModal('${esc(itemId)}', ${idx})">⛶ Xem lớn</button>
+          </div>` : `
+          <div class="rb-empty">Không tìm được URL video cho shot này trong dữ liệu tab hiện tại — mở Tab 3 (Lưới Shot) để xem.</div>`}
+        ${visualPrompt ? `<div class="rb-workcard" style="margin-top:10px"><div class="rb-ded" style="margin-bottom:4px">VISUAL PROMPT (shot phải khớp prompt này)</div><div style="font-size:12.5px">${esc(visualPrompt)}</div></div>` : ''}
+        ${narration ? `<div class="rb-workcard" style="margin-top:10px"><div class="rb-ded" style="margin-bottom:4px">NARRATION</div><div style="font-size:12.5px">${esc(narration)}</div></div>` : ''}
+        ${redBrief}
+      </div>
+
+      <div>
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Tick lỗi thấy được (bỏ trống nếu sạch)</div>
+        <div class="rb-defect-grid">${codesHtml}</div>
+
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;margin-top:10px;cursor:pointer">
+          <input type="checkbox" id="rb-pairing-${esc(itemId)}-${idx}" checked onchange="rbSyncBriefUI('${esc(itemId)}')"/>
+          Pairing OK — keyframe khớp narration &amp; đúng vị trí câu
+        </label>
+
+        <input type="text" id="rb-note-${esc(itemId)}-${idx}" placeholder="Ghi chú ngắn (không bắt buộc)" style="width:100%;margin-top:10px;padding:7px 9px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px;background:rgba(255,255,255,.04);color:var(--fg)"/>
+
+        <div class="rb-brief" id="rb-brief-${esc(itemId)}-${idx}">
+          <div style="font-weight:700;font-size:12.5px;color:var(--held)">⛔ Việc này sẽ FAIL — bắt buộc regen brief để agent gen lại biết cách sửa</div>
+          <input type="text" id="rb-brief-what-${esc(itemId)}-${idx}" placeholder="what_wrong — sai cái gì (bắt buộc)"/>
+          <input type="text" id="rb-brief-do-${esc(itemId)}-${idx}" placeholder="do_instead — làm thay đổi gì (bắt buộc)"/>
+          <input type="text" id="rb-brief-staging-${esc(itemId)}-${idx}" placeholder="staging_change — đổi gì trong staging (vd: camera_move: PUSH_IN -> STATIC)"/>
+        </div>
+
+        <div class="rb-preview" id="rb-preview-${esc(itemId)}-${idx}"></div>
+        <button type="button" class="btn-primary btn-sm" id="rb-submit-${esc(itemId)}-${idx}" style="width:100%;margin-top:8px" onclick="rbSubmitReview('${esc(itemId)}')">✅ Gửi chấm mù (server tự tính điểm)</button>
+
+        <div class="rb-workcard" style="margin-top:12px">
+          <div style="font-weight:600;font-size:12.5px;margin-bottom:4px">Các lượt chấm hiện có trên version này</div>
+          ${existingReviews}
+        </div>
+      </div>
+    </div>
+
+    <div class="rb-workcard" style="margin-top:12px">
+      <div style="font-weight:600;font-size:12.5px">💬 Góp ý cho shot này <span class="rb-ded">(agent gen lại sẽ đọc — có thể gửi kèm cả khi chưa chấm)</span></div>
+      <div id="cmt-mount-${esc(itemId)}-${idx}"><div class="cmt-meta">Đang tải góp ý...</div></div>
+    </div>
+  </div>`;
+
+  rbSyncBriefUI(itemId);
+  rbLoadCommentsInto(itemId, idx, `cmt-mount-${itemId}-${idx}`);
+}
+
+function rbBriefViewHtml(brief) {
+  return `<div class="rb-workcard" style="border-color:rgba(220,38,38,.6);background:rgba(220,38,38,.04);margin-top:10px">
+    <div style="font-weight:700;font-size:12.5px;color:var(--held);margin-bottom:6px">⛔ REGEN BRIEF (bắt buộc thực hiện khi gen lại)</div>
+    <div style="font-size:12.5px"><b>what_wrong:</b> ${esc(brief.what_wrong || '')}</div>
+    <div style="font-size:12.5px"><b>do_instead:</b> ${esc(brief.do_instead || '')}</div>
+    <div style="font-size:12.5px"><b>staging_change:</b> ${esc(brief.staging_change || 'none')}</div>
+  </div>`;
+}
+
+function rbReviewsListHtml(shot) {
+  const revs = shot.reviews || [];
+  if (!revs.length) return '<div class="cmt-meta">Chưa có lượt chấm nào trên version này.</div>';
+  const revealed = !!shot.scores_summary;
+  const list = revs.map(r => {
+    const vc = r.verdict === 'pass' ? 'pill-ok' : 'pill-danger';
+    const scoreHtml = revealed && r.score != null ? ` ${r.score.toFixed(2)}` : '';
+    const codesHtml = revealed && Array.isArray(r.defect_codes) && r.defect_codes.length
+      ? `<div class="rb-ded" style="margin-top:3px">${esc(r.defect_codes.join(', '))}</div>` : '';
+    const noteHtml = r.note ? `<div style="margin-top:3px">${esc(r.note)}</div>` : '';
+    return `<div class="cmt-item">
+      <span class="cmt-avatar">${esc(String(r.reviewer || '?').slice(0, 1).toUpperCase())}</span>
+      <div class="cmt-bubble">
+        <div class="cmt-meta"><b>${esc(r.reviewer || '?')}</b><span>${rbFmtTime(r.created_at)}</span></div>
+        <div><span class="pill ${vc}" style="font-size:10px;padding:1px 7px">${scoreHtml} ${esc(r.verdict || '').toUpperCase()}</span>${codesHtml}${noteHtml}</div>
+      </div>
+    </div>`;
+  }).join('');
+  const summary = revealed && shot.scores_summary
+    ? `<div class="rb-ded" style="margin-top:6px">${shot.scores_summary.count} lượt · ${shot.scores_summary.distinct_reviewers} reviewer · pass ${shot.scores_summary.pass_count} · fail ${shot.scores_summary.fail_count}</div>`
+    : `<div class="rb-ded" style="margin-top:6px">${revs.length} lượt chấm — điểm bị ẩn theo luật chấm mù (bạn chưa chấm version này)</div>`;
+  return `<div class="cmt-thread">${list}</div>${summary}`;
+}
+
+function rbSelectedCodes() {
+  return Array.from(document.querySelectorAll('input.rb-dc:checked')).map(el => el.dataset.code);
+}
+
+function rbSyncBriefUI(itemId) {
+  if (!RB_CURRENT) return;
+  const { idx } = RB_CURRENT;
+  const ded = Array.from(document.querySelectorAll('input.rb-dc:checked'))
+    .reduce((sum, el) => sum + Number(el.dataset.ded || 0), 0);
+  const hasFail = Array.from(document.querySelectorAll('input.rb-dc:checked')).some(el => el.dataset.fail === '1');
+  const pairing = document.getElementById(`rb-pairing-${itemId}-${idx}`);
+  const pairingOk = !pairing || pairing.checked;
+  const score = Math.max(0, Math.min(10, 10 - ded));
+  const verdict = (!pairingOk || hasFail || score <= 9.5) ? 'fail' : 'pass';
+  const briefEl = document.getElementById(`rb-brief-${itemId}-${idx}`);
+  if (briefEl) briefEl.classList.toggle('open', verdict === 'fail');
+  const preview = document.getElementById(`rb-preview-${itemId}-${idx}`);
+  if (preview) {
+    preview.innerHTML = `Dự kiến: <span class="pill ${verdict === 'pass' ? 'pill-ok' : 'pill-danger'}" style="font-size:11px;padding:1px 8px">${score.toFixed(2)} · ${verdict.toUpperCase()}</span>
+      <span class="rb-ded">— server vẫn tự tính lại từ defect codes</span>`;
+  }
+}
+
+async function rbSubmitReview(itemId) {
+  if (!RB_CURRENT || RB_CURRENT.itemId !== itemId) return;
+  const cur = RB_CURRENT;
+  const btn = document.getElementById(`rb-submit-${itemId}-${cur.idx}`);
+  const codes = rbSelectedCodes();
+  const pairingEl = document.getElementById(`rb-pairing-${itemId}-${cur.idx}`);
+  const noteEl = document.getElementById(`rb-note-${itemId}-${cur.idx}`);
+  const briefEl = document.getElementById(`rb-brief-${itemId}-${cur.idx}`);
+  const body = {
+    defect_codes: codes,
+    pairing_ok: !pairingEl || pairingEl.checked,
+    reviewed_video_hash: cur.videoHash
+  };
+  if (noteEl && noteEl.value.trim()) body.note = noteEl.value.trim();
+  if (briefEl && briefEl.classList.contains('open')) {
+    const what = document.getElementById(`rb-brief-what-${itemId}-${cur.idx}`)?.value.trim();
+    const instead = document.getElementById(`rb-brief-do-${itemId}-${cur.idx}`)?.value.trim();
+    const staging = document.getElementById(`rb-brief-staging-${itemId}-${cur.idx}`)?.value.trim();
+    if (!what || !instead) {
+      showToast('❌ Regen brief cần đủ what_wrong + do_instead trước khi gửi', 'error', 5000);
+      return;
+    }
+    body.regen_brief = { what_wrong: what, do_instead: instead, staging_change: staging || 'none' };
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang gửi chấm...'; }
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/shots/${cur.idx}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': cur.idemKey },
+      body: JSON.stringify(body),
+      timeoutMs: 30000
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = d.detail || `HTTP ${r.status}`;
+      if (d.code === 'already_reviewed' || d.code === 'self_review') {
+        showToast(`⚠️ ${msg} — lấy việc khác`, 'info', 5000);
+        await rbRefreshInboxCache();
+        await rbTakeReviewJob(itemId);
+        return;
+      }
+      showToast(`❌ Chấm thất bại: ${msg}`, 'error', 6000);
+      return;
+    }
+    const rv = d.review || {};
+    showToast(`✅ Đã chấm Shot #${String(cur.idx).padStart(2, '0')}: ${String(rv.verdict || '').toUpperCase()}${rv.score != null ? ` (${rv.score})` : ''}`, rv.verdict === 'pass' ? 'ok' : 'info', 5000);
+    RB_CURRENT = null;
+    await rbRefreshInboxCache();
+    await rbTakeReviewJob(itemId);
+  } catch (err) {
+    showToast(`❌ Lỗi gửi chấm: ${err.message || err}`, 'error', 6000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Gửi chấm mù (server tự tính điểm)'; }
+  }
+}
+
+// ---- Panel gen lại shot đỏ (red_regen) ----
+function rbRegenPanelHtml(itemId, s) {
+  const idx = Number(s.index);
+  const padIdx = String(idx).padStart(2, '0');
+  const local = rbShotLocal(itemId, idx) || {};
+  const videoUrl = local.video_url || '';
+  return `
+  <div class="rb-workcard" style="border-color:rgba(220,38,38,.6)">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <span class="pill pill-danger mono">⛔ SHOT ĐỎ #${padIdx} — VIỆC CỦA BẠN</span>
+      <span class="rb-ded mono">version ${s.video_version || 1}</span>
+    </div>
+    ${s.regen_brief ? rbBriefViewHtml(s.regen_brief) : '<div class="rb-ded">Không có regen brief (hiếm — báo owner).</div>'}
+    ${videoUrl ? `<video controls preload="metadata" playsinline src="${esc(videoUrl)}#t=0.05" style="width:100%;max-height:300px;border-radius:10px;border:1px solid var(--border);background:#000;margin-top:10px"></video>` : ''}
+    <div style="margin-top:10px;font-weight:600;font-size:12.5px">💬 Góp ý của reviewer — đọc kỹ trước khi gen lại:</div>
+    <div id="cmt-mount-${esc(itemId)}-${idx}"><div class="cmt-meta">Đang tải góp ý...</div></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <input type="file" id="rb-regen-file-${esc(itemId)}-${idx}" accept="video/*" style="max-width:240px"/>
+      <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="rb-regen-staging-${esc(itemId)}-${idx}" checked/> staging đã đổi
+      </label>
+      <button type="button" class="btn-primary btn-sm" onclick="rbUploadRegen('${esc(itemId)}', ${idx})">⬆ Upload version mới (kèm brief)</button>
+    </div>
+    <div class="rb-ded" style="margin-top:6px">Upload sẽ tự kèm addresses_review_id trỏ vào fail review mới nhất — luật board bắt buộc với shot đỏ.</div>
+  </div>`;
+}
+
+async function rbUploadRegen(itemId, idx) {
+  const fileEl = document.getElementById(`rb-regen-file-${itemId}-${idx}`);
+  const stagingEl = document.getElementById(`rb-regen-staging-${itemId}-${idx}`);
+  const file = fileEl && fileEl.files && fileEl.files[0];
+  if (!file) { showToast('Chọn file video trước khi upload', 'error'); return; }
+  // Fail review mới nhất còn hiệu lực trên version hiện tại
+  let failReviewId = '';
+  try {
+    const sr = await apiFetch(`/api/v1/todos/${itemId}/shots/${idx}`, { timeoutMs: 12000 });
+    if (sr.ok) {
+      const shot = await sr.json();
+      const fr = (shot.reviews || []).find(x => x.verdict === 'fail');
+      if (fr) failReviewId = fr.id;
+    }
+  } catch (err) { /* bỏ qua — server sẽ từ chối nếu thiếu brief */ }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('shot_index', String(idx));
+  fd.append('covered_shot_indexes', String(idx));
+  if (failReviewId) fd.append('addresses_review_id', failReviewId);
+  fd.append('staging_changed', stagingEl && stagingEl.checked ? 'true' : 'false');
+  showToast(`⏳ Đang upload version mới cho Shot #${String(idx).padStart(2, '0')}...`, 'info', 6000);
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/videos`, { method: 'POST', body: fd, timeoutMs: 180000 });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Upload shot đỏ thất bại'));
+    showToast(`✅ Đã upload version mới cho Shot #${String(idx).padStart(2, '0')} — chờ 2 reviewer chấm lại`, 'ok', 6000);
+    await refreshSingleItem(itemId);
+    const area = document.getElementById(`rb-workarea-${itemId}`);
+    if (area) area.innerHTML = '<div class="rb-empty">Đã nộp version mới — shot quay lại hàng chờ review. Bấm "Chấm việc tiếp theo" nếu bạn cũng là reviewer.</div>';
+  } catch (err) {
+    showToast(`❌ ${err.message || 'Upload thất bại'}`, 'error', 6000);
+  }
+}
+
+// ---- Panel gen shot trống (empty_ready) ----
+function rbGenReadyPanelHtml(itemId, s) {
+  const idx = Number(s.index);
+  const padIdx = String(idx).padStart(2, '0');
+  const expDur = Number(s.expected_duration_sec || 0);
+  return `
+  <div class="rb-workcard">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <span class="pill pill-warn mono">🎬 SHOT TRỐNG #${padIdx} — CẦN GEN</span>
+      <span class="rb-ded mono">dự kiến ${expDur.toFixed(2)}s (${Number(s.audio_start_sec || 0).toFixed(1)}s → ${Number(s.audio_end_sec || 0).toFixed(1)}s)</span>
+    </div>
+    ${s.visual_prompt ? `<div class="rb-workcard" style="margin-bottom:8px"><div class="rb-ded" style="margin-bottom:4px">VISUAL PROMPT</div><div style="font-size:12.5px">${esc(s.visual_prompt)}</div></div>` : ''}
+    ${s.narration ? `<div class="rb-workcard" style="margin-bottom:8px"><div class="rb-ded" style="margin-bottom:4px">NARRATION</div><div style="font-size:12.5px">${esc(s.narration)}</div></div>` : ''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" class="btn-primary btn-sm" onclick="triggerQuickSlotUpload('${esc(itemId)}', ${idx})">⬆ Upload video vào Shot #${padIdx}</button>
+      <button type="button" class="btn-xs" onclick="playAudioSegment('${esc(itemId)}', ${Number(s.audio_start_sec || 0)}, ${Number(s.audio_end_sec || 0)}, ${idx})">🔊 Nghe câu audio chuẩn</button>
+    </div>
+    <div class="rb-ded" style="margin-top:8px">Sau khi upload, shot vào hàng chờ review — 2 agent khác nhau chấm pass thì shot xanh.</div>
+  </div>`;
+}
+
+// ---- Comment per-shot (component dùng chung) ----
+function renderShotCommentsHtml(d, mountId, itemId, idx) {
+  const visible = !!d.comments_visible;
+  const count = Number(d.comment_count || 0);
+  const hiddenNote = !visible && count > 0
+    ? `<div class="cmt-meta">🔒 ${count} góp ý — ẩn cho tới khi bạn chấm version này (luật chấm mù)</div>` : '';
+  const emptyNote = visible && count === 0
+    ? '<div class="cmt-meta">Chưa có góp ý nào cho shot này.</div>' : '';
+  const list = visible
+    ? (d.comments || []).map(c => `
+      <div class="cmt-item">
+        <span class="cmt-avatar">${esc(String(c.author || '?').slice(0, 1).toUpperCase())}</span>
+        <div class="cmt-bubble">
+          <div class="cmt-meta"><b>${esc(c.author || '?')}</b><span>${rbFmtTime(c.created_at)}</span><span class="rb-ded">v${c.video_version || 1}</span></div>
+          <div>${esc(c.body || '')}</div>
+        </div>
+      </div>`).join('')
+    : '';
+  return `${hiddenNote}${emptyNote}<div class="cmt-thread">${list}</div>
+  <div class="cmt-input-row">
+    <textarea id="cmt-input-${esc(mountId)}" placeholder="Thêm góp ý cho shot này — agent gen lại sẽ đọc..."></textarea>
+    <button type="button" class="btn-primary btn-sm" onclick="rbSendComment('${esc(itemId)}', ${idx}, this, '${esc(mountId)}')">Gửi</button>
+  </div>`;
+}
+
+async function rbLoadCommentsInto(itemId, idx, mountId) {
+  const el = document.getElementById(mountId);
+  if (!el) return;
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/shots/${idx}/comments`, { timeoutMs: 12000 });
+    if (!r.ok) { el.innerHTML = `<div class="cmt-meta">Không tải được góp ý (HTTP ${r.status}).</div>`; return; }
+    const d = await r.json();
+    el.innerHTML = renderShotCommentsHtml(d, mountId, itemId, idx);
+  } catch (err) {
+    el.innerHTML = `<div class="cmt-meta">Lỗi tải góp ý: ${esc(err.message || '')}</div>`;
+  }
+}
+
+async function rbSendComment(itemId, idx, btn, mountId) {
+  const ta = document.getElementById(`cmt-input-${mountId}`);
+  const text = ta ? (ta.value || '').trim() : '';
+  if (!text) { showToast('Nhập nội dung góp ý trước khi gửi', 'error'); return; }
+  if (btn) btn.disabled = true;
+  const idemKey = crypto.randomUUID ? crypto.randomUUID() : `cmt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    const r = await apiFetch(`/api/v1/todos/${itemId}/shots/${idx}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idemKey },
+      body: JSON.stringify({ body: text }),
+      timeoutMs: 20000
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${r.status}`);
+    }
+    if (ta) ta.value = '';
+    showToast('💬 Đã gửi góp ý', 'ok', 3000);
+    await rbLoadCommentsInto(itemId, idx, mountId);
+  } catch (err) {
+    showToast(`❌ Gửi góp ý thất bại: ${err.message || err}`, 'error', 5000);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function toggleShotComments(itemId, idx) {
+  const mount = document.getElementById(`cmt-card-${itemId}-${idx}`);
+  if (!mount) return;
+  const willOpen = !mount.classList.contains('open');
+  mount.classList.toggle('open', willOpen);
+  if (willOpen) await rbLoadCommentsInto(itemId, idx, `cmt-card-${itemId}-${idx}`);
 }
 
 // --- Interactive Shot Checklist Board for Video Generation Agent ---
@@ -7507,7 +8149,7 @@ async function refreshChatMessages(threadId, markRead) {
     const box = document.getElementById('chatMsgBox');
     if (box) {
       for (const m of d.messages) {
-        const mine = m.sender === 'owner';
+        const mine = m.sender === (VS_ME && VS_ME.identity ? VS_ME.identity : 'owner');
         const div = document.createElement('div');
         div.style.cssText = `margin:6px 0;text-align:${mine ? 'right' : 'left'}`;
         div.innerHTML = `<div style="font-size:10px;color:var(--fg-muted)">${esc(m.sender)} · ${new Date(m.created_at * 1000).toLocaleTimeString()}</div>
@@ -8566,6 +9208,8 @@ setupPinBoxes();
     const d = await r.json().catch(() => ({ authenticated: false }));
     if (d.authenticated) {
       hideLockScreen();
+      await loadWhoami();
+      rbRefreshInboxCache();
       await loadTodos({ force: true });
       setTimeout(() => { loadStorageHealth(); }, 150);
     } else {

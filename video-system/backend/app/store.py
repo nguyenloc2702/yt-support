@@ -589,6 +589,18 @@ CREATE TABLE IF NOT EXISTS shot_reviews (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shot_reviews_shot ON shot_reviews(item_id, shot_index, video_hash);
+
+CREATE TABLE IF NOT EXISTS shot_comments (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  shot_id TEXT NOT NULL,
+  shot_index INTEGER NOT NULL,
+  video_version INTEGER NOT NULL DEFAULT 0,
+  author TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shot_comments_shot ON shot_comments(item_id, shot_index, created_at);
 """
 
 _ITEM_MIGRATION_COLS = [

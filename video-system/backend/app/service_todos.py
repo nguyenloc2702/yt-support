@@ -756,7 +756,8 @@ class TodoService:
             f"SELECT item_id, index_num, shot_type, narration, visual_prompt, on_screen_text, "
             f"on_screen_type, beat_type, voice, generator, "
             f"audio_start_sec, audio_end_sec, "
-            f"agent_checked, generated_duration_sec, agent_note "
+            f"agent_checked, generated_duration_sec, agent_note, "
+            f"board_status, grandfathered, video_version, declared_generator, uploaded_by "
             f"FROM shots WHERE item_id IN ({ph}) AND status != 'superseded' ORDER BY index_num ASC",
             tuple(item_ids),
         ):
@@ -859,7 +860,8 @@ class TodoService:
                 "SELECT index_num, shot_type, narration, visual_prompt, on_screen_text, "
                 "on_screen_type, beat_type, voice, generator, "
                 "audio_start_sec, audio_end_sec, "
-                "agent_checked, generated_duration_sec, agent_note "
+                "agent_checked, generated_duration_sec, agent_note, "
+                "board_status, grandfathered, video_version, declared_generator, uploaded_by "
                 "FROM shots WHERE item_id=? AND status != 'superseded' ORDER BY index_num ASC",
                 (item_id,),
             )
@@ -1032,6 +1034,12 @@ class TodoService:
                 "keyframe_url": shot_img_map.get(idx_num),
                 "reference_image_url": ref_item["file_url"] if ref_item else None,
                 "reference_image": ref_item,
+                # Shot Board (web Review Board): trạng thái board + danh tính gen
+                "board_status": s.get("board_status"),
+                "grandfathered": bool(s.get("grandfathered")),
+                "video_version": int(s.get("video_version") or 0),
+                "declared_generator": s.get("declared_generator"),
+                "uploaded_by": s.get("uploaded_by"),
             })
 
         progress = self.compute_video_progress(item, videos, shots_rows=shots_rows)
@@ -1090,6 +1098,11 @@ class TodoService:
                     "on_screen_type": s["on_screen_type"],
                     "keyframe_url": s["keyframe_url"],
                     "reference_image_url": s["reference_image_url"],
+                    "board_status": s["board_status"],
+                    "grandfathered": s["grandfathered"],
+                    "video_version": s["video_version"],
+                    "declared_generator": s["declared_generator"],
+                    "uploaded_by": s["uploaded_by"],
                 }
                 for s in shots_formatted
             ],

@@ -56,7 +56,7 @@ from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sy
 
 from .service_batches import BatchService
 from .service_bgm import BgmService
-from .service_board import BoardError, BoardService
+from .service_board import BoardError, BoardService, defect_codes_public
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
 from .service_readme import ReadMeService
@@ -1373,6 +1373,55 @@ async def post_shot_review(item_id: str, shot_index: int, request: Request):
             request,
             payload,
             lambda: board.submit_review(item_id, shot_index, caller, payload),
+            201,
+            replay_status_200=True,
+            add_replay_flag=True,
+            reject_cross_caller=True,
+        )
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+    except KeyError:
+        raise HTTPException(404, "todo item not found")
+
+
+@app.get("/api/v1/board/defect-codes")
+def get_board_defect_codes(request: Request = None):
+    """Bảng trừ điểm §4.2 — UI render checkbox từ đây, không hardcode."""
+    auth.require(request, "read")
+    return {"codes": defect_codes_public()}
+
+
+@app.get("/api/v1/todos/{item_id}/shots/{shot_index}/comments")
+def get_shot_comments(item_id: str, shot_index: int, request: Request = None):
+    auth.require(request, "read")
+    caller, scope = auth.identity_for(request)
+    try:
+        return board.list_comments(
+            item_id, shot_index,
+            caller=caller, privileged=_is_board_privileged(caller, scope),
+        )
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+    except KeyError:
+        raise HTTPException(404, "todo item not found")
+
+
+@app.post("/api/v1/todos/{item_id}/shots/{shot_index}/comments")
+async def post_shot_comment(item_id: str, shot_index: int, request: Request):
+    auth.require(request, "ingest")
+    caller, _ = auth.identity_for(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(422, "Invalid JSON payload", "validation_error")
+    if not isinstance(payload, dict) or not isinstance(payload.get("body"), str):
+        raise ApiError(422, "Comment body must be a string", "validation_error")
+    try:
+        return await run_in_threadpool(
+            _idempotent_call,
+            request,
+            payload,
+            lambda: board.add_comment(item_id, shot_index, caller, payload["body"]),
             201,
             replay_status_200=True,
             add_replay_flag=True,
