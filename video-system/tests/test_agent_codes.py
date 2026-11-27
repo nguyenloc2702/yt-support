@@ -47,12 +47,26 @@ def test_code_login_returns_token_with_identity_and_scope(client, agent_codes_en
 
 
 def test_token_works_as_bearer_and_keeps_identity(client, agent_codes_env):
-    """Agent không phải nhét mã 6 số vào mọi request — chỉ giữ token."""
+    """Agent không phải nhét mã 6 số vào mọi request — chỉ giữ token.
+
+    Phải `cookies.clear()`: login set session cookie hợp lệ, và identity_for
+    ưu tiên cookie trước Bearer — không xoá thì request đi đường cookie và
+    đường Bearer-token hỏng cũng xanh giả (đúng bẫy §11 của báo cáo board).
+    """
     tok = _login(client, code="997222").json()["token"]
+    client.cookies.clear()
     r = client.get("/api/v1/auth/whoami", headers={"Authorization": f"Bearer {tok}"})
     if r.status_code == 404:  # endpoint chưa có thì bỏ qua, phần dưới vẫn kiểm
         pytest.skip("/auth/whoami chưa tồn tại")
+    assert r.status_code == 200, r.text
     assert r.json()["identity"] == "muse-gen-1"
+    assert r.json()["scope"] == "ingest"
+
+    # Token phải dùng được trên endpoint nghiệp vụ, không chỉ whoami —
+    # middleware chấp nhận token nhưng route 500 là bug thật đã từng xảy ra.
+    inbox = client.get("/api/v1/agent/inbox", headers={"Authorization": f"Bearer {tok}"})
+    assert inbox.status_code == 200, inbox.text
+    assert inbox.json()["caller"] == "muse-gen-1"
 
 
 def test_wrong_code_locks_out_after_five_tries(client, agent_codes_env):

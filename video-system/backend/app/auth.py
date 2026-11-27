@@ -69,7 +69,7 @@ class Auth:
             if scope is not None:
                 name = key.rsplit(":", 1)[0] if ":" in key else key
                 return (name or "agent"), scope
-            as_token = self.verify_token(key)
+            as_token = webauth.verify_token(key)
             if as_token:
                 return as_token
             raise HTTPException(401, "unknown key")
