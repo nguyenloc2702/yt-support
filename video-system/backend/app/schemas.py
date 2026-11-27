@@ -312,8 +312,10 @@ class AudioRegenerateRequest(BaseModel):
 
 
 class WebLoginRequest(BaseModel):
-    pin: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$",
-                     description="Mã PIN 6 số mở khóa web UI")
+    pin: str | None = Field(default=None, min_length=6, max_length=6, pattern=r"^\d{6}$",
+                            description="Mã PIN 6 số của owner — mở khóa web UI")
+    code: str | None = Field(default=None, min_length=6, max_length=6, pattern=r"^\d{6}$",
+                             description="Mã 6 số của một agent (VIDEO_AGENT_CODES) — đăng nhập lấy token")
 
 
 class ShotCheckUpdate(BaseModel):

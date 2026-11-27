@@ -14,15 +14,20 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import time
 
 from fastapi import HTTPException, Request
 
-from .config import api_keys, session_secret, web_pin
+from .config import agent_codes, api_keys, session_secret, web_pin
 
 log = logging.getLogger("video-system.auth")
 
 SCOPE_RANK = {"read": 0, "ingest": 1, "manager": 2, "admin": 3}
+
+# Identity đi vào token dạng chuỗi phân tách bằng '.', nên phải chặn ký tự '.'
+# và mọi thứ không an toàn cho cookie/header.
+_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 SESSION_COOKIE = "vs_session"
 SESSION_TTL_SEC = 30 * 24 * 3600  # 30 ngày
@@ -39,15 +44,21 @@ class Auth:
                 "Set VIDEO_API_KEYS before exposing this API.")
 
     def identity_for(self, request: Request) -> tuple[str, str]:
-        """(định danh agent, scope) — phần tên của key làm agent identity.
+        """(định danh agent, scope).
 
-        Key `video-agent-1:ingest` → identity `video-agent-1`. Session PIN →
-        `owner` với scope admin. Chat board dùng identity này làm sender,
-        vậy mỗi agent cần key riêng trong VIDEO_API_KEYS (key chung = mọi
-        tin hiện cùng một sender).
+        Ba nguồn, theo thứ tự:
+        1. Session cookie (PIN owner hoặc mã agent đã đổi token) — token mang
+           sẵn identity + scope, ký HMAC.
+        2. `Authorization: Bearer <key>` với key dài trong VIDEO_API_KEYS.
+        3. `Authorization: Bearer <token>` — token lấy từ /auth/login, để agent
+           không phải giữ key dài trong script.
+
+        Key `video-agent-1:ingest` → identity `video-agent-1`. Chat board dùng
+        identity này làm sender, vậy mỗi agent cần key riêng.
         """
-        if webauth.session_ok(request):
-            return "owner", "admin"
+        session = webauth.session_identity(request)
+        if session:
+            return session
         keys = self.keys or api_keys()
         if keys:
             header = request.headers.get("Authorization", "")
@@ -55,10 +66,13 @@ class Auth:
                 raise HTTPException(401, "missing bearer key")
             key = header[len("Bearer "):].strip()
             scope = keys.get(key)
-            if scope is None:
-                raise HTTPException(401, "unknown key")
-            name = key.rsplit(":", 1)[0] if ":" in key else key
-            return (name or "agent"), scope
+            if scope is not None:
+                name = key.rsplit(":", 1)[0] if ":" in key else key
+                return (name or "agent"), scope
+            as_token = self.verify_token(key)
+            if as_token:
+                return as_token
+            raise HTTPException(401, "unknown key")
         if not webauth.is_direct_loopback(request):
             raise HTTPException(401, "API keys unconfigured; remote access denied")
         return "loopback", "admin"
@@ -128,34 +142,86 @@ class WebAuth:
         self._fails[ip] = entry
         raise HTTPException(401, f"Mã PIN không đúng (còn {PIN_MAX_FAILS - entry[0]} lần thử)")
 
+    def login_with_code(self, code: str, ip: str) -> tuple[str, str]:
+        """Đổi mã 6 số của agent lấy (identity, scope). Sai thì 401, khoá theo IP.
+
+        Mã 6 số chỉ 10^6 tổ hợp, nên khoá sau 5 lần sai là bắt buộc — không có
+        nó thì một script dò hết bảng mã trong vài phút.
+        """
+        now_ts = time.time()
+        entry = self._fails.get(ip, [0, 0.0])
+        if entry[1] > now_ts:
+            wait = int(entry[1] - now_ts) + 1
+            raise HTTPException(429, f"Nhập sai quá nhiều lần — thử lại sau {wait}s")
+
+        match = agent_codes().get((code or "").strip())
+        if not match:
+            self._register_fail(ip, now_ts)
+            return ("", "")  # không tới được: _register_fail luôn ném
+        self._fails.pop(ip, None)
+        return match
+
+    def _register_fail(self, ip: str, now_ts: float) -> None:
+        entry = self._fails.setdefault(ip, [0, 0.0])
+        entry[0] += 1
+        if entry[0] >= PIN_MAX_FAILS:
+            entry[1] = now_ts + PIN_LOCKOUT_SEC
+            entry[0] = 0
+            log.warning("code lockout %ss for %s", PIN_LOCKOUT_SEC, ip)
+            raise HTTPException(429, f"Nhập sai {PIN_MAX_FAILS} lần — khóa {PIN_LOCKOUT_SEC}s")
+        raise HTTPException(401, f"Mã không đúng (còn {PIN_MAX_FAILS - entry[0]} lần thử)")
+
     # -- session token -------------------------------------------------------
 
-    def make_token(self) -> str:
-        exp = format(int(time.time()) + SESSION_TTL_SEC, "x")
-        mac = hmac.new(self.secret, f"v1:{exp}".encode(), hashlib.sha256).hexdigest()
-        return f"{exp}.{mac}"
+    def make_token(self, identity: str = "owner", scope: str = "admin") -> str:
+        """Token mang sẵn identity + scope, ký HMAC — không cần tra DB.
 
-    def verify_token(self, token: str) -> bool:
+        Định dạng `exp.identity.scope.mac`. Đổi từ `exp.mac` (v1) sang v2 vì
+        token cũ luôn ngầm hiểu là owner/admin; muốn nhiều agent dùng mã 6 số
+        thì identity phải nằm trong token, nếu không mọi agent thành `owner`.
+        """
+        exp = format(int(time.time()) + SESSION_TTL_SEC, "x")
+        mac = self._sign(exp, identity, scope)
+        return f"{exp}.{identity}.{scope}.{mac}"
+
+    def _sign(self, exp: str, identity: str, scope: str) -> str:
+        msg = f"v2:{exp}:{identity}:{scope}".encode()
+        return hmac.new(self.secret, msg, hashlib.sha256).hexdigest()
+
+    def verify_token(self, token: str) -> tuple[str, str] | None:
+        """(identity, scope) nếu token hợp lệ và chưa hết hạn, ngược lại None."""
         try:
-            exp, mac = token.split(".", 1)
-            want = hmac.new(self.secret, f"v1:{exp}".encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(mac, want):
-                return False
-            return int(exp, 16) > time.time()
-        except (ValueError, TypeError):
-            return False
+            exp, identity, scope, mac = token.split(".")
+        except (ValueError, AttributeError):
+            return None
+        if not identity or not _IDENTITY_RE.fullmatch(identity):
+            return None
+        if scope not in SCOPE_RANK:
+            return None
+        if not hmac.compare_digest(mac, self._sign(exp, identity, scope)):
+            return None
+        try:
+            if int(exp, 16) <= time.time():
+                return None
+        except ValueError:
+            return None
+        return identity, scope
+
+    def session_identity(self, request: Request) -> tuple[str, str] | None:
+        token = request.cookies.get(SESSION_COOKIE, "")
+        return self.verify_token(token) if token else None
 
     def session_ok(self, request: Request) -> bool:
-        token = request.cookies.get(SESSION_COOKIE, "")
-        return bool(token) and self.verify_token(token)
+        return self.session_identity(request) is not None
 
     def bearer_ok(self, request: Request) -> bool:
         header = request.headers.get("Authorization", "")
-        if header.startswith("Bearer "):
-            key = header[len("Bearer "):].strip()
-            if key in api_keys():
-                return True
-        return False
+        if not header.startswith("Bearer "):
+            return False
+        key = header[len("Bearer "):].strip()
+        if key in api_keys():
+            return True
+        return self.verify_token(key) is not None
 
     # -- middleware rule -----------------------------------------------------
 

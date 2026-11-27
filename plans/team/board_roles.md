@@ -17,15 +17,52 @@ Thứ tự: `read < ingest < manager < admin`. Mỗi endpoint khai mức tối t
 
 ## 2. Cấu hình
 
+Hai đường, dùng cho hai mục đích khác nhau.
+
+### 2a. Key dài cho máy (khuyến nghị cho agent chạy hàng loạt)
+
 ```bash
-VIDEO_API_KEYS=owner:admin,muse-boss:manager,muse-1:ingest,muse-2:ingest,muse-3:ingest
+VIDEO_API_KEYS=owner:admin,muse-boss:manager,muse-gen-1:ingest,muse-gen-2:ingest,muse-gen-3:ingest
 ```
 
-- Định dạng `tên:scope`, phân tách bằng dấu phẩy. **Chuỗi dùng làm Bearer token chính là `tên:scope`** — ví dụ `Authorization: Bearer muse-1:ingest`.
-- Phần **tên** trở thành identity của agent, và là thứ được ghi vào `uploaded_by`, `declared_generator`, `reviewer`. Đổi tên key = đổi danh tính trong toàn bộ lịch sử board.
-- `owner` là danh tính của phiên PIN trên web UI, luôn scope `admin`. Không cần khai trong env.
+- Định dạng `tên:scope`, phân tách bằng dấu phẩy. **Chuỗi dùng làm Bearer token chính là `tên:scope`** — ví dụ `Authorization: Bearer muse-gen-1:ingest`.
+- Phần **tên** trở thành identity, và là thứ được ghi vào `uploaded_by`, `declared_generator`, `reviewer`. Đổi tên key = đổi danh tính trong toàn bộ lịch sử board.
 
-Sửa env xong phải **restart process** — key được đọc lúc khởi động.
+### 2b. Mã 6 số cho người (đăng nhập đổi token)
+
+```bash
+VIDEO_AGENT_CODES=997220:owner:admin,997221:muse-boss:manager,997222:muse-gen-1:ingest,997223:muse-gen-2:ingest,997224:muse-gen-3:ingest
+```
+
+Đăng nhập:
+
+```bash
+curl -s -X POST https://vidfac.gacdero.vn/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"code":"997222"}'
+```
+
+Trả về:
+
+```json
+{"authenticated": true, "identity": "muse-gen-1", "scope": "ingest",
+ "token": "<exp>.<identity>.<scope>.<mac>", "expires_in_sec": 2592000}
+```
+
+Token dùng làm Bearer y như key dài, sống 30 ngày:
+
+```bash
+curl -s https://vidfac.gacdero.vn/api/v1/auth/whoami -H "Authorization: Bearer <token>"
+# {"identity":"muse-gen-1","scope":"ingest"}
+```
+
+**Vì sao không cho dùng thẳng mã 6 số làm key:** mã 6 số chỉ có 10^6 tổ hợp. Endpoint này nằm trên domain public, không rate limit ở tầng Bearer — một script dò hết bảng mã trong vài phút, và mỗi mã dò được là một danh tính có quyền upload + chấm + kí review. Mã chỉ đi qua `/auth/login`, nơi có **khoá 60 giây sau 5 lần sai** (đếm theo IP). Token sinh ra dài và có chữ ký HMAC nên không dò được.
+
+**Giới hạn phải biết:** đổi mã không thu hồi token đã phát — token sống tới hạn 30 ngày. Muốn đá toàn bộ người ra ngay thì đổi `VIDEO_SESSION_SECRET` (hoặc xoá `data/session_secret.key`) rồi restart; mọi token cũ mất hiệu lực tức thì.
+
+`owner` là danh tính của phiên PIN trên web UI, luôn scope `admin`. PIN owner đặt bằng `VIDEO_WEB_PIN` (mặc định `997220`), đi qua cùng endpoint với trường `pin` thay vì `code`.
+
+Sửa env xong phải **restart process** — key và mã được đọc lúc khởi động (riêng `agent_codes()` đọc lại mỗi lần gọi, nhưng đừng dựa vào chi tiết đó).
 
 ## 3. Vì sao mỗi muse phải một key riêng
 

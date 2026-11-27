@@ -177,13 +177,28 @@ async def pin_gate(request: Request, call_next):
 
 @app.post("/api/v1/auth/login")
 def web_login(body: WebLoginRequest, request: Request):
+    """Đăng nhập bằng PIN owner (`pin`) hoặc mã 6 số của agent (`code`).
+
+    Mã 6 số KHÔNG dùng trực tiếp làm API key: nó chỉ đổi lấy một token dài ký
+    HMAC. Không gian 10^6 tổ hợp mà endpoint này nằm trên domain public, nên
+    mã chỉ an toàn khi đi kèm khoá sau 5 lần sai (login_with_code/verify_pin).
+    """
     ip = webauth.client_ip(request)
-    webauth.verify_pin(body.pin, ip)
-    token = webauth.make_token()
+    if body.code:
+        identity, scope = webauth.login_with_code(body.code, ip)
+    elif body.pin:
+        webauth.verify_pin(body.pin, ip)
+        identity, scope = "owner", "admin"
+    else:
+        raise HTTPException(422, "Cần 'pin' (owner) hoặc 'code' (agent).")
+    token = webauth.make_token(identity, scope)
     is_https = (request.url.scheme == "https") or (
         request.headers.get("x-forwarded-proto", "").lower() == "https"
     )
     resp = JSONResponse({"authenticated": True,
+                         "identity": identity,
+                         "scope": scope,
+                         "token": token,
                          "expires_in_sec": SESSION_TTL_SEC})
     resp.set_cookie(SESSION_COOKIE, token, max_age=SESSION_TTL_SEC,
                     httponly=True, samesite="lax",
@@ -194,6 +209,13 @@ def web_login(body: WebLoginRequest, request: Request):
 @app.get("/api/v1/auth/session")
 def web_session(request: Request):
     return {"authenticated": webauth.session_ok(request)}
+
+
+@app.get("/api/v1/auth/whoami")
+def auth_whoami(request: Request):
+    """Tôi là ai và có quyền gì — để agent tự kiểm key/mã trước khi chạy hàng loạt."""
+    caller, scope = auth.identity_for(request)
+    return {"identity": caller, "scope": scope}
 
 
 @app.post("/api/v1/auth/logout")

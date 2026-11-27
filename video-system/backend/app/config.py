@@ -86,6 +86,34 @@ def api_keys() -> dict[str, str]:
     return keys
 
 
+def agent_codes() -> dict[str, tuple[str, str]]:
+    """Parse VIDEO_AGENT_CODES 'code:name:scope,...' -> {code: (name, scope)}.
+
+    Mã 6 số là **thông tin đăng nhập**, không phải API key: nó chỉ đổi được lấy
+    một token dài (xem auth.login_with_code). Không gian 6 số chỉ có 10^6 tổ
+    hợp, đủ để dò sạch nếu cho dùng trực tiếp làm Bearer trên endpoint public.
+    """
+    raw = os.environ.get("VIDEO_AGENT_CODES", "").strip()
+    out: dict[str, tuple[str, str]] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        bits = part.split(":")
+        if len(bits) != 3:
+            raise RuntimeError(
+                f"invalid VIDEO_AGENT_CODES entry (want code:name:scope): {part}")
+        code, name, scope = (b.strip() for b in bits)
+        if scope not in {"read", "ingest", "manager", "admin"}:
+            raise RuntimeError(f"invalid scope in VIDEO_AGENT_CODES: {scope}")
+        if not code.isdigit() or len(code) != 6:
+            raise RuntimeError(f"agent code must be 6 digits: {part}")
+        if code in out:
+            raise RuntimeError(f"duplicate agent code: {code}")
+        out[code] = (name, scope)
+    return out
+
+
 def allowed_hosts() -> list[str]:
     raw = os.environ.get("VIDEO_ALLOWED_HOSTS", "vidfac.gacdero.vn,talk.gacdero.vn,localhost,127.0.0.1")
     return [h.strip() for h in raw.split(",") if h.strip()]
