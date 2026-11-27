@@ -153,7 +153,7 @@ class BoardService:
             (item_id, shot_index),
         )
         if not shot:
-            raise KeyError(f"shot {shot_index}")
+            raise BoardError(404, f"Shot {shot_index} not found.", "shot_not_found")
         return self._format_shot(shot)
 
     def _is_owner_of_red(self, shot: dict, caller: str) -> bool:
@@ -254,6 +254,71 @@ class BoardService:
             "empty_ready_shots": empty_ready_shots,
         }
 
+    def preflight_upload(
+        self,
+        item_id: str,
+        shot_index: int,
+        caller: str,
+        addresses_review_id: str | None = None,
+        staging_changed: bool | None = None,
+    ) -> None:
+        """Validate board upload constraints BEFORE reading/saving media (C-2)."""
+        self._require_item(item_id)
+        shot = self.store.query_one(
+            "SELECT * FROM shots WHERE item_id=? AND index_num=? AND status != 'superseded'",
+            (item_id, shot_index),
+        )
+        if not shot:
+            raise BoardError(404, f"Shot {shot_index} not found in item {item_id}.", "shot_not_found")
+
+        bs = self._board_status(shot)
+        next_ver = int(shot.get("video_version") or 0) + 1
+
+        if next_ver >= 3 and staging_changed is False:
+            prior_reviews = self.store.query(
+                "SELECT id, verdict, defect_codes_json FROM shot_reviews "
+                "WHERE item_id=? AND shot_index=? ORDER BY created_at DESC",
+                (item_id, shot_index),
+            )
+            prior_fails = [r for r in prior_reviews if r["verdict"] == "fail"]
+            if len(prior_fails) >= 2:
+                codes_list = [set(json.loads(r["defect_codes_json"] or "[]")) for r in prior_fails]
+                if codes_list[0] & codes_list[1]:
+                    raise BoardError(
+                        409,
+                        "Upload lần >= 3 cùng lỗi mà staging_changed=false.",
+                        "must_change_staging",
+                    )
+            if addresses_review_id and any(
+                r["id"] == addresses_review_id
+                and (r["verdict"] == "fail" or json.loads(r["defect_codes_json"] or "[]"))
+                for r in prior_reviews
+            ):
+                raise BoardError(
+                    409,
+                    "Upload lần >= 3 sau review có lỗi bắt buộc phải đổi staging (staging_changed=true).",
+                    "must_change_staging",
+                )
+
+        if bs == "red":
+            if not addresses_review_id:
+                raise BoardError(
+                    422,
+                    "Shot đang red — upload bắt buộc kèm addresses_review_id.",
+                    "brief_required",
+                )
+            rv = self.store.query_one(
+                "SELECT * FROM shot_reviews "
+                "WHERE id=? AND item_id=? AND shot_index=? AND verdict='fail' AND stale=0",
+                (addresses_review_id, item_id, shot_index),
+            )
+            if not rv or rv.get("video_hash") != shot.get("video_hash"):
+                raise BoardError(
+                    422,
+                    "addresses_review_id không phải fail review còn hiệu lực trên version hiện tại.",
+                    "stale_brief",
+                )
+
     def record_board_upload(
         self,
         item_id: str,
@@ -268,7 +333,7 @@ class BoardService:
             (item_id, shot_index),
         )
         if not shot:
-            raise KeyError(f"shot {shot_index}")
+            raise BoardError(404, f"Shot {shot_index} not found in item {item_id}.", "shot_not_found")
         t = now()
         gen = (declared_generator or "").strip() or caller
         new_ver = int(shot.get("video_version") or 0) + 1
@@ -305,7 +370,7 @@ class BoardService:
             (item_id, shot_index),
         )
         if not shot:
-            raise KeyError(f"shot {shot_index}")
+            raise BoardError(404, f"Shot {shot_index} not found.", "shot_not_found")
         v_hash = shot.get("video_hash")
         if not v_hash:
             raise BoardError(422, "Shot has no uploaded video to review.", "no_video")
@@ -344,17 +409,36 @@ class BoardService:
         disclose_notes = body.get("disclose_notes") or []
         note = body.get("note")
         regen_brief = body.get("regen_brief")
+        if verdict == "fail" and (not isinstance(regen_brief, dict) or not regen_brief):
+            raise BoardError(
+                422,
+                "regen_brief là bắt buộc khi verdict=fail.",
+                "regen_brief_required",
+            )
 
         rv_id = new_id("rv")
         t = now()
         v_ver = int(shot.get("video_version") or 1)
+
+        recurring = 0
+        if defect_codes:
+            prev_fails = self.store.query(
+                "SELECT defect_codes_json FROM shot_reviews "
+                "WHERE item_id=? AND shot_index=? AND verdict='fail' AND video_version < ?",
+                (item_id, shot_index, v_ver),
+            )
+            prev_codes: set[str] = set()
+            for pf in prev_fails:
+                prev_codes.update(json.loads(pf["defect_codes_json"] or "[]"))
+            if set(defect_codes) & prev_codes:
+                recurring = 1
 
         with self.store.transaction() as conn:
             conn.execute(
                 "INSERT INTO shot_reviews (id,item_id,shot_id,shot_index,video_hash,"
                 "video_version,reviewer,defect_codes_json,disclose_notes_json,note,"
                 "pairing_ok,score,verdict,regen_brief_json,recurring_defect,stale,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     rv_id,
                     item_id,
@@ -370,6 +454,8 @@ class BoardService:
                     score,
                     verdict,
                     json.dumps(regen_brief, ensure_ascii=False) if regen_brief is not None else None,
+                    recurring,
+                    0,
                     t,
                 ),
             )

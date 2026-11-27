@@ -257,7 +257,16 @@ def _check_replay_match(row: dict, request: Request, req_hash: str | None) -> No
             "idempotency_key_reused")
 
 
-def _idempotent_call(request: Request, payload: dict, fn, status_code: int = 201):
+def _idempotent_call(
+    request: Request,
+    payload: dict,
+    fn,
+    status_code: int = 201,
+    *,
+    replay_status_200: bool = False,
+    add_replay_flag: bool = False,
+    reject_cross_caller: bool = False,
+):
     """Chiếm Idempotency-Key TRƯỚC khi chạy nghiệp vụ, chốt kết quả sau.
 
     Vì sao không phải "chạy xong rồi INSERT": hai request song song cùng key đều
@@ -274,6 +283,20 @@ def _idempotent_call(request: Request, payload: dict, fn, status_code: int = 201
     scoped = _idempotency_scope(request)
     if not scoped:
         return JSONResponse(fn(), status_code=status_code)
+
+    if reject_cross_caller:
+        raw_key = request.headers.get("Idempotency-Key")
+        if raw_key:
+            other = store.query_one(
+                "SELECT 1 AS ok FROM idempotency WHERE key LIKE ? AND key != ?",
+                (f"%:{raw_key}", scoped),
+            )
+            if other:
+                raise ApiError(
+                    409,
+                    "Idempotency-Key đã được agent khác sử dụng.",
+                    "idempotency_key_conflict",
+                )
 
     req_hash = _payload_hash(payload)
     token = uuid.uuid4().hex
@@ -298,8 +321,11 @@ def _idempotent_call(request: Request, payload: dict, fn, status_code: int = 201
             # reclaim thắng -> tiếp tục như owner
         elif row:
             _check_replay_match(row, request, req_hash)
-            resp = JSONResponse(json.loads(row["response_json"]),
-                                status_code=row["status_code"])
+            body = json.loads(row["response_json"])
+            if add_replay_flag and isinstance(body, dict):
+                body["idempotent_replay"] = True
+            r_status = 200 if replay_status_200 else row["status_code"]
+            resp = JSONResponse(body, status_code=r_status)
             resp.headers["Idempotency-Replayed"] = "true"
             return resp
         else:
@@ -989,6 +1015,19 @@ def get_todo_ass(item_id: str, download: bool = False, request: Request = None):
     )
 
 
+def _parse_optional_bool(val) -> bool | None:
+    if val in (None, ""):
+        return None
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    if s in {"true", "1", "yes"}:
+        return True
+    if s in {"false", "0", "no"}:
+        return False
+    return None
+
+
 @app.post("/api/v1/todos/{item_id}/videos")
 async def submit_todo_video(item_id: str, request: Request):
     """Accepts an external video clip sequentially (seq_num = 1, 2, 3...).
@@ -1010,6 +1049,8 @@ async def submit_todo_video(item_id: str, request: Request):
     ctype = (request.headers.get("content-type") or "").lower()
     shot_index: int | None = None
     declared_generator: str | None = None
+    addresses_review_id: str | None = None
+    staging_changed: bool | None = None
     try:
         if "multipart/form-data" in ctype:
             form = await request.form()
@@ -1019,6 +1060,21 @@ async def submit_todo_video(item_id: str, request: Request):
             dg_raw = form.get("declared_generator")
             if dg_raw not in (None, ""):
                 declared_generator = str(dg_raw)
+            ar_raw = form.get("addresses_review_id")
+            if ar_raw not in (None, ""):
+                addresses_review_id = str(ar_raw).strip()
+            staging_changed = _parse_optional_bool(form.get("staging_changed"))
+
+            if shot_index is not None:
+                await run_in_threadpool(
+                    board.preflight_upload,
+                    item_id,
+                    shot_index,
+                    caller,
+                    addresses_review_id=addresses_review_id,
+                    staging_changed=staging_changed,
+                )
+
             upload = form.get("file")
             if upload is None or not hasattr(upload, "read"):
                 raise HTTPException(422, "multipart form must include 'file'")
@@ -1034,16 +1090,49 @@ async def submit_todo_video(item_id: str, request: Request):
                 else:
                     covered = [int(x.strip()) for x in cov_str.split(",") if x.strip()]
             note = str(form.get("note") or "") or None
-            res = await run_in_threadpool(
-                todos.submit_video,
-                item_id,
-                seq_num=seq_num,
-                file_bytes=raw_bytes,
-                filename=getattr(upload, "filename", "video.mp4"),
-                covered_shot_indexes=covered,
-                note=note,
-                actor=caller,
-            )
+            idem_payload = {
+                "shot_index": shot_index,
+                "seq_num": seq_num,
+                "covered": covered,
+                "declared_generator": declared_generator,
+                "addresses_review_id": addresses_review_id,
+                "staging_changed": staging_changed,
+                "size": len(raw_bytes),
+            }
+
+            def _run_multipart():
+                res = todos.submit_video(
+                    item_id,
+                    seq_num=seq_num,
+                    file_bytes=raw_bytes,
+                    filename=getattr(upload, "filename", "video.mp4"),
+                    covered_shot_indexes=covered,
+                    note=note,
+                    actor=caller,
+                )
+                if shot_index is not None:
+                    res["board_shot"] = board.record_board_upload(
+                        item_id,
+                        shot_index,
+                        caller,
+                        res["video"]["sha256"],
+                        declared_generator=declared_generator,
+                    )
+                return res
+
+            if shot_index is not None:
+                return await run_in_threadpool(
+                    _idempotent_call,
+                    request,
+                    idem_payload,
+                    _run_multipart,
+                    201,
+                    replay_status_200=True,
+                    add_replay_flag=True,
+                    reject_cross_caller=True,
+                )
+            res = await run_in_threadpool(_run_multipart)
+            return await run_in_threadpool(_idempotent, request, res, 201)
         else:
             payload = await request.json()
             if isinstance(payload, dict):
@@ -1051,26 +1140,55 @@ async def submit_todo_video(item_id: str, request: Request):
                     shot_index = int(payload["shot_index"])
                 if payload.get("declared_generator") not in (None, ""):
                     declared_generator = str(payload["declared_generator"])
+                if payload.get("addresses_review_id") not in (None, ""):
+                    addresses_review_id = str(payload["addresses_review_id"]).strip()
+                staging_changed = _parse_optional_bool(payload.get("staging_changed"))
+
+            if shot_index is not None:
+                await run_in_threadpool(
+                    board.preflight_upload,
+                    item_id,
+                    shot_index,
+                    caller,
+                    addresses_review_id=addresses_review_id,
+                    staging_changed=staging_changed,
+                )
+
             body = TodoVideoSubmitJson(**payload)
-            res = await run_in_threadpool(
-                todos.submit_video,
-                item_id,
-                seq_num=body.seq_num,
-                file_path=Path(body.file_path) if body.file_path else None,
-                file_url=body.file_url,
-                covered_shot_indexes=body.covered_shot_indexes,
-                note=body.note,
-                actor=caller,
-            )
-        if shot_index is not None:
-            res["board_shot"] = await run_in_threadpool(
-                board.record_board_upload,
-                item_id,
-                shot_index,
-                caller,
-                res["video"]["sha256"],
-                declared_generator=declared_generator,
-            )
+
+            def _run_json():
+                res = todos.submit_video(
+                    item_id,
+                    seq_num=body.seq_num,
+                    file_path=Path(body.file_path) if body.file_path else None,
+                    file_url=body.file_url,
+                    covered_shot_indexes=body.covered_shot_indexes,
+                    note=body.note,
+                    actor=caller,
+                )
+                if shot_index is not None:
+                    res["board_shot"] = board.record_board_upload(
+                        item_id,
+                        shot_index,
+                        caller,
+                        res["video"]["sha256"],
+                        declared_generator=declared_generator,
+                    )
+                return res
+
+            if shot_index is not None:
+                return await run_in_threadpool(
+                    _idempotent_call,
+                    request,
+                    payload if isinstance(payload, dict) else {},
+                    _run_json,
+                    201,
+                    replay_status_200=True,
+                    add_replay_flag=True,
+                    reject_cross_caller=True,
+                )
+            res = await run_in_threadpool(_run_json)
+            return await run_in_threadpool(_idempotent, request, res, 201)
     except BoardError as e:
         raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
@@ -1079,7 +1197,6 @@ async def submit_todo_video(item_id: str, request: Request):
         return JSONResponse(e.report, status_code=e.status_code)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    return await run_in_threadpool(_idempotent, request, res, 201)
 
 
 @app.api_route("/api/v1/todos/{item_id}/videos/{seq_num}/file", methods=["GET", "HEAD"])
@@ -1186,8 +1303,10 @@ def get_single_board_shot(item_id: str, shot_index: int, request: Request):
     auth.require(request, "read")
     try:
         return board.get_shot(item_id, shot_index)
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
-        raise HTTPException(404, "shot not found")
+        raise HTTPException(404, "todo item not found")
 
 
 @app.post("/api/v1/todos/{item_id}/shots/{shot_index}/reviews")
@@ -1201,12 +1320,20 @@ async def post_shot_review(item_id: str, shot_index: int, request: Request):
     if not isinstance(payload, dict):
         raise ApiError(422, "Review body must be a JSON object", "validation_error")
     try:
-        res = await run_in_threadpool(board.submit_review, item_id, shot_index, caller, payload)
-        return JSONResponse(res, status_code=201)
+        return await run_in_threadpool(
+            _idempotent_call,
+            request,
+            payload,
+            lambda: board.submit_review(item_id, shot_index, caller, payload),
+            201,
+            replay_status_200=True,
+            add_replay_flag=True,
+            reject_cross_caller=True,
+        )
     except BoardError as e:
         raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
-        raise HTTPException(404, "shot not found")
+        raise HTTPException(404, "todo item not found")
 
 
 @app.get("/api/v1/agent/inbox")
