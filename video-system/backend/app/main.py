@@ -1295,7 +1295,14 @@ async def update_todo_shot_checklist(item_id: str, request: Request):
 
 
 def _is_board_privileged(caller: str, scope: str) -> bool:
-    return scope == "admin" or caller in {"owner", "muse-manager"}
+    """Ai được thấy điểm review của người khác + `?reveal=1`.
+
+    Dùng scope `manager` (hoặc `admin`) thay vì so tên cứng: tên agent là dữ
+    liệu cấu hình, không phải capability. Trước đây hàm này so tên
+    `{"owner", "muse-manager"}`, nghĩa là đổi tên agent là mất quyền, còn đặt
+    tên trùng là được quyền — cả hai đều sai.
+    """
+    return scope in {"manager", "admin"} or caller == "owner"
 
 
 @app.get("/api/v1/todos/{item_id}/shots/next")

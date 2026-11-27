@@ -22,7 +22,7 @@ from .config import api_keys, session_secret, web_pin
 
 log = logging.getLogger("video-system.auth")
 
-SCOPE_RANK = {"read": 0, "ingest": 1, "admin": 2}
+SCOPE_RANK = {"read": 0, "ingest": 1, "manager": 2, "admin": 3}
 
 SESSION_COOKIE = "vs_session"
 SESSION_TTL_SEC = 30 * 24 * 3600  # 30 ngày

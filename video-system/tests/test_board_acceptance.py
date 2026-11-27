@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(
 #   422 stale_brief | 409 must_change_staging | 409 idempotency_key_conflict
 
 BOARD_AGENTS = {"muse-1": "ingest", "muse-2": "ingest", "muse-3": "ingest",
-                "owner": "admin"}
+                "muse-boss": "manager", "owner": "admin"}
 
 # Bảng trừ điểm §4.2 — bản sao độc lập, cố ý KHÔNG import từ backend.
 # Nếu backend đổi số ở đây thì test phải đỏ: đó là điểm của nó.
@@ -597,3 +597,59 @@ def test_c4_generator_sees_brief_but_not_score(
     shot = nxt.json().get("shot") or {}
     assert shot.get("index") == 2, f"red_regen phải trả shot 2 cho generator; body={nxt.text}"
     assert shot.get("regen_brief"), "brief phải đi cùng shot trong dispatch, không chỉ ở detail"
+
+
+def test_c7_manager_scope_sees_scores_but_is_not_admin(
+        client, upload_clip, board_agents, job):
+    """Phân cấp bằng scope, không bằng tên agent.
+
+    `manager` phải thấy điểm review (privileged) nhưng KHÔNG được làm việc
+    admin. Trước đây quyền này suy ra từ tên cứng `muse-manager`, nên đổi tên
+    agent là mất quyền, còn đặt tên trùng là được quyền.
+    """
+    up = upload_clip(actor="muse-2", shot_index=1)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 1)["video_hash"]
+    r = _review(client, board_agents["muse-3"], job, 1, vh, ["HELMET_BALL"])
+    assert r.status_code in (200, 201), r.text
+
+    seen = _shot(client, board_agents["muse-boss"], job, 1)
+    assert seen["reviews"][0]["score"] is not None, "manager phải thấy điểm"
+    assert seen["reviews"][0]["defect_codes"] == ["HELMET_BALL"]
+    assert seen["scores_summary"]["count"] == 1
+
+    worker = _shot(client, board_agents["muse-1"], job, 1)
+    assert worker["reviews"][0]["score"] is None, "worker chưa chấm thì không thấy điểm"
+
+    admin_call = client.post("/api/v1/board/migrate-grandfathered",
+                             headers=board_agents["muse-boss"], json={})
+    assert admin_call.status_code == 403, (
+        f"manager không được có quyền admin; got {admin_call.status_code}")
+
+
+def test_c7_manager_scope_sees_scores_but_is_not_admin(
+        client, upload_clip, board_agents, job):
+    """Phân cấp bằng scope, không bằng tên agent.
+
+    `manager` phải thấy điểm review (privileged) nhưng KHÔNG được làm việc
+    admin. Trước đây quyền này suy ra từ tên cứng `muse-manager`, nên đổi tên
+    agent là mất quyền, còn đặt tên trùng là được quyền.
+    """
+    up = upload_clip(actor="muse-2", shot_index=1)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 1)["video_hash"]
+    r = _review(client, board_agents["muse-3"], job, 1, vh, ["HELMET_BALL"])
+    assert r.status_code in (200, 201), r.text
+
+    seen = _shot(client, board_agents["muse-boss"], job, 1)
+    assert seen["reviews"][0]["score"] is not None, "manager phải thấy điểm"
+    assert seen["reviews"][0]["defect_codes"] == ["HELMET_BALL"]
+    assert seen["scores_summary"]["count"] == 1
+
+    worker = _shot(client, board_agents["muse-1"], job, 1)
+    assert worker["reviews"][0]["score"] is None, "worker chưa chấm thì không thấy điểm"
+
+    admin_call = client.post("/api/v1/board/migrate-grandfathered",
+                             headers=board_agents["muse-boss"], json={})
+    assert admin_call.status_code == 403, (
+        f"manager không được có quyền admin; got {admin_call.status_code}")

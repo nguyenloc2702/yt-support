@@ -70,15 +70,21 @@ Phân tier (server tính, read-only, trả trong `shot.tier`):
 
 ### Điểm phải chốt: tier B/C có được **xanh** với 1 pass (hoặc 0) không?
 
-Đây không phải chi tiết kỹ thuật, nó là đánh đổi chất lượng:
+**ĐÃ CHỐT (2026-11-27 23:47, owner):** **Không.** Cờ xanh luôn cần **2 agent khác nhau** chấm đạt và kí, cả hai đều không phải người gen/người upload. Tier **không được** hạ số review này, ở bất kỳ mức nào.
 
-- **Phương án 1 — tier quyết định số review để XANH.** B: 1 pass là xanh, C: 0 review là xanh. Giảm tải đúng như bảng trên, nhưng **hạ cổng chất lượng thật**: shot C chưa ai xem vẫn được coi là đạt. Rủi ro: lỗi nặng ở shot "trông đơn giản" đi thẳng vào bản cuối.
-- **Phương án 2 — tier chỉ quyết định SỐ REVIEW ĐƯỢC YÊU CẦU, xanh vẫn cần 2 pass.** Không hạ cổng, nhưng gần như không giảm tải — vô nghĩa.
-- **Phương án 3 (tôi đề xuất) — tier quyết định số review, nhưng shot chưa đủ review thì mang trạng thái `pending_review`, KHÔNG phải xanh và KHÔNG chặn assemble.** Cổng xanh giữ nguyên nghĩa "đã được 2 người xác nhận"; shot tier B/C chỉ đơn giản là không bao giờ đạt xanh nếu không ai chấm, và người assemble nhìn thấy con số đó trước khi bấm.
+Hệ quả, ghi rõ để khỏi hiểu nhầm về sau:
 
-Phương án 3 là phương án duy nhất không nói dối về chất lượng mà vẫn cho chạy. Nhưng nó **không giảm được 1155 lượt** — nó chỉ làm con số đó hiện ra thay vì bị che. Nếu mục tiêu thật là giảm tải thì phải chọn 1, và chấp nhận hạ cổng.
+- **C-7 không còn là công cụ giảm tải.** Con số 1155 lượt review là **cố định** với 385 shot. Muốn giảm thì chỉ còn cách giảm số shot cần review, và cách duy nhất được chấp nhận là **C-6** (`grandfathered` cho video có trước ngày bật board) — đã làm xong.
+- **Tier giữ lại một giá trị khác: thứ tự làm việc.** 385 shot không chấm cùng lúc; tier A (mặt phản chiếu, camera động, có chữ/số) phải được chấm trước, vì theo chính bảng 4.2 lỗi nặng tập trung ở đó. Tier là **thứ tự ưu tiên trong `waiting_review`**, không phải cổng.
+- Tier vẫn **read-only**, server tính, không cho sửa tay — nếu cho sửa, agent sẽ hạ tier để được chấm trước hoặc để né bị soi.
 
-**Cần owner trả lời đúng một câu:** giảm tải review, hay giữ nguyên nghĩa của cờ xanh?
+Ba phương án cũ để nguyên bên dưới làm hồ sơ quyết định:
+
+- **Phương án 1 — tier quyết định số review để XANH.** B: 1 pass là xanh, C: 0 review là xanh. Giảm tải đúng như bảng trên, nhưng **hạ cổng chất lượng thật**: shot C chưa ai xem vẫn được coi là đạt. → **BỊ LOẠI.**
+- **Phương án 2 — tier chỉ quyết định SỐ REVIEW ĐƯỢC YÊU CẦU, xanh vẫn cần 2 pass.** Không hạ cổng, nhưng gần như không giảm tải — vô nghĩa. → **BỊ LOẠI.**
+- **Phương án 3 — thêm trạng thái `pending_review`.** → **KHÔNG CẦN NỮA.** Nó chỉ là hệ quả của việc giữ nguyên cổng xanh; trạng thái `generated` hiện tại đã đóng vai đó.
+
+**Phạm vi C-7 còn lại (đã thu hẹp):** tính `shot.tier` ở server + dùng làm khoá sắp xếp thứ cấp trong `waiting_review` của `shots/next`. Không đụng `_board_status`, không đụng số review. Xem thread `2026-11-27-003`.
 
 ---
 

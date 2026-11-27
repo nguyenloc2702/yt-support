@@ -80,7 +80,7 @@ def api_keys() -> dict[str, str]:
         if ":" not in part:
             raise RuntimeError(f"invalid VIDEO_API_KEYS entry (want key:scope): {part}")
         k, scope = part.rsplit(":", 1)
-        if scope not in {"read", "ingest", "admin"}:
+        if scope not in {"read", "ingest", "manager", "admin"}:
             raise RuntimeError(f"invalid scope in VIDEO_API_KEYS: {scope}")
         keys[k] = scope
     return keys
