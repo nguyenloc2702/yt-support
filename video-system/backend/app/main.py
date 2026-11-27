@@ -358,6 +358,22 @@ def _release_idempotency(scoped: str, token: str) -> None:
         logger.warning("không nhả được idempotency key %s", scoped)
 
 
+def _idempotent_hit(request: Request):
+    """Trả response đã lưu nếu key+caller đã có, None nếu chưa. Không đọc body."""
+    scope = _idempotency_scope(request)
+    if not scope:
+        return None
+    row = store.query_one("SELECT * FROM idempotency WHERE key=?", (scope,))
+    if not row or not row.get("status_code"):
+        return None
+    body = json.loads(row["response_json"])
+    if isinstance(body, dict):
+        body["idempotent_replay"] = True
+    resp = JSONResponse(body, status_code=200)
+    resp.headers["Idempotency-Replayed"] = "true"
+    return resp
+
+
 @app.get("/api/v1/health")
 def health():
     db_ok = store.query_one("SELECT 1 AS ok")["ok"] == 1
@@ -1066,6 +1082,9 @@ async def submit_todo_video(item_id: str, request: Request):
             staging_changed = _parse_optional_bool(form.get("staging_changed"))
 
             if shot_index is not None:
+                hit = await run_in_threadpool(_idempotent_hit, request)
+                if hit is not None:
+                    return hit
                 await run_in_threadpool(
                     board.preflight_upload,
                     item_id,
@@ -1145,6 +1164,9 @@ async def submit_todo_video(item_id: str, request: Request):
                 staging_changed = _parse_optional_bool(payload.get("staging_changed"))
 
             if shot_index is not None:
+                hit = await run_in_threadpool(_idempotent_hit, request)
+                if hit is not None:
+                    return hit
                 await run_in_threadpool(
                     board.preflight_upload,
                     item_id,
