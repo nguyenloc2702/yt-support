@@ -531,3 +531,69 @@ def test_c13_same_key_different_shot_must_not_replay(
         f"cùng key khác shot bị trả {b.status_code} — replay im lặng, "
         f"shot 3 không được upload; body={b.text}")
     assert b.json().get("code") == "idempotency_key_reused"
+
+
+def test_c4_generator_sees_brief_but_not_score(
+        client, upload_clip, board_agents, job):
+    """Redact điểm không được chặn đường sửa shot đỏ.
+
+    Generator không phải reviewer nên `score`/`defect_codes` phải là null, NHƯNG
+    `regen_brief` phải còn — đó là toàn bộ đầu vào để nó gen lại (C-2). Redact
+    luôn brief là bẻ gãy vòng regen, và test C-2 vẫn xanh nên sẽ không ai thấy.
+    """
+    up = upload_clip(actor="muse-2", shot_index=2)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 2)["video_hash"]
+
+    r = _review(client, board_agents["muse-3"], job, 2, vh, ["CAMERA_WRONG_DIRECTION"],
+                regen_brief={"what_wrong": "pull-out thay vì push-in",
+                             "do_instead": "mở đầu prompt bằng 'camera pushes in slowly'",
+                             "staging_change": "camera_move: PULL_OUT -> PUSH_IN"})
+    assert r.status_code in (200, 201), r.text
+
+    detail = _shot(client, board_agents["muse-2"], job, 2)
+    assert detail["status"] == "red"
+    assert detail["reviews"][0]["score"] is None, "generator không được thấy điểm"
+    assert detail["reviews"][0]["defect_codes"] is None
+    assert detail["regen_brief"], "generator phải thấy brief để gen lại"
+    assert detail["regen_brief"]["staging_change"] == "camera_move: PULL_OUT -> PUSH_IN"
+
+    nxt = client.get(f"/api/v1/todos/{job}/shots/next",
+                     headers=board_agents["muse-2"])
+    assert nxt.status_code == 200, nxt.text
+    shot = nxt.json().get("shot") or {}
+    assert shot.get("index") == 2, f"red_regen phải trả shot 2 cho generator; body={nxt.text}"
+    assert shot.get("regen_brief"), "brief phải đi cùng shot trong dispatch, không chỉ ở detail"
+
+
+def test_c4_generator_sees_brief_but_not_score(
+        client, upload_clip, board_agents, job):
+    """Redact điểm không được chặn đường sửa shot đỏ.
+
+    Generator không phải reviewer nên `score`/`defect_codes` phải là null, NHƯNG
+    `regen_brief` phải còn — đó là toàn bộ đầu vào để nó gen lại (C-2). Redact
+    luôn brief là bẻ gãy vòng regen, và test C-2 vẫn xanh nên sẽ không ai thấy.
+    """
+    up = upload_clip(actor="muse-2", shot_index=2)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 2)["video_hash"]
+
+    r = _review(client, board_agents["muse-3"], job, 2, vh, ["CAMERA_WRONG_DIRECTION"],
+                regen_brief={"what_wrong": "pull-out thay vì push-in",
+                             "do_instead": "mở đầu prompt bằng 'camera pushes in slowly'",
+                             "staging_change": "camera_move: PULL_OUT -> PUSH_IN"})
+    assert r.status_code in (200, 201), r.text
+
+    detail = _shot(client, board_agents["muse-2"], job, 2)
+    assert detail["status"] == "red"
+    assert detail["reviews"][0]["score"] is None, "generator không được thấy điểm"
+    assert detail["reviews"][0]["defect_codes"] is None
+    assert detail["regen_brief"], "generator phải thấy brief để gen lại"
+    assert detail["regen_brief"]["staging_change"] == "camera_move: PULL_OUT -> PUSH_IN"
+
+    nxt = client.get(f"/api/v1/todos/{job}/shots/next",
+                     headers=board_agents["muse-2"])
+    assert nxt.status_code == 200, nxt.text
+    shot = nxt.json().get("shot") or {}
+    assert shot.get("index") == 2, f"red_regen phải trả shot 2 cho generator; body={nxt.text}"
+    assert shot.get("regen_brief"), "brief phải đi cùng shot trong dispatch, không chỉ ở detail"
