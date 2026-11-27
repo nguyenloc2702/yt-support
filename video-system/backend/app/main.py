@@ -266,6 +266,7 @@ def _idempotent_call(
     replay_status_200: bool = False,
     add_replay_flag: bool = False,
     reject_cross_caller: bool = False,
+    preflight=None,
 ):
     """Chiếm Idempotency-Key TRƯỚC khi chạy nghiệp vụ, chốt kết quả sau.
 
@@ -282,6 +283,9 @@ def _idempotent_call(
     """
     scoped = _idempotency_scope(request)
     if not scoped:
+        # Không có key thì không có replay để lo, nhưng preflight vẫn phải chạy.
+        if preflight is not None:
+            preflight()
         return JSONResponse(fn(), status_code=status_code)
 
     if reject_cross_caller:
@@ -333,6 +337,11 @@ def _idempotent_call(
                            "idempotency_in_progress")
 
     try:
+        # `preflight` chạy SAU khi đã claim key và SAU khi replay đã thoát ở trên:
+        # - replay không bao giờ bị validate lại trên state mà lần đầu vừa đổi;
+        # - request đầu tiên vẫn bị từ chối trước khi `fn` đọc media.
+        if preflight is not None:
+            preflight()
         result = fn()
     except BaseException:
         # Không cache lỗi: nhả key để agent retry được (kể cả KeyboardInterrupt).
@@ -356,22 +365,6 @@ def _release_idempotency(scoped: str, token: str) -> None:
                       (scoped, token))
     except Exception:  # noqa: BLE001 — DB chết thì để stale reclaim dọn
         logger.warning("không nhả được idempotency key %s", scoped)
-
-
-def _idempotent_hit(request: Request):
-    """Trả response đã lưu nếu key+caller đã có, None nếu chưa. Không đọc body."""
-    scope = _idempotency_scope(request)
-    if not scope:
-        return None
-    row = store.query_one("SELECT * FROM idempotency WHERE key=?", (scope,))
-    if not row or not row.get("status_code"):
-        return None
-    body = json.loads(row["response_json"])
-    if isinstance(body, dict):
-        body["idempotent_replay"] = True
-    resp = JSONResponse(body, status_code=200)
-    resp.headers["Idempotency-Replayed"] = "true"
-    return resp
 
 
 @app.get("/api/v1/health")
@@ -1081,23 +1074,9 @@ async def submit_todo_video(item_id: str, request: Request):
                 addresses_review_id = str(ar_raw).strip()
             staging_changed = _parse_optional_bool(form.get("staging_changed"))
 
-            if shot_index is not None:
-                hit = await run_in_threadpool(_idempotent_hit, request)
-                if hit is not None:
-                    return hit
-                await run_in_threadpool(
-                    board.preflight_upload,
-                    item_id,
-                    shot_index,
-                    caller,
-                    addresses_review_id=addresses_review_id,
-                    staging_changed=staging_changed,
-                )
-
             upload = form.get("file")
             if upload is None or not hasattr(upload, "read"):
                 raise HTTPException(422, "multipart form must include 'file'")
-            raw_bytes = await upload.read()
             seq_raw = form.get("seq_num")
             seq_num = int(seq_raw) if seq_raw not in (None, "") else None
             cov_raw = form.get("covered_shot_indexes")
@@ -1116,10 +1095,14 @@ async def submit_todo_video(item_id: str, request: Request):
                 "declared_generator": declared_generator,
                 "addresses_review_id": addresses_review_id,
                 "staging_changed": staging_changed,
-                "size": len(raw_bytes),
             }
 
             def _run_multipart():
+                # Đọc media Ở ĐÂY, không phải trước khi claim key: preflight phải
+                # từ chối được trước khi tốn vài chục MB, mà replay phải thoát
+                # trước preflight. Chỉ đọc sau khi cả hai đã quyết xong.
+                upload.file.seek(0)
+                raw_bytes = upload.file.read()
                 res = todos.submit_video(
                     item_id,
                     seq_num=seq_num,
@@ -1149,6 +1132,13 @@ async def submit_todo_video(item_id: str, request: Request):
                     replay_status_200=True,
                     add_replay_flag=True,
                     reject_cross_caller=True,
+                    preflight=lambda: board.preflight_upload(
+                        item_id,
+                        shot_index,
+                        caller,
+                        addresses_review_id=addresses_review_id,
+                        staging_changed=staging_changed,
+                    ),
                 )
             res = await run_in_threadpool(_run_multipart)
             return await run_in_threadpool(_idempotent, request, res, 201)
@@ -1162,19 +1152,6 @@ async def submit_todo_video(item_id: str, request: Request):
                 if payload.get("addresses_review_id") not in (None, ""):
                     addresses_review_id = str(payload["addresses_review_id"]).strip()
                 staging_changed = _parse_optional_bool(payload.get("staging_changed"))
-
-            if shot_index is not None:
-                hit = await run_in_threadpool(_idempotent_hit, request)
-                if hit is not None:
-                    return hit
-                await run_in_threadpool(
-                    board.preflight_upload,
-                    item_id,
-                    shot_index,
-                    caller,
-                    addresses_review_id=addresses_review_id,
-                    staging_changed=staging_changed,
-                )
 
             body = TodoVideoSubmitJson(**payload)
 
@@ -1208,6 +1185,13 @@ async def submit_todo_video(item_id: str, request: Request):
                     replay_status_200=True,
                     add_replay_flag=True,
                     reject_cross_caller=True,
+                    preflight=lambda: board.preflight_upload(
+                        item_id,
+                        shot_index,
+                        caller,
+                        addresses_review_id=addresses_review_id,
+                        staging_changed=staging_changed,
+                    ),
                 )
             res = await run_in_threadpool(_run_json)
             return await run_in_threadpool(_idempotent, request, res, 201)
