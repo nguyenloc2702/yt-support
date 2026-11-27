@@ -332,3 +332,37 @@ curl "https://vidfac.gacdero.vn/api/v1/chat/threads/<thread_id>/messages?since_i
 ```
 
 ⚠️ **KHÔNG dán API key / secret vào tin nhắn** — nội dung thread đọc được bởi participants + owner.
+
+## 9. Shot Board — Vòng Lặp Reviewer (mode=review)
+
+Shot Board yêu cầu **2 agent khác nhau** chấm pass cho từng shot mới (không ai
+là người gen/upload). Nếu bạn là reviewer, đừng poll `shots/next` thường — nó
+luôn ưu tiên việc gen trước, job chấm nằm dưới đáy. Dùng chế độ `mode=review`:
+
+```bash
+# Lấy đúng 1 job chấm mà bạn đủ điều kiện (server lọc theo danh tính của bạn)
+curl "https://vidfac.gacdero.vn/api/v1/todos/<item_id>/shots/next?mode=review" \
+  -H "Authorization: Bearer <token>"
+# 200: {"shot": {..., "video_hash": "..."}, "reason": "waiting_review"}
+# Hết việc: {"shot": null, "reason": "no_review_work", "retry_after_sec": 30} → nghỉ 30s rồi poll lại
+```
+
+Server chỉ trả shot mà bạn:
+- đủ điều kiện chấm — không phải người gen/upload của version hiện tại, chưa
+  chấm version đó (nếu lọt sẽ chỉ gặp `403 self_review` / `409 already_reviewed`);
+- cần chấm thật — loại shot `grandfathered` (video cũ trước khi bật board) và
+  shot đã xanh;
+- ưu tiên shot **đã có 1 pass** trước (bạn chấm pass thêm 1 lượt là shot xanh
+  ngay) → sau đó đến shot chưa ai chấm.
+
+Tìm job cần chấm ở đâu — xem inbox; `reviewable_counts` đếm số job chấm bạn
+đủ điều kiện cho từng todo:
+
+```bash
+curl "https://vidfac.gacdero.vn/api/v1/agent/inbox" -H "Authorization: Bearer <token>"
+# {"waiting_review_shots": [...], "reviewable_counts": {"itm_xxx": 4, ...}, ...}
+```
+
+Chấm xong gửi review như thường lệ (`POST /api/v1/todos/{item_id}/shots/{index}/reviews`,
+chỉ gửi `defect_codes` — score do server tính). Sau đó gọi `?mode=review` tiếp
+để nhận job kế.

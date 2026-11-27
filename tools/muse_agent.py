@@ -5,7 +5,9 @@ mỗi danh tính nhận việc đúng phần của mình. Không gen video, khô
 đây là smoke test cho tầng danh tính + dispatch.
 
     python tools/muse_agent.py --base https://vidfac.gacdero.vn --code 997222
-    python tools/muse_agent.py --base http://127.0.0.1:8099 --code 997222 --once
+    python tools/muse_agent.py --base http://127.0.0.1:8099 --code 997222 --interval 0
+    python tools/muse_agent.py --base https://vidfac.gacdero.vn --code 997222 \
+        --review-only --interval 30   # reviewer: chỉ chấm, nghỉ 30s khi hết job
 
 Mã 6 số chỉ dùng một lần để đổi token; token mới là thứ đi kèm mọi request.
 """
@@ -20,10 +22,12 @@ import httpx
 
 
 class Agent:
-    def __init__(self, base: str, code: str, label: str = "") -> None:
+    def __init__(self, base: str, code: str, label: str = "",
+                 review_only: bool = False) -> None:
         self.base = base.rstrip("/")
         self.code = code
         self.label = label or code
+        self.review_only = review_only
         self.token: str | None = None
         self.identity = "?"
         self.scope = "?"
@@ -55,7 +59,12 @@ class Agent:
         return None
 
     def next_work(self, item_id: str) -> dict | None:
-        r = self.client.get(f"/api/v1/todos/{item_id}/shots/next")
+        path = f"/api/v1/todos/{item_id}/shots/next"
+        if self.review_only:
+            # mode=review: chỉ xin job chấm đủ điều kiện; hết việc server trả
+            # no_review_work + retry_after_sec để vòng lặp biết nghỉ.
+            path += "?mode=review"
+        r = self.client.get(path)
         if r.status_code != 200:
             print(f"[{self.label}] shots/next -> {r.status_code}: {r.text[:120]}")
             return None
@@ -93,10 +102,12 @@ def main() -> int:
     p.add_argument("--code", action="append", required=True,
                    help="mã 6 số của agent; lặp lại nhiều lần để chạy nhiều agent")
     p.add_argument("--interval", type=float, default=0.0, help="giây giữa các vòng (0 = chạy 1 vòng)")
+    p.add_argument("--review-only", action="store_true",
+                   help="chỉ xin job chấm (shots/next?mode=review) — cho reviewer")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
-    agents = [Agent(args.base, c) for c in args.code]
+    agents = [Agent(args.base, c, review_only=args.review_only) for c in args.code]
     round_no = 0
     try:
         while True:

@@ -23,6 +23,9 @@ DEFECT_TABLE: dict[str, tuple[float, bool, str]] = {
     "DISCLOSE_ONLY": (0.0, False, "Chỉ ghi chú, không trừ điểm"),
 }
 
+# Khoảng nghỉ gợi ý cho vòng lặp reviewer khi mode=review hết việc.
+REVIEW_RETRY_AFTER_SEC = 30
+
 
 class BoardError(Exception):
     def __init__(self, status_code: int, message: str, code: str) -> None:
@@ -208,16 +211,99 @@ class BoardService:
         )
         return row is not None
 
-    def next_shot(self, item_id: str, caller: str, privileged: bool = False) -> dict[str, Any]:
+    def _group_active_reviews(
+        self, item_id: str | None = None
+    ) -> dict[tuple[str, int, str], list[dict]]:
+        """Active reviews nhóm theo (item, shot, video_hash) — 1 query thay vì N."""
+        if item_id is None:
+            rows = self.store.query(
+                "SELECT * FROM shot_reviews WHERE stale=0 ORDER BY created_at ASC"
+            )
+        else:
+            rows = self.store.query(
+                "SELECT * FROM shot_reviews WHERE item_id=? AND stale=0 ORDER BY created_at ASC",
+                (item_id,),
+            )
+        by_shot: dict[tuple[str, int, str], list[dict]] = {}
+        for r in rows:
+            key = (r["item_id"], r["shot_index"], r["video_hash"])
+            by_shot.setdefault(key, []).append(self._parse_review(r))
+        return by_shot
+
+    def _review_bucket(
+        self,
+        caller: str,
+        shots: list[dict],
+        by_shot: dict[tuple[str, int, str], list[dict]],
+    ) -> list[dict]:
+        """Shot đang chờ chấm mà caller đủ điều kiện chấm, theo thứ tự ưu tiên.
+
+        Loại trước khi trả (từng caller):
+        - người gen/upload version hiện tại (nếu để lọt sẽ ăn 403 self_review);
+        - đã chấm version hiện tại (nếu để lọt sẽ ăn 409 already_reviewed);
+        - `grandfathered` (C-6): video trước ngày bật board không cần chấm —
+          dispatch nó là phí một lượt review của người thật.
+
+        Thứ tự (C-7 thu hẹp còn "thứ tự ưu tiên", không hạ số review):
+          1. version đã có 1 pass — thêm đúng 1 lượt là xanh, mỗi lượt review
+             sinh giá trị cao nhất;
+          2. version chưa ai chấm — cần đủ 2 lượt.
+        Trong mỗi nhóm giữ thứ tự index_num ASC của danh sách vào.
+        """
+        tier_close: list[dict] = []
+        tier_open: list[dict] = []
+        for s in shots:
+            if not s.get("video_hash") or bool(s.get("grandfathered")):
+                continue
+            if self._board_status(s) != "generated":
+                continue
+            if caller in {s.get("uploaded_by"), s.get("declared_generator")}:
+                continue
+            reviews = by_shot.get((s["item_id"], s["index_num"], s["video_hash"]), [])
+            if any(r["reviewer"] == caller for r in reviews):
+                continue
+            passes = sum(1 for r in reviews if r["verdict"] == "pass")
+            if passes >= 2:
+                continue  # đã xanh — phòng hờ cho trường hợp board_status lệch
+            (tier_close if passes == 1 else tier_open).append(s)
+        return tier_close + tier_open
+
+    def next_shot(
+        self, item_id: str, caller: str, privileged: bool = False, mode: str | None = None
+    ) -> dict[str, Any]:
         """Dispatch priority (C-3): red_regen -> empty_ready -> waiting_review -> missing_info.
 
         Never returns red_unreviewed.
+
+        mode="review" (C-7): chỉ trả việc chấm cho caller — reviewer gọi liên
+        tục không bị nhét việc gen xen vào, vì job chấm vốn nằm dưới đáy thứ tự
+        mặc định. Hết việc trả `no_review_work` + `retry_after_sec` để vòng lặp
+        agent biết nghỉ, thay vì quét tay từng shot rồi ăn 403/409.
         """
+        if mode and mode != "review":
+            raise BoardError(422, f"Unknown dispatch mode: {mode}", "invalid_mode")
         self._require_item(item_id)
         shots = self.store.query(
             "SELECT * FROM shots WHERE item_id=? AND status != 'superseded' ORDER BY index_num ASC",
             (item_id,),
         )
+        if mode == "review":
+            reviewable = self._review_bucket(
+                caller, shots, self._group_active_reviews(item_id)
+            )
+            if not reviewable:
+                return {
+                    "shot": None,
+                    "reason": "no_review_work",
+                    "retry_after_sec": REVIEW_RETRY_AFTER_SEC,
+                }
+            return {
+                "shot": self._format_shot(
+                    reviewable[0], caller=caller, privileged=privileged
+                ),
+                "reason": "waiting_review",
+            }
+
         buckets: dict[str, list[dict]] = {
             "red_regen": [],
             "empty_ready": [],
@@ -234,12 +320,10 @@ class BoardService:
                     buckets["empty_ready"].append(s)
                 else:
                     buckets["missing_info"].append(s)
-            elif bs == "generated" and s.get("video_hash"):
-                if (
-                    caller not in {s.get("uploaded_by"), s.get("declared_generator")}
-                    and not self._reviewed_by(item_id, s["index_num"], s["video_hash"], caller)
-                ):
-                    buckets["waiting_review"].append(s)
+
+        buckets["waiting_review"] = self._review_bucket(
+            caller, shots, self._group_active_reviews(item_id)
+        )
 
         for reason in ("red_regen", "empty_ready", "waiting_review", "missing_info"):
             if buckets[reason]:
@@ -252,7 +336,13 @@ class BoardService:
         return {"shot": None, "reason": "no_work"}
 
     def agent_inbox(self, caller: str, privileged: bool = False) -> dict[str, Any]:
-        """Inbox for caller (C-3): splits red_regen_shots (mine) and red_unclaimed (open)."""
+        """Inbox for caller (C-3): splits red_regen_shots (mine) and red_unclaimed (open).
+
+        `waiting_review_shots` là những shot caller ĐỦ ĐIỀU KIỆN chấm (khác
+        người gen/upload, chưa chấm version này, không grandfathered), xếp
+        1-pass trước. `reviewable_counts` nhóm theo item để reviewer thấy job
+        nào còn chỗ chấm mà không phải quét hết danh sách shot.
+        """
         rows = self.store.query(
             "SELECT s.* FROM shots s JOIN items i ON s.item_id = i.id "
             "WHERE i.status != 'deleted' AND s.status != 'superseded' "
@@ -260,7 +350,6 @@ class BoardService:
         )
         red_regen_shots: list[dict[str, Any]] = []
         red_unclaimed: list[dict[str, Any]] = []
-        waiting_review_shots: list[dict[str, Any]] = []
         empty_ready_shots: list[dict[str, Any]] = []
 
         for s in rows:
@@ -270,14 +359,17 @@ class BoardService:
                     red_regen_shots.append(self._format_shot(s, include_reviews=False))
                 elif not s.get("claimed_by"):
                     red_unclaimed.append(self._format_shot(s, include_reviews=False))
-            elif bs == "generated" and s.get("video_hash"):
-                if (
-                    caller not in {s.get("uploaded_by"), s.get("declared_generator")}
-                    and not self._reviewed_by(s["item_id"], s["index_num"], s["video_hash"], caller)
-                ):
-                    waiting_review_shots.append(self._format_shot(s, include_reviews=False))
             elif bs == "empty" and self._has_info(s):
                 empty_ready_shots.append(self._format_shot(s, include_reviews=False))
+
+        waiting_review_shots = [
+            self._format_shot(s, include_reviews=False)
+            for s in self._review_bucket(caller, rows, self._group_active_reviews())
+        ]
+
+        reviewable_counts: dict[str, int] = {}
+        for s in waiting_review_shots:
+            reviewable_counts[s["item_id"]] = reviewable_counts.get(s["item_id"], 0) + 1
 
         return {
             "caller": caller,
@@ -285,6 +377,7 @@ class BoardService:
             "red_unclaimed": red_unclaimed,
             "waiting_review_shots": waiting_review_shots,
             "empty_ready_shots": empty_ready_shots,
+            "reviewable_counts": reviewable_counts,
         }
 
     def preflight_upload(

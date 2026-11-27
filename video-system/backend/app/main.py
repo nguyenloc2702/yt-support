@@ -1328,13 +1328,15 @@ def _is_board_privileged(caller: str, scope: str) -> bool:
 
 
 @app.get("/api/v1/todos/{item_id}/shots/next")
-def get_next_board_shot(item_id: str, request: Request):
+def get_next_board_shot(item_id: str, mode: str | None = None, request: Request = None):
     auth.require(request, "read")
     caller, scope = auth.identity_for(request)
     try:
         return board.next_shot(
-            item_id, caller, privileged=_is_board_privileged(caller, scope)
+            item_id, caller, privileged=_is_board_privileged(caller, scope), mode=mode
         )
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
         raise HTTPException(404, "todo item not found")
 
