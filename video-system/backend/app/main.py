@@ -1294,21 +1294,32 @@ async def update_todo_shot_checklist(item_id: str, request: Request):
         raise HTTPException(422, str(e))
 
 
+def _is_board_privileged(caller: str, scope: str) -> bool:
+    return scope == "admin" or caller in {"owner", "muse-manager"}
+
+
 @app.get("/api/v1/todos/{item_id}/shots/next")
 def get_next_board_shot(item_id: str, request: Request):
     auth.require(request, "read")
-    caller, _ = auth.identity_for(request)
+    caller, scope = auth.identity_for(request)
     try:
-        return board.next_shot(item_id, caller)
+        return board.next_shot(
+            item_id, caller, privileged=_is_board_privileged(caller, scope)
+        )
     except KeyError:
         raise HTTPException(404, "todo item not found")
 
 
 @app.get("/api/v1/todos/{item_id}/shots/{shot_index}")
-def get_single_board_shot(item_id: str, shot_index: int, request: Request):
+def get_single_board_shot(
+    item_id: str, shot_index: int, reveal: int = 0, request: Request = None
+):
     auth.require(request, "read")
+    caller, scope = auth.identity_for(request)
+    # ?reveal=1 chỉ có tác dụng với manager/owner; agent thường bị bỏ qua im lặng (không 403).
+    privileged = _is_board_privileged(caller, scope)
     try:
-        return board.get_shot(item_id, shot_index)
+        return board.get_shot(item_id, shot_index, caller=caller, privileged=privileged)
     except BoardError as e:
         raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
@@ -1345,8 +1356,30 @@ async def post_shot_review(item_id: str, shot_index: int, request: Request):
 @app.get("/api/v1/agent/inbox")
 def get_agent_inbox(request: Request):
     auth.require(request, "read")
-    caller, _ = auth.identity_for(request)
-    return board.agent_inbox(caller)
+    caller, scope = auth.identity_for(request)
+    return board.agent_inbox(caller, privileged=_is_board_privileged(caller, scope))
+
+
+@app.get("/api/v1/todos/{item_id}/board/summary")
+def get_board_summary(item_id: str, request: Request):
+    auth.require(request, "read")
+    try:
+        return board.board_summary(item_id)
+    except KeyError:
+        raise HTTPException(404, "todo item not found")
+
+
+@app.post("/api/v1/board/migrate-grandfathered")
+async def post_migrate_grandfathered(request: Request):
+    auth.require(request, "admin")
+    board_enabled_at: float | None = None
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict) and payload.get("board_enabled_at") is not None:
+            board_enabled_at = float(payload["board_enabled_at"])
+    except Exception:
+        pass
+    return await run_in_threadpool(board.migrate_grandfathered, board_enabled_at)
 
 
 @app.patch("/api/v1/todos/{item_id}/shots/{shot_index}")
@@ -1377,6 +1410,7 @@ def confirm_assemble_todo(
     auth.require(request, "ingest")
     req = body or ConfirmAssembleRequest()
     try:
+        board.check_assemble_gate(item_id)
         result = assembler.confirm_and_assemble(
             item_id,
             burn_subtitles=req.burn_subtitles,
@@ -1385,6 +1419,8 @@ def confirm_assemble_todo(
             watermark_text=req.watermark_text,
             allow_missing_thumbnail=req.allow_missing_thumbnail,
         )
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
         raise HTTPException(404, "todo item not found")
     except ThumbnailMissingError as e:

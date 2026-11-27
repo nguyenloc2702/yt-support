@@ -626,6 +626,7 @@ _SHOT_MIGRATION_COLS = [
     ("declared_generator", "TEXT"),
     ("claimed_by", "TEXT"),
     ("claim_lease_until", "REAL"),
+    ("grandfathered", "INTEGER DEFAULT 0"),
 ]
 
 _SHORTS_MIGRATION_COLS = [

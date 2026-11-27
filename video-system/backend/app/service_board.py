@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from . import new_id, now
@@ -106,13 +107,20 @@ class BoardService:
             return None
         return json.loads(row["regen_brief_json"])
 
-    def _format_shot(self, shot: dict, include_reviews: bool = True) -> dict[str, Any]:
+    def _format_shot(
+        self,
+        shot: dict,
+        include_reviews: bool = True,
+        caller: str | None = None,
+        privileged: bool = False,
+    ) -> dict[str, Any]:
         bs = self._board_status(shot)
         exp_dur = round(
             max(0.0, float(shot.get("audio_end_sec") or 0.0) - float(shot.get("audio_start_sec") or 0.0)),
             3,
         )
         reviews: list[dict[str, Any]] = []
+        scores_summary: dict[str, Any] | None = None
         if include_reviews and shot.get("video_hash"):
             rows = self.store.query(
                 "SELECT * FROM shot_reviews "
@@ -121,6 +129,21 @@ class BoardService:
                 (shot["item_id"], shot["index_num"], shot["video_hash"]),
             )
             reviews = [self._parse_review(r) for r in rows]
+            caller_reviewed = privileged or (
+                caller is not None and any(r["reviewer"] == caller for r in reviews)
+            )
+            if caller_reviewed:
+                scores_summary = {
+                    "count": len(reviews),
+                    "distinct_reviewers": len({r["reviewer"] for r in reviews}),
+                    "pass_count": sum(1 for r in reviews if r["verdict"] == "pass"),
+                    "fail_count": sum(1 for r in reviews if r["verdict"] == "fail"),
+                    "scores": [r["score"] for r in reviews],
+                }
+            else:
+                for rv in reviews:
+                    rv["score"] = None
+                    rv["defect_codes"] = None
 
         regen_brief = (
             self._latest_regen_brief(shot["item_id"], shot["index_num"])
@@ -134,6 +157,7 @@ class BoardService:
             "index_num": shot["index_num"],
             "status": bs,
             "pipeline_status": shot["status"],
+            "grandfathered": bool(shot.get("grandfathered")),
             "video_hash": shot.get("video_hash"),
             "video_version": int(shot.get("video_version") or 0),
             "uploaded_by": shot.get("uploaded_by"),
@@ -143,10 +167,17 @@ class BoardService:
             "narration": shot.get("narration"),
             "expected_duration_sec": exp_dur,
             "regen_brief": regen_brief,
+            "scores_summary": scores_summary,
             "reviews": reviews,
         }
 
-    def get_shot(self, item_id: str, shot_index: int) -> dict[str, Any]:
+    def get_shot(
+        self,
+        item_id: str,
+        shot_index: int,
+        caller: str | None = None,
+        privileged: bool = False,
+    ) -> dict[str, Any]:
         self._require_item(item_id)
         shot = self.store.query_one(
             "SELECT * FROM shots WHERE item_id=? AND index_num=? AND status != 'superseded'",
@@ -154,7 +185,7 @@ class BoardService:
         )
         if not shot:
             raise BoardError(404, f"Shot {shot_index} not found.", "shot_not_found")
-        return self._format_shot(shot)
+        return self._format_shot(shot, caller=caller, privileged=privileged)
 
     def _is_owner_of_red(self, shot: dict, caller: str) -> bool:
         return caller in {
@@ -177,7 +208,7 @@ class BoardService:
         )
         return row is not None
 
-    def next_shot(self, item_id: str, caller: str) -> dict[str, Any]:
+    def next_shot(self, item_id: str, caller: str, privileged: bool = False) -> dict[str, Any]:
         """Dispatch priority (C-3): red_regen -> empty_ready -> waiting_review -> missing_info.
 
         Never returns red_unreviewed.
@@ -213,12 +244,14 @@ class BoardService:
         for reason in ("red_regen", "empty_ready", "waiting_review", "missing_info"):
             if buckets[reason]:
                 return {
-                    "shot": self._format_shot(buckets[reason][0]),
+                    "shot": self._format_shot(
+                        buckets[reason][0], caller=caller, privileged=privileged
+                    ),
                     "reason": reason,
                 }
         return {"shot": None, "reason": "no_work"}
 
-    def agent_inbox(self, caller: str) -> dict[str, Any]:
+    def agent_inbox(self, caller: str, privileged: bool = False) -> dict[str, Any]:
         """Inbox for caller (C-3): splits red_regen_shots (mine) and red_unclaimed (open)."""
         rows = self.store.query(
             "SELECT s.* FROM shots s JOIN items i ON s.item_id = i.id "
@@ -343,12 +376,12 @@ class BoardService:
                 (item_id, shot_index),
             )
             conn.execute(
-                "UPDATE shots SET board_status='generated', video_hash=?, video_version=?, "
+                "UPDATE shots SET board_status='generated', grandfathered=0, video_hash=?, video_version=?, "
                 "uploaded_by=?, declared_generator=?, claimed_by=NULL, claim_lease_until=NULL, "
                 "updated_at=? WHERE id=?",
                 (video_hash, new_ver, caller, gen, t, shot["id"]),
             )
-        return self.get_shot(item_id, shot_index)
+        return self.get_shot(item_id, shot_index, caller=caller)
 
     def submit_review(
         self,
@@ -479,5 +512,128 @@ class BoardService:
         rv_row = self.store.query_one("SELECT * FROM shot_reviews WHERE id=?", (rv_id,))
         return {
             "review": self._parse_review(rv_row),
-            "shot": self.get_shot(item_id, shot_index),
+            "shot": self.get_shot(item_id, shot_index, caller=caller),
         }
+
+    # -- C-6: grandfathered migration, summary & assemble gate ----------------
+
+    def migrate_grandfathered(self, board_enabled_at: float | None = None) -> dict[str, Any]:
+        """Idempotent C-6 migration: mark pre-board shots with existing video as grandfathered=1."""
+        cutoff = (
+            float(board_enabled_at)
+            if board_enabled_at is not None
+            else float(os.environ.get("VIDEO_BOARD_ENABLED_AT") or 0.0)
+        )
+        already = self.store.query_one(
+            "SELECT COUNT(*) AS c FROM shots WHERE COALESCE(grandfathered, 0) = 1"
+        )
+        already_count = int((already or {}).get("c") or 0)
+        if cutoff <= 0:
+            return {"migrated": 0, "already_grandfathered": already_count, "cutoff": cutoff}
+
+        candidates = self.store.query(
+            "SELECT id, item_id, index_num FROM shots "
+            "WHERE COALESCE(grandfathered, 0) = 0 "
+            "AND status != 'superseded' "
+            "AND created_at IS NOT NULL AND created_at < ? "
+            "AND ("
+            "  video_hash IS NOT NULL "
+            "  OR COALESCE(agent_checked, 0) = 1 "
+            "  OR COALESCE(generated_duration_sec, 0) > 0"
+            ")",
+            (cutoff,),
+        )
+        t = now()
+        if candidates:
+            with self.store.transaction() as conn:
+                for row in candidates:
+                    conn.execute(
+                        "UPDATE shots SET grandfathered=1, "
+                        "board_status=COALESCE(board_status, 'generated'), "
+                        "updated_at=? WHERE id=? AND COALESCE(grandfathered, 0) = 0",
+                        (t, row["id"]),
+                    )
+                    conn.execute(
+                        "INSERT INTO events (id,item_id,shot_id,type,actor,payload_json,at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (
+                            new_id("evt"),
+                            row["item_id"],
+                            row["id"],
+                            "shot.grandfathered",
+                            "migration",
+                            json.dumps({"shot_index": row["index_num"], "cutoff": cutoff}),
+                            t,
+                        ),
+                    )
+        return {
+            "migrated": len(candidates),
+            "already_grandfathered": already_count,
+            "total_grandfathered": already_count + len(candidates),
+            "cutoff": cutoff,
+        }
+
+    def board_summary(self, item_id: str) -> dict[str, Any]:
+        """Header counts for C-6: green vs grandfathered vs red."""
+        self._require_item(item_id)
+        shots = self.store.query(
+            "SELECT board_status, video_hash, grandfathered FROM shots "
+            "WHERE item_id=? AND status != 'superseded'",
+            (item_id,),
+        )
+        green = 0
+        grandfathered = 0
+        red = 0
+        generated = 0
+        empty = 0
+        for s in shots:
+            bs = self._board_status(s)
+            gf = bool(s.get("grandfathered"))
+            if bs == "green":
+                green += 1
+            elif bs == "red":
+                red += 1
+            elif gf:
+                grandfathered += 1
+            elif bs == "generated":
+                generated += 1
+            else:
+                empty += 1
+        return {
+            "item_id": item_id,
+            "total_shots": len(shots),
+            "green": green,
+            "grandfathered": grandfathered,
+            "red": red,
+            "generated": generated,
+            "empty": empty,
+            "header_text": f"Xanh {green} · Cũ (chưa chấm) {grandfathered} · Đỏ {red}",
+        }
+
+    def check_assemble_gate(self, item_id: str) -> None:
+        """C-6 assemble gate: grandfathered=true passes; new board videos must be green."""
+        shots = self.store.query(
+            "SELECT index_num, board_status, video_hash, grandfathered FROM shots "
+            "WHERE item_id=? AND status != 'superseded'",
+            (item_id,),
+        )
+        red_shots = [s["index_num"] for s in shots if self._board_status(s) == "red"]
+        if red_shots:
+            raise BoardError(
+                409,
+                f"Job còn shot đỏ chưa xử lý: {red_shots}",
+                "assemble_blocked_red",
+            )
+        unreviewed_new = [
+            s["index_num"]
+            for s in shots
+            if s.get("video_hash")
+            and not bool(s.get("grandfathered"))
+            and self._board_status(s) != "green"
+        ]
+        if unreviewed_new:
+            raise BoardError(
+                409,
+                f"Video mới sau khi bật board phải qua 2 review pass (xanh) trước khi assemble: {unreviewed_new}",
+                "assemble_blocked_unreviewed",
+            )
