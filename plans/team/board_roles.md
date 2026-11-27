@@ -25,8 +25,9 @@ Hai đường, dùng cho hai mục đích khác nhau.
 VIDEO_API_KEYS=owner:admin,muse-boss:manager,muse-gen-1:ingest,muse-gen-2:ingest,muse-gen-3:ingest
 ```
 
-- Định dạng `tên:scope`, phân tách bằng dấu phẩy. **Chuỗi dùng làm Bearer token chính là `tên:scope`** — ví dụ `Authorization: Bearer muse-gen-1:ingest`.
+- Định dạng `tên:scope`, phân tách bằng dấu phẩy. **Bearer token chính là phần `tên`** — `VIDEO_API_KEYS=muse-gen-1:ingest` nghĩa là header `Authorization: Bearer muse-gen-1`. Gửi `Bearer muse-gen-1:ingest` sẽ bị 401. Tôi đã thử cả hai để chắc.
 - Phần **tên** trở thành identity, và là thứ được ghi vào `uploaded_by`, `declared_generator`, `reviewer`. Đổi tên key = đổi danh tính trong toàn bộ lịch sử board.
+- **Cảnh báo:** vì token chính là tên, key dài ở đây **không phải bí mật** — đoán được tên là vào được. `AGENT_API_GUIDE.md` đang công khai `sk-video-agent-prod`, tức bất kỳ ai đọc guide cũng có quyền của agent đó. Đây là lý do nên dùng đường 2b (mã 6 số → token ký HMAC) cho mọi agent, và chỉ giữ 2a cho máy chạy nội bộ.
 
 ### 2b. Mã 6 số cho người (đăng nhập đổi token)
 
