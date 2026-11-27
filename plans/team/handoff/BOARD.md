@@ -21,4 +21,4 @@ Cập nhật lần cuối: 2026-11-27 23:52 · Mỗi bên **chỉ sửa section 
 
 | việc | vì sao | từ khi |
 |---|---|---|
-| Cấp key cho các muse (§15 Q4 của spec) | Đã có scope `manager` (commit `f...`), cần owner điền `VIDEO_API_KEYS` và restart. Hướng dẫn: `plans/team/board_roles.md`. Tối thiểu 4 agent (1 manager + 3 worker) trước khi bật board cho job thật | 2026-11-27 |
+| Cấp key cho các muse (§15 Q4 của spec) | Đã có scope `manager` (commit `a4c8147`), cần owner điền `VIDEO_API_KEYS` và restart. Hướng dẫn: `plans/team/board_roles.md`. Tối thiểu 4 agent (1 manager + 3 worker) trước khi bật board cho job thật | 2026-11-27 |
