@@ -56,6 +56,7 @@ from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sy
 
 from .service_batches import BatchService
 from .service_bgm import BgmService
+from .service_board import BoardError, BoardService
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
 from .service_readme import ReadMeService
@@ -98,6 +99,7 @@ shots = ShotService(store, items)
 batches = BatchService(store, items, shots)
 importer = ImportGate(store, items)
 todos = TodoService(store, items)
+board = BoardService(store, items)
 assembler = AssemblerService(store, items, todos)
 webhooks = WebhookService(store)
 # next_action của agreement đổi -> phát webhook (dedupe theo brief_agreement_state).
@@ -1004,10 +1006,19 @@ async def submit_todo_video(item_id: str, request: Request):
          - `note` (optional string)
     """
     auth.require(request, "ingest")
+    caller, _ = auth.identity_for(request)
     ctype = (request.headers.get("content-type") or "").lower()
+    shot_index: int | None = None
+    declared_generator: str | None = None
     try:
         if "multipart/form-data" in ctype:
             form = await request.form()
+            si_raw = form.get("shot_index")
+            if si_raw not in (None, ""):
+                shot_index = int(si_raw)
+            dg_raw = form.get("declared_generator")
+            if dg_raw not in (None, ""):
+                declared_generator = str(dg_raw)
             upload = form.get("file")
             if upload is None or not hasattr(upload, "read"):
                 raise HTTPException(422, "multipart form must include 'file'")
@@ -1031,9 +1042,15 @@ async def submit_todo_video(item_id: str, request: Request):
                 filename=getattr(upload, "filename", "video.mp4"),
                 covered_shot_indexes=covered,
                 note=note,
+                actor=caller,
             )
         else:
             payload = await request.json()
+            if isinstance(payload, dict):
+                if payload.get("shot_index") not in (None, ""):
+                    shot_index = int(payload["shot_index"])
+                if payload.get("declared_generator") not in (None, ""):
+                    declared_generator = str(payload["declared_generator"])
             body = TodoVideoSubmitJson(**payload)
             res = await run_in_threadpool(
                 todos.submit_video,
@@ -1043,7 +1060,19 @@ async def submit_todo_video(item_id: str, request: Request):
                 file_url=body.file_url,
                 covered_shot_indexes=body.covered_shot_indexes,
                 note=body.note,
+                actor=caller,
             )
+        if shot_index is not None:
+            res["board_shot"] = await run_in_threadpool(
+                board.record_board_upload,
+                item_id,
+                shot_index,
+                caller,
+                res["video"]["sha256"],
+                declared_generator=declared_generator,
+            )
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
         raise HTTPException(404, "todo item not found")
     except ImportRejected as e:
@@ -1140,6 +1169,51 @@ async def update_todo_shot_checklist(item_id: str, request: Request):
         raise HTTPException(404, "todo item not found")
     except ValueError as e:
         raise HTTPException(422, str(e))
+
+
+@app.get("/api/v1/todos/{item_id}/shots/next")
+def get_next_board_shot(item_id: str, request: Request):
+    auth.require(request, "read")
+    caller, _ = auth.identity_for(request)
+    try:
+        return board.next_shot(item_id, caller)
+    except KeyError:
+        raise HTTPException(404, "todo item not found")
+
+
+@app.get("/api/v1/todos/{item_id}/shots/{shot_index}")
+def get_single_board_shot(item_id: str, shot_index: int, request: Request):
+    auth.require(request, "read")
+    try:
+        return board.get_shot(item_id, shot_index)
+    except KeyError:
+        raise HTTPException(404, "shot not found")
+
+
+@app.post("/api/v1/todos/{item_id}/shots/{shot_index}/reviews")
+async def post_shot_review(item_id: str, shot_index: int, request: Request):
+    auth.require(request, "ingest")
+    caller, _ = auth.identity_for(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(422, "Invalid JSON payload", "validation_error")
+    if not isinstance(payload, dict):
+        raise ApiError(422, "Review body must be a JSON object", "validation_error")
+    try:
+        res = await run_in_threadpool(board.submit_review, item_id, shot_index, caller, payload)
+        return JSONResponse(res, status_code=201)
+    except BoardError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+    except KeyError:
+        raise HTTPException(404, "shot not found")
+
+
+@app.get("/api/v1/agent/inbox")
+def get_agent_inbox(request: Request):
+    auth.require(request, "read")
+    caller, _ = auth.identity_for(request)
+    return board.agent_inbox(caller)
 
 
 @app.patch("/api/v1/todos/{item_id}/shots/{shot_index}")

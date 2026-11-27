@@ -568,6 +568,27 @@ CREATE TABLE IF NOT EXISTS knowledge_sync_runs (
   errors_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_sync_started ON knowledge_sync_runs(started_at);
+
+CREATE TABLE IF NOT EXISTS shot_reviews (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  shot_id TEXT NOT NULL,
+  shot_index INTEGER NOT NULL,
+  video_hash TEXT NOT NULL,
+  video_version INTEGER NOT NULL,
+  reviewer TEXT NOT NULL,
+  defect_codes_json TEXT NOT NULL,
+  disclose_notes_json TEXT,
+  note TEXT,
+  pairing_ok INTEGER NOT NULL DEFAULT 1,
+  score REAL NOT NULL,
+  verdict TEXT NOT NULL,
+  regen_brief_json TEXT,
+  recurring_defect INTEGER NOT NULL DEFAULT 0,
+  stale INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shot_reviews_shot ON shot_reviews(item_id, shot_index, video_hash);
 """
 
 _ITEM_MIGRATION_COLS = [
@@ -598,6 +619,13 @@ _SHOT_MIGRATION_COLS = [
     ("beat_type", "TEXT"),
     ("voice", "TEXT"),
     ("generator", "TEXT"),
+    ("board_status", "TEXT"),
+    ("video_hash", "TEXT"),
+    ("video_version", "INTEGER DEFAULT 0"),
+    ("uploaded_by", "TEXT"),
+    ("declared_generator", "TEXT"),
+    ("claimed_by", "TEXT"),
+    ("claim_lease_until", "REAL"),
 ]
 
 _SHORTS_MIGRATION_COLS = [
