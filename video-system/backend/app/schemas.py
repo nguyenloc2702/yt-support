@@ -360,6 +360,24 @@ class ShortScriptUpdate(BaseModel):
     source_note: str | None = Field(default=None, max_length=300)
 
 
+class ShortFromScript(BaseModel):
+    """Script owner/agent viết sẵn — KHÔNG gọi LLM, KHÔNG áp word budget.
+
+    Dùng khi kịch bản đã có (vd. file markdown của owner): hệ thống chỉ TTS +
+    dựng timeline, không để LLM viết lại.
+    """
+    title: str = Field(default="", max_length=200)
+    mode: str = Field(default="cinematic",
+                      pattern="^(news|decode|daily_digest|trailer|cinematic)$")
+    lang: str = Field(default="en", pattern="^(vi|en)$")
+    hook: str = Field(min_length=1, max_length=2000)
+    beats: list[str] = Field(default_factory=list, max_length=16)
+    closing: str = Field(default="", max_length=2000)
+    description: str = Field(default="", max_length=2000)
+    source_note: str = Field(default="", max_length=500)
+    search_keywords_en: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ShortAudioShot(BaseModel):
     """1 shot owner khai báo cho audio đã nạp (start/end tính bằng giây)."""
     text: str = Field(min_length=1, max_length=2000)
@@ -369,7 +387,6 @@ class ShortAudioShot(BaseModel):
 
 class ShortAudioIngest(BaseModel):
     """Body JSON cho `shots` khi POST multipart /shorts/{id}/audio.
-
     Chỉ validate shape/kiểu; continuity + khớp duration audio do service
     fail-closed kiểm tra (cần probe file thật).
     """

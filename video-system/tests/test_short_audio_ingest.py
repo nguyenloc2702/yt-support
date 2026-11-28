@@ -207,3 +207,27 @@ def test_create_from_audio_endpoint_makes_job_ready_short(client, ingest,
     assert job["status"] == "queued"
     assert len(job["scenes"]) == 5
     assert job["scenes"][0]["duration_sec"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_create_from_script_keeps_all_beats(client, ingest, short_adapters):
+    """Script owner 8 đoạn không bị validate_script cắt còn 4 beat."""
+    paras = [f"Paragraph number {i} about the descent." for i in range(1, 7)]
+    r = client.post("/api/v1/shorts/from-script", headers=ingest, json={
+        "title": "Soyuz Blackout", "mode": "cinematic", "lang": "en",
+        "hook": "Four minutes falling through fire.",
+        "beats": paras, "closing": "Would you take that seat?",
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["status"] == "scripted"
+    assert body["audio_source"] == "tts"
+    assert len(body["scenes"]) == 8
+    assert body["script"]["beats"] == paras
+
+
+def test_create_from_script_rejects_too_many_segments(client, ingest, short_adapters):
+    r = client.post("/api/v1/shorts/from-script", headers=ingest, json={
+        "mode": "cinematic", "lang": "en", "hook": "h",
+        "beats": [f"b{i}" for i in range(18)], "closing": "c",
+    })
+    assert r.status_code == 422

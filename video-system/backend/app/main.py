@@ -36,7 +36,8 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
                       KnowledgePublishRequest, KnowledgeSyncRequest,
                       KnowledgeUpdateRequest,
                       ReadMeCreateRequest, ReadMePatchRequest,
-                      ReadMePutRequest, ShortAudioIngest, ShortCreate, ShortScriptUpdate,
+                      ReadMePutRequest, ShortAudioIngest, ShortCreate, ShortFromScript,
+                      ShortScriptUpdate,
                       ShotChecklistBatchUpdate,
                       ShotCheckUpdate, ShotImport, SyncGdriveRequest,
                       TodoCollectReferencesRequest, TodoFromScriptCreate,
@@ -2145,6 +2146,26 @@ def clear_short_audio(short_id: str, request: Request = None):
         raise HTTPException(404, "short not found")
     except ValueError as e:
         raise HTTPException(422, str(e))
+
+
+@app.post("/api/v1/shorts/from-script")
+def create_short_from_script(body: ShortFromScript, request: Request = None):
+    """Tạo short từ kịch bản owner đã viết sẵn (không gọi LLM).
+
+    Dùng khi đã có script (markdown/txt): hệ thống chỉ TTS + dựng timeline.
+    Sau đó gọi `POST /shorts/{id}/publish-job` để agent nhận job.
+    """
+    auth.require(request, "ingest")
+    try:
+        res = shorts.create_from_script(
+            hook=body.hook, beats=body.beats, closing=body.closing,
+            title=body.title, mode=body.mode, lang=body.lang,
+            description=body.description, source_note=body.source_note,
+            search_keywords_en=body.search_keywords_en,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return JSONResponse(res, status_code=201)
 
 
 @app.post("/api/v1/shorts/audio")

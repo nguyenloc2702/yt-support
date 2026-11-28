@@ -1408,6 +1408,62 @@ class ShortService:
         })
         return self.get(short_id)
 
+    def create_from_script(self, *, hook: str, beats: list[str], closing: str = "",
+                           title: str = "", mode: str = "cinematic", lang: str = "en",
+                           description: str = "", source_note: str = "",
+                           search_keywords_en: list[str] | None = None,
+                           actor: str = "api") -> dict:
+        """Tạo short từ kịch bản owner đã viết — KHÔNG gọi LLM, KHÔNG áp word budget.
+
+        Khác `create()`: không qua `prompts.validate_script` (hàm đó cắt beat còn 4
+        và chặn theo ngân sách từ), nên giữ được kịch bản dài nhiều shot như file
+        markdown owner tự soạn. Chỉ kiểm tra cấu trúc + giới hạn `max_scenes`.
+        """
+        if mode not in prompts.MODES:
+            raise ValueError(f"mode không hợp lệ: {mode} (chấp nhận: {', '.join(prompts.MODES)})")
+        if lang not in prompts.LANGS:
+            raise ValueError(f"lang không hợp lệ: {lang} (chấp nhận: {', '.join(prompts.LANGS)})")
+        hook = (hook or "").strip()
+        closing = (closing or "").strip()
+        clean_beats = [str(b).strip() for b in (beats or []) if str(b).strip()]
+        if not hook:
+            raise ValueError("Thiếu 'hook' (câu mở đầu).")
+        if not clean_beats and not closing:
+            raise ValueError("Cần ít nhất 1 beat hoặc closing.")
+        total = 1 + len(clean_beats) + (1 if closing else 0)
+        max_scenes = int(SHORT_CONFIG["limits"]["max_scenes"])
+        if total > max_scenes:
+            raise ValueError(
+                f"Kịch bản {total} đoạn vượt giới hạn {max_scenes} scene/short.")
+
+        script = {
+            "title": (title or "").strip()[:200] or hook[:120],
+            "hook": hook,
+            "beats": clean_beats,
+            "closing": closing,
+            "description": (description or "").strip(),
+            "source_note": (source_note or "").strip(),
+            "search_keywords_en": [str(k).strip() for k in (search_keywords_en or [])
+                                   if str(k).strip()],
+            "word_count": sum(len(t.split()) for t in [hook, *clean_beats, closing] if t),
+        }
+        short_id = new_id("sho")
+        t = now()
+        self.store.execute(
+            "INSERT INTO shorts (id, mode, lang, title, status, script_json, source_text, "
+            "source_note, source_link, target_seconds, duration_s, word_count, "
+            "error_detail, audio_source, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (short_id, mode, lang, script["title"], domain.ShortStatus.SCRIPTED.value,
+             json.dumps(script, ensure_ascii=False), hook, script["source_note"] or None,
+             None, None, 0.0, int(script["word_count"]), None, "tts", t, t),
+        )
+        self._sync_scenes(short_id, script, lang=lang)
+        self._event(short_id, "short.created", actor,
+                    {"mode": mode, "lang": lang, "title": script["title"],
+                     "source": "owner-script", "segments": total})
+        return self.get(short_id)
+
     def create_from_audio(self, *, raw_bytes: bytes, filename: str = "audio.mp3",
                           shots: list[dict], title: str = "", mode: str = "cinematic",
                           lang: str = "vi", actor: str = "ui") -> dict:
