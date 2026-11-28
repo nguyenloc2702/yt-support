@@ -123,7 +123,7 @@ def test_create_todo_from_youtube_segments(client, ingest, fast_offline_tts):
 
 
 def test_sequential_videos_shortfall_warning_and_confirm_assemble(
-    client, ingest, read_key, fast_offline_tts, tmp_path
+    client, ingest, read_key, fast_offline_tts, tmp_path, approve_shots
 ):
     """Phase 2 & 3: External system uploads merged videos sequentially (1, 2...),
     warns when total video duration < EN audio duration, and assembles final MP4 when complete."""
@@ -167,6 +167,8 @@ def test_sequential_videos_shortfall_warning_and_confirm_assemble(
     assert "CẢNH BÁO THIẾU THỜI LƯỢNG VIDEO" in vp1["shortfall_warning"]
 
     # 2. Attempting confirm-assemble without allow_shortfall must return 409 with shortfall warning
+    # (B2: upload gắn shot phải qua 2 pass review trước khi gate assemble mở)
+    approve_shots(item_id)
     r_confirm_blocked = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
@@ -197,6 +199,7 @@ def test_sequential_videos_shortfall_warning_and_confirm_assemble(
     assert vp2["ready_to_assemble"] is True
 
     # 4. User presses Confirm & Assemble -> concatenates #1 + #2 and muxes with Audio EN
+    approve_shots(item_id)
     r_confirm_ok = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
@@ -216,7 +219,7 @@ def test_sequential_videos_shortfall_warning_and_confirm_assemble(
 
 
 def test_confirm_assemble_with_explicit_allow_shortfall(
-    client, ingest, fast_offline_tts, tmp_path
+    client, ingest, fast_offline_tts, tmp_path, approve_shots
 ):
     """If uploaded videos are shorter than EN audio, confirm-assemble succeeds when allow_shortfall=True."""
     r = client.post(
@@ -239,9 +242,13 @@ def test_confirm_assemble_with_explicit_allow_shortfall(
             f"/api/v1/todos/{item_id}/videos",
             headers=ingest,
             files={"file": ("short.mp4", f, "video/mp4")},
+            data={"seq_num": "1", "covered_shot_indexes": "[1]"},
         )
     assert r_up.status_code == 201
     assert r_up.json()["video_progress"]["is_shortfall"] is True
+
+    # B2: video gắn shot phải qua 2 pass review trước khi gate assemble mở
+    approve_shots(item_id)
 
     # Confirm with allow_shortfall=True pads the last frame to cover the full audio duration
     r_confirm = client.post(
@@ -463,7 +470,7 @@ def test_shot_checklist_sparse_missing_shots_and_inline_viewers(
 
 
 def test_multi_shot_video_override_status_filters_and_ui_contracts(
-    client, ingest, read_key, fast_offline_tts, tmp_path
+    client, ingest, read_key, fast_offline_tts, tmp_path, approve_shots
 ):
     """Verify:
     1. Multi-shot merged video covering [1, 2, 3] where Shot #2 is later replaced by an
@@ -579,6 +586,8 @@ def test_multi_shot_video_override_status_filters_and_ui_contracts(
     assert r_ready_list.status_code == 200
     assert any(x["item_id"] == item_id for x in r_ready_list.json()["todos"])
 
+    # B2: video gắn shot phải qua 2 pass review trước khi gate assemble mở
+    approve_shots(item_id)
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
@@ -592,7 +601,7 @@ def test_multi_shot_video_override_status_filters_and_ui_contracts(
 
 
 def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_clips(
-    client, ingest, read_key, fast_offline_tts, tmp_path
+    client, ingest, read_key, fast_offline_tts, tmp_path, approve_shots
 ):
     """Verify:
     1. When Shot #1 has a huge overrun clip covering only [1] while Shots #2 & #3 are missing,
@@ -667,6 +676,8 @@ def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_cl
     assert not any(x["item_id"] == item_id for x in r_ready_check.json()["todos"])
 
     # Because Shot #1 is trimmed to exp1 ms, Shots #2 & #3 are still uncovered -> must return 409 when allow_shortfall=False
+    # (B2: shot #1 gắn board phải qua 2 pass trước khi gate assemble mở)
+    approve_shots(item_id)
     r_blocked = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
@@ -693,6 +704,7 @@ def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_cl
             assert rv.status_code == 201, rv.text
 
     # 3. Confirm & assemble -> must trim each of [1, 2, 3] to planned ms and ignore orphan #99
+    approve_shots(item_id)
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,
@@ -710,7 +722,7 @@ def test_assemble_trims_each_layer_to_planned_milliseconds_and_ignores_orphan_cl
 
 
 def test_assemble_non_contiguous_override_short_merged_clip_and_burn_subtitles(
-    client, ingest, read_key, fast_offline_tts, tmp_path
+    client, ingest, read_key, fast_offline_tts, tmp_path, approve_shots
 ):
     """Verify:
     1. When a merged clip covering [1, 2, 3] is slightly shorter than the sum of Shots #1 + #2
@@ -766,6 +778,8 @@ def test_assemble_non_contiguous_override_short_merged_clip_and_burn_subtitles(
         )
     assert r_ov.status_code == 201, r_ov.text
 
+    # B2: shots gắn board phải qua 2 pass review trước khi gate assemble mở
+    approve_shots(item_id)
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,

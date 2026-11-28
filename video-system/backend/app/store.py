@@ -618,6 +618,8 @@ CREATE TABLE IF NOT EXISTS muse_proposals (
   priority INTEGER NOT NULL DEFAULT 3,
   signals INTEGER NOT NULL DEFAULT 1,
   brief_id TEXT,
+  claimed_by TEXT,
+  claim_lease_until REAL,
   avg_score REAL,
   review_count INTEGER NOT NULL DEFAULT 0,
   pass_count INTEGER NOT NULL DEFAULT 0,
@@ -679,6 +681,10 @@ _SHOT_MIGRATION_COLS = [
     ("claimed_by", "TEXT"),
     ("claim_lease_until", "REAL"),
     ("grandfathered", "INTEGER DEFAULT 0"),
+    # B1: soft-claim lease cho đường review (tách khỏi claimed_by = claim gen
+    # shot đỏ — hai ngữ nghĩa khác nhau, không dùng chung cột).
+    ("review_claimed_by", "TEXT"),
+    ("review_claim_lease_until", "REAL"),
 ]
 
 _SHORTS_MIGRATION_COLS = [
@@ -707,6 +713,8 @@ _IDEMPOTENCY_MIGRATION_COLS = [
 # Muse proposals (đã deploy trước khi có brief_id) — ALTER bổ sung khi thiếu.
 _MUSE_PROPOSALS_MIGRATION_COLS = [
     ("brief_id", "TEXT"),  # link sang job_briefs khi script-writer convert (Q6)
+    ("claimed_by", "TEXT"),  # B1: soft-claim lease khi dispatch review
+    ("claim_lease_until", "REAL"),
 ]
 
 

@@ -1114,6 +1114,19 @@ async def submit_todo_video(item_id: str, request: Request):
                 else:
                     covered = [int(x.strip()) for x in cov_str.split(",") if x.strip()]
             note = str(form.get("note") or "") or None
+            # B2: chặn lối đi vòng quality gate — upload phải gắn shot
+            # (shot_index đơn hoặc covered_shot_indexes gộp). Riêng orphan clip
+            # chủ đích (covered=[] — clip ngoài kịch bản) được phép: rơi vào
+            # bucket 'ngoài board' của summary, không âm thầm vào board.
+            covered_present = cov_raw not in (None, "")
+            if shot_index is None and not covered and not covered_present:
+                raise ApiError(
+                    422,
+                    "Upload phải gắn shot: gửi 'shot_index' (1 shot) hoặc "
+                    "'covered_shot_indexes' (gộp nhiều shot) — video không gắn "
+                    "shot không vào board và sẽ bị từ chối.",
+                    "shot_binding_required",
+                )
             idem_payload = {
                 "shot_index": shot_index,
                 "seq_num": seq_num,
@@ -1146,6 +1159,14 @@ async def submit_todo_video(item_id: str, request: Request):
                         res["video"]["sha256"],
                         declared_generator=declared_generator,
                     )
+                elif covered:
+                    res["board_shots"] = board.record_board_upload_covered(
+                        item_id,
+                        covered,
+                        caller,
+                        res["video"]["sha256"],
+                        declared_generator=declared_generator,
+                    )
                 return res
 
             if shot_index is not None:
@@ -1166,6 +1187,19 @@ async def submit_todo_video(item_id: str, request: Request):
                         staging_changed=staging_changed,
                     ),
                 )
+            # B2: upload gộp (covered, không shot_index) — preflight từng shot
+            # được phủ trước khi đọc media, rồi board áp cho từng shot.
+            return await run_in_threadpool(
+                _idempotent_call,
+                request,
+                idem_payload,
+                _run_multipart,
+                201,
+                replay_status_200=True,
+                add_replay_flag=True,
+                reject_cross_caller=True,
+                preflight=lambda: board.preflight_upload_covered(item_id, covered, caller),
+            )
             res = await run_in_threadpool(_run_multipart)
             return await run_in_threadpool(_idempotent, request, res, 201)
         else:
@@ -1180,6 +1214,16 @@ async def submit_todo_video(item_id: str, request: Request):
                 staging_changed = _parse_optional_bool(payload.get("staging_changed"))
 
             body = TodoVideoSubmitJson(**payload)
+            # B2: gate áp cho cả nhánh JSON (orphan chủ đích covered=[] được phép)
+            if (shot_index is None and not body.covered_shot_indexes
+                    and "covered_shot_indexes" not in payload):
+                raise ApiError(
+                    422,
+                    "Upload phải gắn shot: gửi 'shot_index' (1 shot) hoặc "
+                    "'covered_shot_indexes' (gộp nhiều shot) — video không gắn "
+                    "shot không vào board và sẽ bị từ chối.",
+                    "shot_binding_required",
+                )
 
             def _run_json():
                 res = todos.submit_video(
@@ -1195,6 +1239,14 @@ async def submit_todo_video(item_id: str, request: Request):
                     res["board_shot"] = board.record_board_upload(
                         item_id,
                         shot_index,
+                        caller,
+                        res["video"]["sha256"],
+                        declared_generator=declared_generator,
+                    )
+                elif body.covered_shot_indexes:
+                    res["board_shots"] = board.record_board_upload_covered(
+                        item_id,
+                        body.covered_shot_indexes,
                         caller,
                         res["video"]["sha256"],
                         declared_generator=declared_generator,
@@ -1603,6 +1655,14 @@ def get_board_summary(item_id: str, request: Request):
         return board.board_summary(item_id)
     except KeyError:
         raise HTTPException(404, "todo item not found")
+
+
+@app.post("/api/v1/board/migrate-legacy-videos")
+async def post_migrate_legacy_videos(request: Request):
+    """B2: map todo_videos chưa gắn board về shots (covered trước, heuristic
+    theo thứ tự sau) + grandfathered — idempotent, chạy lại trả mapped=0."""
+    auth.require(request, "admin")
+    return await run_in_threadpool(board.migrate_legacy_videos)
 
 
 @app.post("/api/v1/board/migrate-grandfathered")

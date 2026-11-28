@@ -15,7 +15,8 @@ sys.path.insert(0, str(REPO))
 
 _TMP = tempfile.mkdtemp(prefix="video_system_test_")
 os.environ["VIDEO_DATA_DIR"] = _TMP
-os.environ["VIDEO_API_KEYS"] = "test-admin:admin,test-ingest:ingest,test-read:read"
+os.environ["VIDEO_API_KEYS"] = ("test-admin:admin,test-ingest:ingest,"
+                                "test-reviewer:ingest,test-read:read")
 os.environ["VIDEO_ALLOWED_HOSTS"] = "localhost,127.0.0.1,storage.test"
 os.environ["VIDEO_WEBHOOK_SECRET"] = "whsec-test"
 os.environ.setdefault("VIDEO_OFFLINE_SEARCH", "1")
@@ -103,6 +104,34 @@ def ingest():
 @pytest.fixture()
 def read_key():
     return {"Authorization": "Bearer test-read"}
+
+
+@pytest.fixture()
+def approve_shots(client):
+    """B2: upload giờ bắt buộc gắn shot và phải qua 2 pass review trước khi
+    assemble (gate C-6). Helper: nộp 2 pass sạch (2 reviewer khác người
+    upload) cho mọi shot đang có video của item — dùng trong các test legacy
+    assemble sau khi upload."""
+    def _approve(item_id: str) -> None:
+        detail = client.get(f"/api/v1/todos/{item_id}",
+                            headers={"Authorization": "Bearer test-admin"}).json()
+        shots = (detail.get("shot_checklist") or {}).get("shots") or []
+        reviewers = ["test-admin", "test-reviewer"]
+        for s in shots:
+            if not s.get("has_video") or not s.get("video_url"):
+                continue
+            for rv in reviewers:
+                r = client.post(
+                    f"/api/v1/todos/{item_id}/shots/{s['index']}/reviews",
+                    headers={"Authorization": f"Bearer {rv}"},
+                    json={"defect_codes": [], "pairing_ok": True},
+                )
+                if r.status_code == 409:
+                    # shot đã xanh (2 pass từ lần approve trước trong cùng test)
+                    continue
+                assert r.status_code in (200, 201), (
+                    f"approve shot {s['index']} as {rv}: {r.status_code} {r.text[:200]}")
+    return _approve
 
 
 @pytest.fixture()

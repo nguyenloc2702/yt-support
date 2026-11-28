@@ -95,8 +95,15 @@ VIDEO_DATA_DIR=data .venv/bin/python -m backend.app.seed   # data demo (gán nh�
   Scheduler daemon (news/digest/proposal expire) cũng nhân bản theo worker.
 - Env pipeline muse proposals (mục 10 AGENT_API_GUIDE): `VIDEO_PROPOSAL_PASS_SCORE`
   (9.5), `VIDEO_PROPOSAL_REVIEWS_REQUIRED` (3), `VIDEO_PROPOSAL_PASS_REQUIRED` (2),
-  `VIDEO_PROPOSAL_EXPIRE_HOURS` (12), `VIDEO_PROPOSAL_SCHEDULER` (1 = bật).
-  Telegram 2 chiều cần `VIDEO_TELEGRAM_BOT_TOKEN` + `VIDEO_TELEGRAM_CHAT_ID`.
+  `VIDEO_PROPOSAL_EXPIRE_HOURS` (12), `VIDEO_PROPOSAL_SCHEDULER` (1 = bật),
+  `VIDEO_REVIEW_CLAIM_LEASE_SEC` (900 — lease giữ chỗ khi dispatch review,
+  đủ cho SOP tải video + xem frame). Telegram 2 chiều (nút Duyệt/Từ chối +
+  `/duyet` `/tuchoi`) cần `VIDEO_TELEGRAM_BOT_TOKEN` + `VIDEO_TELEGRAM_CHAT_ID`.
+- **Upload video vào job bắt buộc gắn shot** (`shot_index` hoặc
+  `covered_shot_indexes`) — không gắn bị 422 `shot_binding_required` (B2,
+  chốt owner 2026-11-28: không còn lối đi vòng quality gate). Kho video cũ
+  chưa gắn: chạy `POST /api/v1/board/migrate-legacy-videos` (admin) một lần —
+  map + grandfathered, idempotent.
 
 ## Docs
 

@@ -367,6 +367,27 @@ Chấm xong gửi review như thường lệ (`POST /api/v1/todos/{item_id}/shot
 chỉ gửi `defect_codes` — score do server tính). Sau đó gọi `?mode=review` tiếp
 để nhận job kế.
 
+### 9.1 SOP bắt buộc cho reviewer shot — chấm bằng chứng cứ, không chấm mò
+
+Đợt nghiệm thu prod 2026-11-28: 2 reviewer độc lập chạy đúng SOP này mô tả
+frame **khớp nhau** và cùng pass 10.0 — đây là chuẩn bắt buộc:
+
+1. **Tải video** của shot (`video_url` từ chi tiết job) — không chấm khi chưa
+   tải được file.
+2. **ffprobe khớp duration**: duration thực tế vs `expected_duration_sec` —
+   lệch lớn (vượt tolerance) phải phản ánh vào nhận xét.
+3. **Trích tối thiểu 3 frame** (đầu / giữa / cuối) bằng ffmpeg — ghi các giây
+   đã xem vào `frames_checked` của review payload (chứng cứ).
+4. **Mô tả những gì thấy TRƯỚC khi tick** — đối chiếu narration + visual_prompt.
+5. **Chỉ tick `defect_codes` từ bảng server** (`GET /api/v1/board/defect-codes`)
+   — không bịa code; không chắc chắn → ghi vào comment, đừng tick fail-level.
+6. **Fail thì comment phải actionable** cho người gen lại (bắt đầu prompt bằng
+   hướng dẫn làm thay thế).
+
+Lưu ý dispatch **giữ chỗ (lease ~15 phút, env `VIDEO_REVIEW_CLAIM_LEASE_SEC`)**:
+shot/proposal bạn nhận sẽ không nhả cho reviewer khác trong thời hạn — làm
+trong lease để không bị người khác "chớp". Chấm xong lease tự nhả.
+
 ## 10. Muse Proposals — Đề Xuất Short & Review Chéo 3 Agent
 
 Muse agent **tự schedule vào web mỗi giờ** làm 2 việc: (1) đẩy đề xuất ý tưởng
@@ -400,6 +421,20 @@ curl -X POST "https://vidfac.gacdero.vn/api/v1/muse-proposals" \
 - Kèm `Idempotency-Key` theo giờ + id muse để retry mạng an toàn.
 - Không giới hạn số đề xuất — owner tự điều lịch; đề xuất spam vô nghĩa sẽ bị
   reviewer loại (2 fail = rejected ngay).
+- **Đọc kết quả đề xuất của mình**: vòng giờ kế, GET
+  `/api/v1/muse-proposals/{id}` — proposal đã chốt thì nhận xét của reviewer
+  được mở cho proposer. Ý bị loại (rejected) phải đọc góp ý để đề xuất tốt
+  hơn vòng sau — đây là vòng học tập của pipeline.
+- Chính sách quorum (**chốt bởi owner 2026-11-28**): 3 reviewer được mời,
+  **chốt ngay khi đủ 2 pass ≥ 9.5** — reviewer thứ 3 chỉ được điều phối khi
+  bất đồng 1 pass 1 fail. Ui gì khi proposal đã chốt: 409 `proposal_settled`,
+  quay lại bước xin việc kế. Dispatch có **lease giữ chỗ** — reviewer nhận
+  việc sẽ không bị người khác "chớp" trong thời hạn lease.
+- **Telegram cho owner**: tin chờ duyệt có **2 nút bấm trực tiếp** (✅ Duyệt /
+  ❌ Từ chối — callback, không cần gõ lệnh; `/duyet` `/tuchoi` vẫn giữ làm
+  fallback). Khi proposal đi tới giai đoạn có video thành phẩm (sau render),
+  hệ thống gửi kèm **short MP4 qua Telegram** (cap 48MB, quá lớn → gửi link
+  xem trong web).
 
 ### 10.2 Muse nhận việc chấm đề xuất (vòng lặp reviewer)
 

@@ -256,7 +256,9 @@ class ProposalService:
 
     def next_review_proposal(self, caller: str) -> dict[str, Any]:
         """Dispatch kiểu board: loại proposal của chính mình, đã chấm; ưu tiên
-        proposal đã có lượt chấm (chốt sớm) rồi đề xuất cũ nhất. Hết việc trả
+        proposal đã có lượt chấm (chốt sớm) rồi đề xuất cũ nhất. B1: CAS giữ
+        chỗ trước khi trả — reviewer khác gọi cùng lúc nhận đề xuất kế, không
+        ai nhận trùng việc (hết lease tự trả hàng chờ). Hết việc trả
         no_review_proposal + retry_after_sec để vòng lặp agent biết nghỉ."""
         rows = self.store.query(
             "SELECT * FROM muse_proposals WHERE status IN ('proposed','under_review') "
@@ -264,10 +266,14 @@ class ProposalService:
         )
         tier_progress: list[dict] = []
         tier_open: list[dict] = []
+        t_now = now()
         for row in rows:
             if row["proposer"] == caller:
                 continue
             if self._has_reviewed(row["id"], caller):
+                continue
+            lease_until = row.get("claim_lease_until")
+            if lease_until and float(lease_until) > t_now and row.get("claimed_by") != caller:
                 continue
             reviews = self._reviews(row["id"])
             if len(reviews) < reviews_required():
@@ -275,10 +281,23 @@ class ProposalService:
         bucket = tier_progress + tier_open
         if not bucket:
             return {"proposal": None, "reason": "no_review_proposal", "retry_after_sec": 60}
-        return {
-            "proposal": self._format_proposal(bucket[0], caller=caller),
-            "reason": "awaiting_review",
-        }
+        from .service_board import review_claim_lease_sec
+
+        lease_until = t_now + review_claim_lease_sec()
+        for row in bucket:
+            claimed = self.store.cas_update(
+                "UPDATE muse_proposals SET claimed_by=?, claim_lease_until=? "
+                "WHERE id=? AND status IN ('proposed','under_review') "
+                "AND (claim_lease_until IS NULL OR claim_lease_until < ? OR claimed_by = ?)",
+                (caller, lease_until, row["id"], t_now, caller),
+            )
+            if claimed:
+                return {
+                    "proposal": self._format_proposal(row, caller=caller),
+                    "reason": "awaiting_review",
+                    "claim_lease_until": lease_until,
+                }
+        return {"proposal": None, "reason": "no_review_proposal", "retry_after_sec": 60}
 
     def _has_reviewed(self, proposal_id: str, caller: str | None) -> bool:
         if not caller:
@@ -378,7 +397,8 @@ class ProposalService:
             with self.store.transaction() as conn:
                 conn.execute(
                     "UPDATE muse_proposals SET status=?, avg_score=?, review_count=?, "
-                    "pass_count=?, priority=?, decided_at=?, updated_at=? WHERE id=?",
+                    "pass_count=?, priority=?, decided_at=?, updated_at=?, "
+                    "claimed_by=NULL, claim_lease_until=NULL WHERE id=?",
                     (new_status, avg, n, passes,
                      _priority_from_avg(avg) if new_status == "awaiting_owner" else row["priority"],
                      t, t, proposal_id),
@@ -389,7 +409,8 @@ class ProposalService:
             with self.store.transaction() as conn:
                 conn.execute(
                     "UPDATE muse_proposals SET status='under_review', review_count=?, "
-                    "pass_count=?, avg_score=?, updated_at=? WHERE id=?",
+                    "pass_count=?, avg_score=?, updated_at=?, claimed_by=NULL, "
+                    "claim_lease_until=NULL WHERE id=?",
                     (n, passes, avg, t, proposal_id),
                 )
         return self.get_proposal(proposal_id, caller=caller)
@@ -570,15 +591,44 @@ class ProposalService:
             and os.environ.get("VIDEO_TELEGRAM_CHAT_ID", "").strip()
         )
 
-    def _send_telegram(self, text: str) -> None:
+    def send_telegram_video(self, video_path, caption: str) -> bool:
+        """Gửi MP4 qua Telegram sendVideo (B-T2, best-effort) — dùng khi
+        downstream render xong short/track sinh ra từ proposal. Cap 48MB,
+        quá lớn/quên cấu hình → False (caller fallback gửi link)."""
+        if not self._telegram_configured():
+            return False
+        try:
+            token = os.environ["VIDEO_TELEGRAM_BOT_TOKEN"].strip()
+            chat_id = os.environ["VIDEO_TELEGRAM_CHAT_ID"].strip()
+            size = os.path.getsize(video_path) if os.path.exists(video_path) else 0
+            if not size or size > 48 * 1024 * 1024:
+                logger.info("skip Telegram video upload: %d bytes (limit 48MB)", size)
+                return False
+            url = f"https://api.telegram.org/bot{token}/sendVideo"
+            with httpx.Client(timeout=120.0) as client:
+                with open(video_path, "rb") as f:
+                    resp = client.post(url, data={
+                        "chat_id": chat_id, "caption": caption[:1000],
+                        "supports_streaming": "true",
+                    }, files={"video": (os.path.basename(str(video_path)), f, "video/mp4")})
+            resp.raise_for_status()
+            return True
+        except Exception as exc:  # noqa: BLE001 — video notify không làm fail flow
+            logger.warning("send_telegram_video failed: %s", exc)
+            return False
+
+    def _send_telegram(self, text: str, reply_markup: dict | None = None) -> None:
         token = os.environ["VIDEO_TELEGRAM_BOT_TOKEN"].strip()
         chat_id = os.environ["VIDEO_TELEGRAM_CHAT_ID"].strip()
         url = f"https://api.telegram.org/bot{token}/sendMessage"
+        body: dict[str, Any] = {
+            "chat_id": chat_id, "text": text,
+            "parse_mode": "HTML", "disable_web_page_preview": True,
+        }
+        if reply_markup:
+            body["reply_markup"] = reply_markup
         with httpx.Client(timeout=20.0) as client:
-            resp = client.post(url, json={
-                "chat_id": chat_id, "text": text,
-                "parse_mode": "HTML", "disable_web_page_preview": True,
-            })
+            resp = client.post(url, json=body)
         resp.raise_for_status()
 
     def _notify_owner(self, proposal_id: str) -> None:
@@ -610,7 +660,12 @@ class ProposalService:
                 f"\n✅ Duyệt: <code>/duyet {proposal_id}</code> · "
                 f"❌ Từ chối: <code>/tuchoi {proposal_id} [lý do]</code>"
             )
-            lines.append("(hoặc nút Duyệt trong web: Short Studio → Inbox đề xuất)")
-            self._send_telegram("\n".join(lines))
+            lines.append("(hoặc bấm nút dưới đây / nút Duyệt trong web: Short Studio → Inbox đề xuất)")
+            # B-T1: 2 nút bấm trực tiếp thay câu lệnh (callback_query pp:ok/pp:no)
+            markup = {"inline_keyboard": [[
+                {"text": "✅ Duyệt → Cần kịch bản", "callback_data": f"pp:ok:{proposal_id}"},
+                {"text": "❌ Từ chối", "callback_data": f"pp:no:{proposal_id}"},
+            ]]}
+            self._send_telegram("\n".join(lines), reply_markup=markup)
         except Exception as exc:  # noqa: BLE001 — notify phải không bao giờ làm đỏ flow
             logger.warning("proposal telegram notify failed: %s", exc)

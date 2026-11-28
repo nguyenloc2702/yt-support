@@ -48,7 +48,7 @@ def _make_test_png(path: Path, color: str = "crimson") -> Path:
 
 
 def test_todo_requires_thumbnail_before_confirm_assemble_e2e(
-    client, ingest, read_key, fast_offline_tts, tmp_path
+    client, ingest, read_key, fast_offline_tts, tmp_path, approve_shots
 ):
     """Verify:
     1. New todo starts with has_thumbnail=False and ready_to_complete=False.
@@ -95,6 +95,10 @@ def test_todo_requires_thumbnail_before_confirm_assemble_e2e(
     assert vp_after_vid["ready_to_assemble"] is True
     assert vp_after_vid["has_thumbnail"] is False
     assert vp_after_vid["ready_to_complete"] is False
+
+    # B2: video gắn shot phải qua 2 pass review trước khi gate assemble mở —
+    # giữ nguyên kỳ vọng 409 thumbnail_missing ở bước 3
+    approve_shots(item_id)
 
     # 3. confirm-assemble without thumbnail -> HTTP 409 thumbnail_missing
     r_blocked = client.post(

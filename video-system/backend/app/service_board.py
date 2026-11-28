@@ -27,6 +27,16 @@ DEFECT_TABLE: dict[str, tuple[float, bool, str]] = {
 REVIEW_RETRY_AFTER_SEC = 30
 
 
+def review_claim_lease_sec() -> float:
+    """B1: thời hạn giữ chỗ khi dispatch nhả việc chấm — đủ cho SOP download
+    video + trích frame + xem (xem AGENT_API_GUIDE mục 9). Hết lease tự trả
+    lại hàng chờ; reviewer chấm muộn vẫn được nhận (already_reviewed bảo vệ)."""
+    try:
+        return float(os.environ.get("VIDEO_REVIEW_CLAIM_LEASE_SEC") or 900)
+    except (TypeError, ValueError):
+        return 900.0
+
+
 class BoardError(Exception):
     def __init__(self, status_code: int, message: str, code: str) -> None:
         super().__init__(message)
@@ -319,6 +329,7 @@ class BoardService:
         """
         tier_close: list[dict] = []
         tier_open: list[dict] = []
+        t_now = now()
         for s in shots:
             if not s.get("video_hash") or bool(s.get("grandfathered")):
                 continue
@@ -332,6 +343,11 @@ class BoardService:
             passes = sum(1 for r in reviews if r["verdict"] == "pass")
             if passes >= 2:
                 continue  # đã xanh — phòng hờ cho trường hợp board_status lệch
+            # B1: shot đang bị reviewer khác giữ lease còn hiệu lực → nhảy qua
+            # (caller giữ lease của chính mình thì vẫn thấy — re-dispatch tăng gia hạn)
+            lease_until = s.get("review_claim_lease_until")
+            if lease_until and float(lease_until) > t_now and s.get("review_claimed_by") != caller:
+                continue
             (tier_close if passes == 1 else tier_open).append(s)
         return tier_close + tier_open
 
@@ -358,17 +374,32 @@ class BoardService:
             reviewable = self._review_bucket(
                 caller, shots, self._group_active_reviews(item_id)
             )
-            if not reviewable:
-                return {
-                    "shot": None,
-                    "reason": "no_review_work",
-                    "retry_after_sec": REVIEW_RETRY_AFTER_SEC,
-                }
+            # B1: CAS giữ chỗ cho shot sắp trả — reviewer khác gọi cùng lúc sẽ
+            # nhận shot kế, không ai nhận trùng việc (hết lease tự trả hàng chờ).
+            t_now = now()
+            lease_until = t_now + review_claim_lease_sec()
+            for s in reviewable:
+                claimed = self.store.cas_update(
+                    "UPDATE shots SET review_claimed_by=?, review_claim_lease_until=? "
+                    "WHERE id=? AND video_hash IS NOT NULL "
+                    "AND COALESCE(grandfathered,0)=0 "
+                    "AND COALESCE(board_status,'generated')='generated' "
+                    "AND (review_claim_lease_until IS NULL OR review_claim_lease_until < ? "
+                    "OR review_claimed_by = ?)",
+                    (caller, lease_until, s["id"], t_now, caller),
+                )
+                if claimed:
+                    return {
+                        "shot": self._format_shot(
+                            s, caller=caller, privileged=privileged
+                        ),
+                        "reason": "waiting_review",
+                        "claim_lease_until": lease_until,
+                    }
             return {
-                "shot": self._format_shot(
-                    reviewable[0], caller=caller, privileged=privileged
-                ),
-                "reason": "waiting_review",
+                "shot": None,
+                "reason": "no_review_work",
+                "retry_after_sec": REVIEW_RETRY_AFTER_SEC,
             }
 
         buckets: dict[str, list[dict]] = {
@@ -543,6 +574,116 @@ class BoardService:
             )
         return self.get_shot(item_id, shot_index, caller=caller)
 
+    def preflight_upload_covered(self, item_id: str, covered_indexes: list[int], caller: str) -> None:
+        """B2: preflight cho upload gộp (covered_shot_indexes) — mỗi shot TỒN
+        TẠI được phủ đều phải qua luật board (shot đỏ chấm fail → cả cụm bị từ
+        chối nếu không kèm addresses_review_id phù hợp). Orphan index (shot
+        không tồn tại, clip #99 ngoài kịch bản) bỏ qua — video đó sẽ rơi vào
+        bucket 'ngoài board' của summary, không âm thầm vào board."""
+        existing = {
+            s["index_num"] for s in self.store.query(
+                "SELECT index_num FROM shots WHERE item_id=? AND status != 'superseded'",
+                (item_id,),
+            )
+        }
+        for idx in covered_indexes:
+            if idx in existing:
+                self.preflight_upload(item_id, idx, caller)
+
+    def record_board_upload_covered(
+        self,
+        item_id: str,
+        covered_indexes: list[int],
+        caller: str,
+        video_hash: str,
+        declared_generator: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """B2: upload gộp (covered_shot_indexes, không shot_index) — board áp
+        cho TỪNG shot TỒN TẠI được phủ (cùng video_hash, video_version tăng
+        riêng từng shot) — merge flow sống mà board vẫn khép kín. Orphan index
+        bỏ qua (không 404) — rơi vào outside_board."""
+        existing = {
+            s["index_num"] for s in self.store.query(
+                "SELECT index_num FROM shots WHERE item_id=? AND status != 'superseded'",
+                (item_id,),
+            )
+        }
+        out = []
+        for idx in covered_indexes:
+            if idx not in existing:
+                continue
+            out.append(self.record_board_upload(
+                item_id, idx, caller, video_hash,
+                declared_generator=declared_generator,
+            ))
+        return out
+
+    def migrate_legacy_videos(self) -> dict[str, Any]:
+        """B2: map todo_videos chưa gắn board vào shots (covered trước, heuristic
+        theo thứ tự seq ↔ index sau) + grandfathered — assemble được, không tính
+        xanh, không bắt chấm lại (mở rộng tinh thần C-6 cho nhóm 'không ánh xạ').
+        Idempotent: video có sha256 đã được shot nào tham chiếu bị bỏ qua."""
+        items = self.store.query("SELECT id FROM items WHERE status != 'deleted'")
+        mapped = 0
+        unmapped: list[dict[str, Any]] = []
+        t = now()
+        for it in items:
+            iid = it["id"]
+            shots_rows = self.store.query(
+                "SELECT * FROM shots WHERE item_id=? AND status != 'superseded' "
+                "ORDER BY index_num ASC", (iid,),
+            )
+            videos = self.store.query(
+                "SELECT * FROM todo_videos WHERE item_id=? ORDER BY seq_num ASC", (iid,),
+            )
+            referenced = {s["video_hash"] for s in shots_rows if s.get("video_hash")}
+            free_shots = [s for s in shots_rows if not s.get("video_hash")]
+            mapped_ids: set[str] = set()
+            for v in videos:
+                sha = v.get("sha256")
+                if not sha or sha in referenced:
+                    continue
+                covered = json.loads(v["covered_shot_indexes"]) if v.get("covered_shot_indexes") else None
+                target_ids: list[str] = []
+                if covered:
+                    want = {int(i) for i in covered}
+                    for s in shots_rows:
+                        if s["index_num"] in want and not s.get("video_hash"):
+                            target_ids.append(s["id"])
+                if not target_ids and free_shots:
+                    # heuristic: 1 video trôi nổi gắn 1 shot trống, theo thứ tự
+                    s0 = free_shots.pop(0)
+                    target_ids = [s0["id"]]
+                if not target_ids:
+                    unmapped.append({
+                        "item_id": iid, "video_id": v["id"], "seq_num": v.get("seq_num"),
+                        "sha256": sha[:16], "covered": covered,
+                    })
+                    continue
+                for sid in target_ids:
+                    if sid in mapped_ids:
+                        continue
+                    mapped_ids.add(sid)
+                    self.store.execute(
+                        "UPDATE shots SET video_hash=?, video_version=1, "
+                        "uploaded_by='legacy-mapping', declared_generator='legacy-mapping', "
+                        "board_status='generated', grandfathered=1, updated_at=? "
+                        "WHERE id=? AND (video_hash IS NULL OR video_hash='')",
+                        (sha, t, sid),
+                    )
+                    s_row = next(s for s in shots_rows if s["id"] == sid)
+                    self.store.execute(
+                        "INSERT INTO events (id,item_id,shot_id,type,actor,payload_json,at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (new_id("evt"), iid, sid, "shot.legacy_mapped", "migration",
+                         json.dumps({"video_id": v["id"], "sha256": sha[:16],
+                                     "shot_index": s_row["index_num"]}), t),
+                    )
+                    mapped += 1
+            free_shots = [s for s in free_shots if s["id"] not in mapped_ids]
+        return {"mapped_shots": mapped, "videos_outside_board": len(unmapped),
+                "unmapped": unmapped[:50]}
+
     def submit_review(
         self,
         item_id: str,
@@ -627,6 +768,12 @@ class BoardService:
                 recurring = 1
 
         with self.store.transaction() as conn:
+            # B1: chấm xong thì nhả lease giữ chỗ (nếu có)
+            conn.execute(
+                "UPDATE shots SET review_claimed_by=NULL, review_claim_lease_until=NULL "
+                "WHERE id=?",
+                (shot["id"],),
+            )
             conn.execute(
                 "INSERT INTO shot_reviews (id,item_id,shot_id,shot_index,video_hash,"
                 "video_version,reviewer,defect_codes_json,disclose_notes_json,note,"
@@ -828,6 +975,13 @@ class BoardService:
                 generated += 1
             else:
                 empty += 1
+        # B2: video tồn tại nhưng không ánh xạ vào shot nào — "không đo được
+        # thì không quản được"
+        video_hashes = {s["video_hash"] for s in shots if s.get("video_hash")}
+        vids = self.store.query("SELECT sha256 FROM todo_videos WHERE item_id=?", (item_id,))
+        outside_board = sum(
+            1 for v in vids if v.get("sha256") and v["sha256"] not in video_hashes
+        )
         return {
             "item_id": item_id,
             "total_shots": len(shots),
@@ -836,7 +990,9 @@ class BoardService:
             "red": red,
             "generated": generated,
             "empty": empty,
-            "header_text": f"Xanh {green} · Cũ (chưa chấm) {grandfathered} · Đỏ {red}",
+            "outside_board": outside_board,
+            "header_text": f"Xanh {green} · Cũ (chưa chấm) {grandfathered} · Đỏ {red}"
+                           + (f" · Ngoài board {outside_board}" if outside_board else ""),
         }
 
     def check_assemble_gate(self, item_id: str) -> None:

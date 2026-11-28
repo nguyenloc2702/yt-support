@@ -225,6 +225,63 @@ def test_review_mode_rejects_unknown_mode(client, board_job, agents_hdrs):
 
 
 # --------------------------------------------------------------------------
+# B1 — soft-claim lease khi dispatch review
+# Gọi service trực tiếp scope theo item: next_shot là per-item nên không nhiễm
+# proposal/shot của test khác trong store dùng chung (tiền lệ tranche3).
+# --------------------------------------------------------------------------
+def test_review_dispatch_claims_shot_against_other_reviewers(
+        client, board_job, agents_hdrs, tmp_path):
+    from backend.app.main import board
+
+    _upload(client, agents_hdrs, board_job, "muse-2", 1, tmp_path)
+    _upload(client, agents_hdrs, board_job, "muse-2", 2, tmp_path)
+
+    a = board.next_shot(board_job, "muse-1", mode="review")
+    assert a["shot"] is not None
+    assert "claim_lease_until" in a, "dispatch phải trả thời hạn lease"
+    idx_a = a["shot"]["index"]
+
+    b = board.next_shot(board_job, "muse-3", mode="review")
+    assert b["shot"] is not None
+    assert b["shot"]["index"] != idx_a, (
+        "2 reviewer gọi liên tiếp không được nhận cùng shot — lease giữ chỗ")
+
+    # muse-1 re-dispatch: lease của chính mình không chặn mình
+    a2 = board.next_shot(board_job, "muse-1", mode="review")
+    assert a2["shot"]["index"] == idx_a
+
+    # chấm xong nhả lease — shot 1 pass quay lại hàng chờ (tier ưu tiên)
+    vh = a["shot"]["video_hash"]
+    _review(client, agents_hdrs, board_job, idx_a, vh, "muse-1", ["HELMET_BALL"])
+    b2 = board.next_shot(board_job, "muse-3", mode="review")
+    assert b2["shot"] is not None
+    assert b2["shot"]["index"] == idx_a, (
+        "chấm xong nhả lease — shot 1 pass phải quay lại hàng chờ")
+
+
+def test_review_claim_lease_expires_and_reclaimable(
+        client, board_job, agents_hdrs, tmp_path):
+    from backend.app.main import board, store as app_store
+
+    _upload(client, agents_hdrs, board_job, "muse-2", 1, tmp_path)
+    a = board.next_shot(board_job, "muse-1", mode="review")
+    idx = a["shot"]["index"]
+
+    # muse-3 gọi ngay → bị lease chặn → hết việc trong item này
+    b = board.next_shot(board_job, "muse-3", mode="review")
+    assert b["shot"] is None, "shot đang giữ lease cho muse-1"
+
+    # giả lập lease hết hạn → muse-3 nhận lại được shot đó
+    app_store.execute(
+        "UPDATE shots SET review_claim_lease_until=? WHERE item_id=? AND index_num=?",
+        (0.0, board_job, idx),
+    )
+    b2 = board.next_shot(board_job, "muse-3", mode="review")
+    assert b2["shot"] is not None
+    assert b2["shot"]["index"] == idx
+
+
+# --------------------------------------------------------------------------
 # inbox — reviewable_counts giúp reviewer tìm job còn chỗ chấm
 # --------------------------------------------------------------------------
 def _scoped(body, job_id):

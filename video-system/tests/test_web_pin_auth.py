@@ -175,7 +175,8 @@ def test_list_todos_returns_full_shot_checklist_for_all_11_items(client, ingest)
         assert "remaining_duration_sec" in s0
 
 
-def test_confirm_assemble_preserves_raw_shot_videos_for_4col_grid(client, ingest, monkeypatch, tmp_path):
+def test_confirm_assemble_preserves_raw_shot_videos_for_4col_grid(
+        client, ingest, approve_shots, monkeypatch, tmp_path):
     """Verify POST /api/v1/todos/{item_id}/confirm-assemble builds final_en.mp4 AND
     preserves individual shot videos (videos/seq_*.mp4) so the 4-column web grid still plays them."""
     monkeypatch.setenv("VIDEO_OFFLINE_TTS", "1")
@@ -218,6 +219,8 @@ def test_confirm_assemble_preserves_raw_shot_videos_for_4col_grid(client, ingest
         )
     assert r_vid.status_code == 201, r_vid.text
 
+    # B2: video gắn shot phải qua 2 pass review trước khi gate assemble mở
+    approve_shots(item_id)
     r_asm = client.post(
         f"/api/v1/todos/{item_id}/confirm-assemble",
         headers=ingest,

@@ -11,7 +11,10 @@ test) → notify phải im lặng, không lỗi.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +25,30 @@ pytestmark = pytest.mark.skipif(
 
 AGENTS = {"muse-1": "ingest", "muse-2": "ingest", "muse-3": "ingest",
           "muse-4": "ingest", "muse-boss": "manager", "owner": "admin"}
+
+
+@pytest.fixture()
+def board_job(client, ingest, agents_hdrs, wav_file, make_item_fn, import_payload_factory):
+    """Job 3 shot × 8s cho các test B2 (gate upload + migrate legacy)."""
+    item_id = make_item_fn("muse-proposals-b2")
+    payload = import_payload_factory(count=3, duration=24.0, seg=8.0)
+    payload["audio"]["file_path"] = str(wav_file(24.0))
+    r = client.post(f"/api/v1/items/{item_id}/shots/import", headers=ingest, json=payload)
+    assert r.status_code == 201, r.text
+    return item_id
+
+
+def _make_mp4(path: Path, duration_sec: float = 8.0, color: str = "navy") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = shutil.which("ffmpeg") or r"C:\ffmpeg\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe"
+    cmd = [ffmpeg, "-y", "-f", "lavfi",
+           "-i", f"color=c={color}:s=640x360:r=24:d={duration_sec:.3f}",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
+           "-movflags", "+faststart", str(path)]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    if res.returncode != 0:
+        pytest.skip(f"ffmpeg không dựng được clip test: {res.stderr[:200]}")
+    return path
 
 
 @pytest.fixture()
@@ -369,6 +396,195 @@ def test_telegram_unconfigured_does_not_break(client, agents_hdrs):
     r2 = _review(client, agents_hdrs["muse-2"], pid, 9.5)
     r3 = _review(client, agents_hdrs["muse-3"], pid, 9.6)
     assert r3.json()["status"] == "awaiting_owner"
+
+
+# --------------------------------------------------------------------------
+# B-T1 — Telegram inline buttons: nút Duyệt/Từ chối thay câu lệnh
+# --------------------------------------------------------------------------
+def test_notify_owner_has_inline_buttons(client, agents_hdrs, monkeypatch):
+    """Tin chờ duyệt phải mang 2 nút callback pp:ok/pp:no đúng proposal id."""
+    from backend.app.main import proposals as proposals_svc
+
+    r = _propose(client, agents_hdrs["muse-1"], source_url="https://example.com/btn")
+    pid = r.json()["proposal"]["id"]
+    _review(client, agents_hdrs["muse-2"], pid, 9.7)
+    _review(client, agents_hdrs["muse-3"], pid, 9.8)
+
+    sent = []
+    monkeypatch.setattr(proposals_svc, "_telegram_configured", lambda: True)
+    monkeypatch.setattr(proposals_svc, "_send_telegram",
+                        lambda text, reply_markup=None: sent.append(
+                            {"text": text, "markup": reply_markup}))
+    # lượt chấm thứ 3 không diễn ra (đã chốt 2 pass) — bắn lại notify qua
+    # internal path bằng cách gọi _notify_owner trực tiếp (idempotent-ish)
+    proposals_svc._notify_owner(pid)
+    assert sent, "notify phải được gọi"
+    markup = sent[-1]["markup"]
+    assert markup, "tin chờ duyệt phải có inline keyboard"
+    buttons = markup["inline_keyboard"][0]
+    datas = [b["callback_data"] for b in buttons]
+    assert f"pp:ok:{pid}" in datas and f"pp:no:{pid}" in datas
+
+
+def test_telegram_callback_approve_and_reject_flows(client, agents_hdrs, monkeypatch):
+    """Bấm nút qua callback_query: approve → needs_script; bấm lại/lệch trạng
+    thái → alert lý do, state không đổi; data rác → không đụng state."""
+    from backend.app.main import proposals as proposals_svc
+    from backend.app import service_telegram_bot as tb
+
+    r = _propose(client, agents_hdrs["muse-1"], source_url="https://example.com/cb")
+    pid = r.json()["proposal"]["id"]
+    _review(client, agents_hdrs["muse-2"], pid, 9.7)
+    _review(client, agents_hdrs["muse-3"], pid, 9.8)
+
+    posts: list[dict] = []
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, json=None):
+            posts.append({"url": url, "json": json or {}})
+            return FakeResp()
+
+    monkeypatch.setattr(tb.httpx, "Client", FakeClient)
+
+    def _cb(data: str) -> None:
+        posts.clear()
+        cb = {"id": f"cbq-{len(posts)}", "data": data,
+              "message": {"chat": {"id": "123"}, "message_id": 42,
+                          "text": "TIN GỐC"}}
+        tb._handle_proposal_callback("https://api.telegram.org/botX", cb,
+                                     proposals_svc, lambda t: posts.append(
+                                         {"url": "fallback", "json": {"text": t}}))
+
+    # bấm Duyệt → answerCallbackQuery + editMessageText + state đổi
+    _cb(f"pp:ok:{pid}")
+    assert any("answerCallbackQuery" in p["url"] for p in posts)
+    edits = [p for p in posts if "editMessageText" in p["url"]]
+    assert edits and "ĐÃ DUYỆT" in edits[0]["json"]["text"]
+    assert "reply_markup" not in edits[0]["json"], "nút phải biến mất sau xử lý"
+    now_status = client.get(f"/api/v1/muse-proposals/{pid}",
+                            headers=agents_hdrs["owner"]).json()["status"]
+    assert now_status == "needs_script"
+
+    # bấm lại → alert lý do (đã cần kịch bản), state không đổi
+    _cb(f"pp:ok:{pid}")
+    answers = [p for p in posts if "answerCallbackQuery" in p["url"]]
+    assert answers and answers[0]["json"].get("show_alert") is True
+    assert client.get(f"/api/v1/muse-proposals/{pid}",
+                      headers=agents_hdrs["owner"]).json()["status"] == "needs_script"
+
+    # data rác → chỉ answer, không đụng state, không exception
+    _cb("pp:weird:xxx")
+    answers = [p for p in posts if "answerCallbackQuery" in p["url"]]
+    assert answers and "không rõ" in answers[0]["json"].get("text", "")
+
+
+# --------------------------------------------------------------------------
+# B2 — gate shot_binding_required (đường upload không gắn shot)
+# --------------------------------------------------------------------------
+def test_video_upload_without_shot_binding_rejected(client, board_job,
+                                                    agents_hdrs, tmp_path):
+    clip = _make_mp4(tmp_path / "nobind.mp4")
+    with open(clip, "rb") as f:
+        r = client.post(
+            f"/api/v1/todos/{board_job}/videos",
+            headers=agents_hdrs["muse-2"],
+            files={"file": ("clip.mp4", f, "video/mp4")},
+            data={"seq_num": "1", "note": "no binding"},
+        )
+    assert r.status_code == 422, r.text
+    assert r.json()["code"] == "shot_binding_required"
+
+
+def test_video_upload_covered_applies_board_to_each_shot(
+        client, board_job, agents_hdrs, tmp_path):
+    """Upload gộp (covered_shot_indexes, không shot_index) → board áp cho TỪNG
+    shot được phủ — merge flow sống mà board khép kín."""
+    clip = _make_mp4(tmp_path / "covered.mp4")
+    with open(clip, "rb") as f:
+        r = client.post(
+            f"/api/v1/todos/{board_job}/videos",
+            headers=agents_hdrs["muse-2"],
+            files={"file": ("clip.mp4", f, "video/mp4")},
+            data={"seq_num": "1", "covered_shot_indexes": "1,2"},
+        )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert "board_shots" in body, body
+    hashes = {s["video_hash"] for s in body["board_shots"]}
+    assert len(hashes) == 1, "cùng 1 clip → cùng video_hash"
+    s1 = client.get(f"/api/v1/todos/{board_job}/shots/1",
+                    headers=agents_hdrs["muse-2"]).json()
+    s2 = client.get(f"/api/v1/todos/{board_job}/shots/2",
+                    headers=agents_hdrs["muse-2"]).json()
+    assert s1["video_hash"] == s2["video_hash"]
+    assert s1["status"] == "generated" and s2["status"] == "generated"
+
+
+# --------------------------------------------------------------------------
+# B2 — migrate-legacy-videos: map kho cũ + grandfathered + outside_board
+# --------------------------------------------------------------------------
+def test_migrate_legacy_videos_maps_and_grandfathers(
+        client, board_job, agents_hdrs, tmp_path):
+    from backend.app.main import board, store as app_store
+
+    # Upload qua board (shot 1 có video_hash) rồi xoá gắn kết — mô phỏng đúng
+    # trạng thái legacy trên prod: todo_videos tồn tại nhưng shot không tham chiếu
+    clip = _make_mp4(tmp_path / "legacy.mp4")
+    with open(clip, "rb") as f:
+        r = client.post(
+            f"/api/v1/todos/{board_job}/videos",
+            headers=agents_hdrs["muse-2"],
+            files={"file": ("legacy.mp4", f, "video/mp4")},
+            data={"shot_index": "1", "seq_num": "1", "covered_shot_indexes": "1"},
+        )
+    assert r.status_code == 201, r.text
+    app_store.execute(
+        "UPDATE shots SET video_hash=NULL, video_version=0, board_status=NULL, "
+        "uploaded_by=NULL, declared_generator=NULL WHERE item_id=? AND index_num=1",
+        (board_job,),
+    )
+    summary_before = client.get(f"/api/v1/todos/{board_job}/board/summary",
+                                headers=agents_hdrs["muse-1"]).json()
+    assert summary_before["outside_board"] >= 1, "video legacy phải được đếm ngoài board"
+
+    res = board.migrate_legacy_videos()
+    assert res["mapped_shots"] >= 1
+
+    s1 = client.get(f"/api/v1/todos/{board_job}/shots/1",
+                    headers=agents_hdrs["muse-1"]).json()
+    assert s1["grandfathered"] is True, "video mapped từ kho cũ phải grandfathered"
+    assert s1["uploaded_by"] == "legacy-mapping"
+    assert s1["video_hash"], "legacy video phải được gắn lại"
+
+    # grandfathered KHÔNG được dispatch cho reviewer (C-6 mở rộng)
+    nxt = board.next_shot(board_job, "muse-1", mode="review")
+    if nxt["shot"] is not None:
+        assert nxt["shot"]["grandfathered"] is False
+
+    # idempotent: chạy lại mapped=0
+    res2 = board.migrate_legacy_videos()
+    assert res2["mapped_shots"] == 0
+
+    summary_after = client.get(f"/api/v1/todos/{board_job}/board/summary",
+                               headers=agents_hdrs["muse-1"]).json()
+    assert summary_after["outside_board"] == 0
+    assert summary_after["grandfathered"] >= 1
 
 
 # --------------------------------------------------------------------------

@@ -91,6 +91,78 @@ def _handle_command(store, shorts_svc, youtube_svc, text: str,
     return None
 
 
+def _handle_proposal_callback(api: str, cb: dict, proposals_svc,
+                              notify_fn) -> None:
+    """B-T1: xử lý nút ✅ Duyệt / ❌ Từ chối trên tin proposals (callback_query).
+
+    Luật: MỌI nhánh đều phải answerCallbackQuery (bỏ sót → owner thấy spinner
+    10s). Nguồn chân lý là DB — bấm khi proposal đã chốt/expired thì alert lý
+    do, không đổi state. Sau xử lý edit tin gốc bỏ nút (nút chết không giữ
+    lại); tin >48h Telegram không cho sửa → fallback gửi tin mới.
+    callback_data chỉ là con trỏ `pp:ok:{pid}` / `pp:no:{pid}` — quyền nằm ở
+    service call, không có đường tăng quyền mới."""
+    cb_id = cb.get("id")
+    data = cb.get("data") or ""
+    msg = cb.get("message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id"))
+    message_id = msg.get("message_id")
+
+    def _answer(text: str, alert: bool = False) -> None:
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                client.post(f"{api}/answerCallbackQuery", json={
+                    "callback_query_id": cb_id, "text": text[:200],
+                    "show_alert": alert,
+                })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("answerCallbackQuery failed: %s", exc)
+
+    def _edit_or_fallback(new_text: str) -> None:
+        edited = False
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(f"{api}/editMessageText", json={
+                    "chat_id": chat_id, "message_id": message_id,
+                    "text": new_text, "parse_mode": "HTML",
+                })  # không reply_markup → nút biến mất
+                resp.raise_for_status()
+                edited = True
+        except Exception as exc:  # noqa: BLE001 — tin >48h không sửa được
+            logger.warning("editMessageText failed: %s", exc)
+        if not edited:
+            try:
+                notify_fn(new_text)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("telegram fallback notify failed: %s", exc)
+
+    if not proposals_svc:
+        _answer("⚠️ Proposal service chưa được wire.", alert=True)
+        return
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "pp" or parts[1] not in {"ok", "no"}:
+        _answer("⚠️ Lệnh không rõ — dùng /duyet <id> / /tuchoi <id>")
+        return
+    pid = parts[2]
+    base_text = msg.get("text") or ""
+    try:
+        if parts[1] == "ok":
+            res = proposals_svc.approve_proposal(pid)
+            _answer(f"✅ Đã duyệt — priority {res['priority']}, vào hàng chờ cần kịch bản")
+            _edit_or_fallback(f"{base_text}\n\n→ ✅ <b>ĐÃ DUYỆT</b> "
+                              f"(priority {res['priority']}) — needs_script, "
+                              "hàng chờ gen kịch bản.")
+        else:
+            res = proposals_svc.reject_proposal(pid)
+            _answer("🗑 Đã từ chối đề xuất")
+            _edit_or_fallback(f"{base_text}\n\n→ ❌ <b>ĐÃ TỪ CHỐI</b> — "
+                              "xem nhận xét reviewer trong web (Inbox đề xuất).")
+    except Exception as exc:  # noqa: BLE001 — 409/404 đều báo lý do qua alert
+        logger.warning("proposal callback %s failed: %s", data, exc)
+        detail = str(getattr(exc, "message", "")) or str(exc)[:200]
+        _answer(f"⚠️ {detail}", alert=True)
+        _edit_or_fallback(f"{base_text}\n\n→ ⚠️ Không xử lý được: {detail}")
+
+
 def start_telegram_bot(store, shorts_svc, *, youtube_svc=None,
                        proposals_svc=None) -> threading.Thread | None:
     """Long-polling getUpdates trong daemon thread. None nếu Telegram chưa cấu hình."""
@@ -109,7 +181,7 @@ def start_telegram_bot(store, shorts_svc, *, youtube_svc=None,
                 with httpx.Client(timeout=40.0) as client:
                     resp = client.get(f"{api}/getUpdates",
                                       params={"timeout": 25, "offset": offset,
-                                              "allowed_updates": '["message"]'})
+                                              "allowed_updates": '["message","callback_query"]'})
                 resp.raise_for_status()
                 data = resp.json()
                 if not data.get("ok"):
@@ -119,6 +191,17 @@ def start_telegram_bot(store, shorts_svc, *, youtube_svc=None,
                 consecutive_errors = 0
                 for upd in data.get("result") or []:
                     offset = max(offset, int(upd.get("update_id") or 0) + 1)
+                    # B-T1: nút Duyệt/Từ chối trên tin proposals (callback_query)
+                    cb = upd.get("callback_query")
+                    if cb:
+                        cb_msg = cb.get("message") or {}
+                        if str((cb_msg.get("chat") or {}).get("id")) != chat_id:
+                            logger.info("telegram: ignore callback from foreign chat %s",
+                                        (cb_msg.get("chat") or {}).get("id"))
+                            continue
+                        _handle_proposal_callback(api, cb, proposals_svc,
+                                                  service_news._send_telegram)
+                        continue
                     msg = upd.get("message") or {}
                     if str((msg.get("chat") or {}).get("id")) != chat_id:
                         logger.info("telegram: ignore update from foreign chat %s",

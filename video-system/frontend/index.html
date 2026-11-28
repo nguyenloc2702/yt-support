@@ -6860,6 +6860,11 @@ function mpRenderInbox(props) {
   const needs = [...by('needs_script')].sort((a, b) => a.priority - b.priority || a.created_at - b.created_at);
   const producing = by('in_production');
   const done = [...by('rejected'), ...by('expired')];
+  // B3: đề xuất của chính tôi — proposer phải đọc được nhận xét reviewer khi
+  // proposal đã chốt (reviews mở sau chốt) — vòng học tập không bị đứt
+  const mine = (VS_ME && VS_ME.identity)
+    ? props.filter(p => p.proposer === VS_ME.identity)
+    : [];
 
   const sec = (title, list, extra = '') => `
     <div style="font-weight:700;font-size:12.5px;margin:12px 0 6px">${title}${list.length ? ` (${list.length})` : ''}</div>
@@ -6870,6 +6875,7 @@ function mpRenderInbox(props) {
     ${sec('🧪 Đang chấm bởi các reviewer', reviewing)}
     ${sec('📋 Cần kịch bản — hàng chờ ưu tiên gen kịch bản', needs)}
     ${sec('🎬 Đang sản xuất — brief đã tạo, kịch bản đang viết', producing)}
+    ${sec('📨 Đề xuất của tôi — kết quả & góp ý của reviewer', mine)}
     <details style="margin-top:10px">
       <summary style="font-weight:700;font-size:12.5px;cursor:pointer">🗑 Đã từ chối / Quá hạn${done.length ? ` (${done.length})` : ''}</summary>
       <div style="margin-top:6px">${done.length ? done.map(p => mpPropCard(p)).join('') : '<div class="cmt-meta">— trống —</div>'}</div>
@@ -7278,6 +7284,8 @@ async function handleQuickSlotVideoSelected(ev) {
   const { itemId, shotIndex } = quickUploadTarget;
   const fd = new FormData();
   fd.append('file', file);
+  // B2: upload bắt buộc gắn shot — quick-upload luôn gắn đúng shot của nó
+  fd.append('shot_index', String(shotIndex));
   fd.append('seq_num', String(shotIndex));
   fd.append('covered_shot_indexes', JSON.stringify([shotIndex]));
   fd.append('note', `Uploaded directly into Shot #${shotIndex}`);
@@ -7357,6 +7365,8 @@ async function uploadVideoForm(ev, itemId) {
     if (f.seq_num.value) {
       fd.append('seq_num', f.seq_num.value);
       if (!f.covered_shot_indexes.value) {
+        // B2: gắn board trực tiếp cho 1 shot
+        fd.append('shot_index', f.seq_num.value);
         fd.append('covered_shot_indexes', JSON.stringify([Number(f.seq_num.value)]));
       }
     }
