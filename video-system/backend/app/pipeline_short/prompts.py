@@ -362,6 +362,31 @@ def _clean_stories(raw_stories: list, beats: list[str]) -> list[dict]:
     return cleaned
 
 
+_MAX_BEATS = {
+    "daily_digest": 15,   # 12–15 tin/ngày
+    "trailer": 3,         # teaser ngắn
+    "cinematic": 12,      # kể chuyện nhiều nhịp: owner tự soạn 6–10 đoạn là bình thường
+}
+_MAX_BEATS_DEFAULT = 4
+
+
+def max_beats(mode: str) -> int:
+    """Số beat tối đa của 1 mode — một nguồn duy nhất cho validate_script và
+    service_shorts.update_script, tránh 2 đường cắt khác nhau (cinematic từng bị
+    cắt còn 4 trong khi create_from_script cho tới 18 scene)."""
+    return _MAX_BEATS.get(mode, _MAX_BEATS_DEFAULT)
+
+
+def word_budget(mode: str, lang: str = "vi") -> tuple[int, int]:
+    """Ngân sách từ (min, max) của mode+lang — dùng chung cho validate_script và
+    payload short để UI hiển thị đúng (trước đây UI luôn hiện ngân sách tiếng Việt
+    kể cả với short lang='en')."""
+    if lang == "en":
+        return _budget_en(mode)
+    cfg = SHORT_CONFIG["modes"][mode]
+    return int(cfg["min_words"]), int(cfg["max_words"])
+
+
 def validate_script(mode: str, script: dict, source_note_fallback: str = "",
                     lang: str = "vi") -> dict:
     """Validate tiếng người (fail-closed). Trả script đã chuẩn hóa + word_count."""
@@ -386,9 +411,9 @@ def validate_script(mode: str, script: dict, source_note_fallback: str = "",
             beats = story_beats
     if not beats:
         raise ValueError("Kịch bản không có beat nào từ LLM.")
-    max_beats = 15 if mode == "daily_digest" else (3 if mode == "trailer" else 4)
-    if len(beats) > max_beats:
-        beats = beats[:max_beats]
+    cap = max_beats(mode)
+    if len(beats) > cap:
+        beats = beats[:cap]
     if mode == "daily_digest" and len(beats) < 8:
         raise ValueError(
             f"Daily Digest chỉ có {len(beats)} tin (yêu cầu ít nhất 8–15 tin)."

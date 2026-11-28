@@ -330,6 +330,16 @@ const SHORT_STATUS_PILL = {
 };
 const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc', daily_digest: 'Daily World Brief', trailer: 'Trailer video dài', cinematic: 'Kể chuyện điện ảnh' };
 
+// Ngân sách từ do backend trả (`word_budget`, đúng theo mode + lang). Trước đây UI
+// cắt chuỗi hint nên short tiếng Anh vẫn hiện ngân sách tiếng Việt.
+function shortBudgetHint(short) {
+  if (!short) return '';
+  if (short.script && short.script.owner_script) return ' · kịch bản tự soạn, không áp ngân sách';
+  const b = short.word_budget;
+  if (!b || b.max == null) return '';
+  return ` (ngân sách ${b.min}–${b.max} từ)`;
+}
+
 function goShortStudioPage() {
   setActiveNav('shorts');
   if ((window.location.hash || '') !== '#/shorts') {
@@ -1165,7 +1175,7 @@ function renderShortDetailPage(short) {
           </h3>
           <div class="panel-subtitle">
             <span class="mono">${esc(id)}</span> ·
-            <span class="mono">${Number(short.word_count || 0)} từ</span> (ngân sách ${modeMeta.hint.split('·')[1].trim()})
+            <span class="mono">${Number(short.word_count || 0)} từ</span>${shortBudgetHint(short)}
             · duyệt từng câu trước khi tổng hợp
           </div>
         </div>

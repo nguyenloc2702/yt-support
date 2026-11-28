@@ -178,6 +178,11 @@ class ShortService:
             short["script"] = {}
         short.pop("script_json", None)
         short["status_label"] = domain.SHORT_LABELS_VI.get(row["status"], row["status"])
+        try:
+            lo, hi = prompts.word_budget(row["mode"], row.get("lang") or "vi")
+            short["word_budget"] = {"min": lo, "max": hi}
+        except (KeyError, TypeError, ValueError):
+            short["word_budget"] = None
         yt_row = self.store.query_one(
             "SELECT id, id AS upload_id, COALESCE(target_type,'short') AS target_type, "
             "youtube_video_id, youtube_url, title, privacy_status, publish_at, "
@@ -213,7 +218,7 @@ class ShortService:
             beats = [str(b).strip() for b in (patch["beats"] or []) if str(b).strip()]
             if not beats:
                 raise ValueError("beats không được rỗng.")
-            max_beats = 15 if row["mode"] == "daily_digest" else (3 if row["mode"] == "trailer" else 4)
+            max_beats = prompts.max_beats(row["mode"])
             script["beats"] = beats[:max_beats]
             if row["mode"] == "daily_digest" and isinstance(script.get("stories"), list):
                 for idx_s, st in enumerate(script["stories"]):
@@ -1486,6 +1491,7 @@ class ShortService:
             "search_keywords_en": [str(k).strip() for k in (search_keywords_en or [])
                                    if str(k).strip()],
             "word_count": sum(len(t.split()) for t in [hook, *clean_beats, closing] if t),
+            "owner_script": True,  # UI: không áp ngân sách từ cho kịch bản tự soạn
         }
         short_id = new_id("sho")
         t = now()

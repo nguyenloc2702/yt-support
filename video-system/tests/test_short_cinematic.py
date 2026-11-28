@@ -208,3 +208,81 @@ def test_clean_karaoke_overlay_has_no_badge(tmp_path, monkeypatch):
                 drawn = True
                 break
     assert drawn
+
+
+def test_patch_script_cinematic_keeps_all_beats(client, ingest, short_adapters):
+    """PATCH kịch bản không được cắt beat còn 4 với cinematic (bug trước đây).
+
+    `validate_script` dùng cap 4 cho mọi mode không phải digest/trailer, nên owner
+    sửa kịch bản 8 đoạn trong UI sẽ mất âm thầm 4 đoạn — trong khi
+    `create_from_script` cho tới 18 scene. Giờ cả hai đọc `prompts.max_beats`.
+    """
+    short = _create(client, ingest, short_adapters)
+    sid = short["id"]
+    beats = [f"Beat số {i} kể tiếp một nhịp của câu chuyện." for i in range(1, 8)]
+    r = client.patch(f"/api/v1/shorts/{sid}/script", headers=ingest,
+                     json={"beats": beats})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["script"]["beats"]) == 7
+    assert len(body["scenes"]) == 9  # hook + 7 beat + closing
+
+
+def test_max_beats_keeps_legacy_caps():
+    from backend.app.pipeline_short import prompts
+    assert prompts.max_beats("news") == 4
+    assert prompts.max_beats("decode") == 4
+    assert prompts.max_beats("trailer") == 3
+    assert prompts.max_beats("daily_digest") == 15
+    assert prompts.max_beats("cinematic") == 12
+
+
+def test_patch_script_cinematic_keeps_all_beats(client, ingest, short_adapters):
+    """PATCH kịch bản không được cắt beat còn 4 với cinematic (bug trước đây).
+
+    `validate_script` dùng cap 4 cho mọi mode không phải digest/trailer, nên owner
+    sửa kịch bản 8 đoạn trong UI sẽ mất âm thầm 4 đoạn — trong khi
+    `create_from_script` cho tới 18 scene. Giờ cả hai đọc `prompts.max_beats`.
+    """
+    short = _create(client, ingest, short_adapters)
+    sid = short["id"]
+    beats = [f"Beat số {i} kể tiếp một nhịp của câu chuyện." for i in range(1, 8)]
+    r = client.patch(f"/api/v1/shorts/{sid}/script", headers=ingest,
+                     json={"beats": beats})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["script"]["beats"]) == 7
+    assert len(body["scenes"]) == 9  # hook + 7 beat + closing
+
+
+def test_max_beats_keeps_legacy_caps():
+    from backend.app.pipeline_short import prompts
+    assert prompts.max_beats("news") == 4
+    assert prompts.max_beats("decode") == 4
+    assert prompts.max_beats("trailer") == 3
+    assert prompts.max_beats("daily_digest") == 15
+    assert prompts.max_beats("cinematic") == 12
+
+
+def test_short_payload_exposes_lang_aware_word_budget(client, ingest, short_adapters):
+    """UI phải thấy ngân sách đúng theo lang, không phải hint tiếng Việt cắt chuỗi."""
+    from backend.app.pipeline_short import prompts
+    assert prompts.word_budget("cinematic", "en") == (85, 120)
+    assert prompts.word_budget("cinematic", "vi") == (100, 140)
+    short = _create(client, ingest, short_adapters)
+    assert short["word_budget"] == {"min": 100, "max": 140}  # script fixture là VI
+
+
+def test_from_script_marks_owner_script_so_ui_skips_budget(client, ingest, short_adapters):
+    r = client.post("/api/v1/shorts/from-script", headers=ingest, json={
+        "title": "Owner script", "mode": "cinematic", "lang": "en",
+        "hook": "Hook line here.",
+        "beats": [f"Beat number {i} describes the long descent through fire and the silence "
+                  f"that follows it afterwards." for i in range(1, 9)],
+        "closing": "Closing line here.",
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["script"]["owner_script"] is True
+    assert body["word_budget"] == {"min": 85, "max": 120}
+    assert body["word_count"] > body["word_budget"]["max"]  # cố ý vượt, không bị chặn
