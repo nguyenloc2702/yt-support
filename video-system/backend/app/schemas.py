@@ -360,6 +360,22 @@ class ShortScriptUpdate(BaseModel):
     source_note: str | None = Field(default=None, max_length=300)
 
 
+class ShortAudioShot(BaseModel):
+    """1 shot owner khai báo cho audio đã nạp (start/end tính bằng giây)."""
+    text: str = Field(min_length=1, max_length=2000)
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(gt=0)
+
+
+class ShortAudioIngest(BaseModel):
+    """Body JSON cho `shots` khi POST multipart /shorts/{id}/audio.
+
+    Chỉ validate shape/kiểu; continuity + khớp duration audio do service
+    fail-closed kiểm tra (cần probe file thật).
+    """
+    shots: list[ShortAudioShot] = Field(min_length=1, max_length=18)
+
+
 
 # --- Instagram Reels + Affiliate (plan ke_hoach_instagram_reels_affiliate_v1) --
 

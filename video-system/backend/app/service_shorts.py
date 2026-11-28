@@ -197,6 +197,10 @@ class ShortService:
         row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
         if not row:
             raise KeyError(short_id)
+        if (row.get("audio_source") or "tts") == "owner":
+            raise ValueError(
+                "Short dùng audio owner — sửa kịch bản sẽ mất timing audio owner. "
+                "Xoá audio trước rồi mới sửa kịch bản.")
         if row["status"] not in {domain.ShortStatus.SCRIPTED.value,
                                  domain.ShortStatus.FAILED.value}:
             raise ValueError(
@@ -233,6 +237,190 @@ class ShortService:
                     {"word_count": validated.get("word_count")})
         return self.get(short_id)
 
+    # ------------------------------------------------------------------ audio ingest
+    _AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".opus"}
+
+    def _audio_duration(self, path: Path, ext: str) -> float:
+        """WAV → đọc header; định dạng khác → ffprobe (format=duration)."""
+        dur = 0.0
+        if ext == ".wav":
+            try:
+                dur = float(assembler._wav_duration(path))
+            except Exception:  # noqa: BLE001 — wav hỏng thì thử ffprobe
+                dur = 0.0
+        if dur <= 0:
+            dur = self._probe_video_duration(path)
+        if dur <= 0:
+            raise ValueError("Không đọc được thời lượng audio — kiểm tra lại file.")
+        return round(dur, 3)
+
+    def _validate_audio_shots(self, shots: list[dict], audio_dur: float) -> list[dict]:
+        """Fail-closed: shot phải liên tục, phủ đúng độ dài audio."""
+        if not isinstance(shots, list) or not shots:
+            raise ValueError("Danh sách shot rỗng — cần ít nhất 1 shot.")
+        max_scenes = int(SHORT_CONFIG["limits"]["max_scenes"])
+        if len(shots) > max_scenes:
+            raise ValueError(f"Có {len(shots)} shot, vượt giới hạn {max_scenes} shot.")
+        clean: list[dict] = []
+        for idx, shot in enumerate(shots, start=1):
+            if not isinstance(shot, dict):
+                raise ValueError(f"Shot #{idx} không phải object.")
+            text = str(shot.get("text") or "").strip()
+            if not text:
+                raise ValueError(f"Shot #{idx}: text rỗng.")
+            try:
+                start = float(shot.get("start_sec"))
+                end = float(shot.get("end_sec"))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Shot #{idx}: start_sec/end_sec phải là số.") from None
+            if start < 0:
+                raise ValueError(f"Shot #{idx}: start_sec phải >= 0.")
+            if end <= start:
+                raise ValueError(f"Shot #{idx}: end_sec phải lớn hơn start_sec.")
+            clean.append({"text": text, "start_sec": start, "end_sec": end})
+        if abs(clean[0]["start_sec"]) > 0.5:
+            raise ValueError("Shot đầu tiên phải bắt đầu gần 0s (lệch tối đa 0.5s).")
+        for i in range(1, len(clean)):
+            prev, cur = clean[i - 1], clean[i]
+            if cur["start_sec"] < prev["end_sec"] - 0.05:
+                raise ValueError(
+                    f"Shot #{i + 1} bắt đầu ({cur['start_sec']:.2f}s) trước khi shot "
+                    f"#{i} kết thúc ({prev['end_sec']:.2f}s) — timeline phải liên tục.")
+        last_end = clean[-1]["end_sec"]
+        tol = max(0.6, 0.02 * audio_dur)
+        if abs(last_end - audio_dur) > tol:
+            raise ValueError(
+                f"Tổng thời lượng shot ({last_end:.2f}s) lệch audio ({audio_dur:.2f}s) "
+                f"quá dung sai {tol:.2f}s.")
+        return clean
+
+    def ingest_audio(self, short_id: str, *, raw_bytes: bytes | None = None,
+                     filename: str = "audio.mp3", file_path: Path | None = None,
+                     shots: list[dict], actor: str = "ui") -> dict:
+        """Owner nạp audio + danh sách shot sẵn (không TTS, không ASR).
+
+        Ghi audio/words/ass/srt, thay `short_scenes` theo timing owner và đánh
+        dấu `audio_source='owner'` để `publish_job` bỏ qua `_ensure_voice_timeline`.
+        """
+        row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
+        if not row:
+            raise KeyError(short_id)
+        allowed = {domain.ShortStatus.SCRIPTED.value, domain.ShortStatus.DRAFT.value}
+        if row["status"] not in allowed:
+            raise ValueError(
+                "Chỉ nạp audio khi short ở trạng thái 'scripted' hoặc 'draft' "
+                f"(hiện: {row['status']}).")
+        if raw_bytes is None:
+            if file_path is None:
+                raise ValueError("Thiếu file audio (raw_bytes hoặc file_path).")
+            p_in = Path(file_path)
+            if not p_in.exists():
+                raise ValueError(f"File audio không tồn tại: {p_in}")
+            raw_bytes = p_in.read_bytes()
+        if not raw_bytes:
+            raise ValueError("File audio rỗng.")
+        ext = Path(filename or "audio.mp3").suffix.lower() or ".mp3"
+        if ext not in self._AUDIO_EXTS:
+            raise ValueError(f"Định dạng audio không hỗ trợ ({ext}).")
+
+        lang = row.get("lang") or "vi"
+        mode = row.get("mode") or ""
+        objects = tts_vi.objects_root(short_id)
+        audio_dir = objects / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_file = audio_dir / f"voice_{short_id}{ext}"
+        audio_file.write_bytes(raw_bytes)
+        try:
+            audio_dur = self._audio_duration(audio_file, ext)
+            clean = self._validate_audio_shots(shots, audio_dur)
+        except Exception:
+            audio_file.unlink(missing_ok=True)
+            raise
+
+        words = _words_from_shots(clean)
+        words_obj = audio_dir / f"words_{short_id}.json"
+        words_obj.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+        ass_path = objects / f"subs_{short_id}.ass"
+        srt_path = objects / f"subs_{short_id}.srt"
+        karaoke.build_short_ass(words, ass_path, audio_dur)
+        karaoke.build_short_srt(words, srt_path, audio_dur)
+
+        audio_ast = self._put_asset(
+            short_id, "audio", f"shorts/{short_id}/audio/voice_{short_id}{ext}",
+            audio_file, "audio", duration_s=audio_dur, engine="owner-upload",
+            meta={"filename": filename or f"audio{ext}"})
+        words_ast = self._put_asset(
+            short_id, "json", f"shorts/{short_id}/audio/words_{short_id}.json",
+            words_obj, "json", engine="word-timeline")
+        ass_ast = self._put_asset(
+            short_id, "subtitle", f"shorts/{short_id}/subs_{short_id}.ass",
+            ass_path, "subtitle", engine="karaoke-ass")
+        srt_ast = self._put_asset(
+            short_id, "subtitle", f"shorts/{short_id}/subs_{short_id}.srt",
+            srt_path, "subtitle", engine="srt")
+        self.store.execute(
+            "UPDATE shorts SET audio_asset_id=?, words_asset_id=?, srt_asset_id=?, "
+            "ass_asset_id=?, duration_s=?, audio_source='owner', updated_at=? WHERE id=?",
+            (audio_ast, words_ast, srt_ast, ass_ast, audio_dur, now(), short_id),
+        )
+
+        self.store.execute("DELETE FROM short_scenes WHERE short_id=?", (short_id,))
+        t = now()
+        for i, shot in enumerate(clean, start=1):
+            self.store.execute(
+                "INSERT INTO short_scenes (id, short_id, seq_num, text, start_sec, "
+                "end_sec, image_prompt, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (new_id("ssc"), short_id, i, shot["text"], shot["start_sec"],
+                 shot["end_sec"],
+                 _image_prompt_for(short_id, i, shot["text"], lang, mode), t, t),
+            )
+        self._event(short_id, "short.audio_ingested", actor,
+                    {"scenes": len(clean), "duration_sec": audio_dur,
+                     "audio_source": "owner"})
+        # draft chưa publish được (transition draft→queued không hợp lệ) → đưa lên
+        # scripted, đúng luật DRAFT→SCRIPTED sẵn có.
+        if row["status"] == domain.ShortStatus.DRAFT.value:
+            self._transition(short_id, domain.ShortStatus.SCRIPTED.value,
+                             reason="nạp audio owner")
+        return self.get(short_id)
+
+    def clear_audio(self, short_id: str, actor: str = "ui") -> dict:
+        """Bỏ audio owner, quay lại luồng TTS (để sửa kịch bản hoặc nạp audio khác)."""
+        row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
+        if not row:
+            raise KeyError(short_id)
+        if row["status"] not in {domain.ShortStatus.SCRIPTED.value,
+                                 domain.ShortStatus.DRAFT.value}:
+            raise ValueError(
+                "Chỉ bỏ audio khi short ở trạng thái 'scripted'/'draft' "
+                f"(hiện: {row['status']}).")
+        if (row.get("audio_source") or "tts") != "owner":
+            raise ValueError("Short này không dùng audio owner — không có gì để bỏ.")
+
+        objects = tts_vi.objects_root(short_id)
+        audio_dir = objects / "audio"
+        for f in audio_dir.glob(f"voice_{short_id}.*"):
+            f.unlink(missing_ok=True)
+        (audio_dir / f"words_{short_id}.json").unlink(missing_ok=True)
+        for f in objects.glob(f"subs_{short_id}.*"):
+            f.unlink(missing_ok=True)
+
+        self.store.execute(
+            "UPDATE shorts SET audio_source='tts', audio_asset_id=NULL, "
+            "words_asset_id=NULL, srt_asset_id=NULL, ass_asset_id=NULL, "
+            "duration_s=0.0, updated_at=? WHERE id=?",
+            (now(), short_id),
+        )
+        # Timing owner không còn đúng → trả scene về 0 để publish_job sinh lại bằng TTS.
+        self.store.execute(
+            "UPDATE short_scenes SET start_sec=0.0, end_sec=0.0, "
+            "generated_duration_sec=0.0, agent_checked=0 WHERE short_id=?",
+            (short_id,))
+        self._event(short_id, "short.audio_cleared", actor, {})
+        return self.get(short_id)
+
     # ------------------------------------------------------------------ produce
     def _ensure_voice_timeline(self, short_id: str, row: dict) -> tuple[dict, list[dict], Path, Path]:
         """Voice EN/VI + word timeline + scene windows + karaoke subs (G.13).
@@ -241,6 +429,10 @@ class ShortService:
         ngoài gen video). Idempotent — gọi lại thì overwrite artifacts.
         Trả: (voice, scenes, ass_path, srt_path).
         """
+        if (row.get("audio_source") or "tts") == "owner":
+            raise ValueError(
+                "Short dùng audio owner — không được sinh lại voice timeline "
+                "(sẽ xoá scene + audio owner).")
         script = json.loads(row["script_json"] or "{}")
         lang = row.get("lang") or "vi"
         texts = prompts.narration_texts(script)
@@ -298,6 +490,10 @@ class ShortService:
         row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
         if not row:
             raise KeyError(short_id)
+        if (row.get("audio_source") or "tts") == "owner":
+            raise ValueError(
+                "Short dùng audio owner — produce ảnh tĩnh sẽ ghi đè audio/scene owner. "
+                "Dùng job mode (publish-job → agent nộp clip) thay vì produce.")
         if row["status"] not in {domain.ShortStatus.SCRIPTED.value,
                                  domain.ShortStatus.READY.value,
                                  domain.ShortStatus.FAILED.value}:
@@ -663,6 +859,27 @@ class ShortService:
         if row["status"] != domain.ShortStatus.SCRIPTED.value:
             raise ValueError(
                 f"Chỉ phát hành job từ trạng thái 'scripted' (hiện: {row['status']}).")
+        if (row.get("audio_source") or "tts") == "owner":
+            # Audio + scene owner đã nạp sẵn — KHÔNG gọi _ensure_voice_timeline
+            # (hàm đó DELETE short_scenes và gọi TTS). Chỉ kiểm coverage.
+            scenes = self.store.query(
+                "SELECT * FROM short_scenes WHERE short_id=? ORDER BY seq_num",
+                (short_id,))
+            if not scenes:
+                raise ValueError("Short dùng audio owner nhưng chưa có scene — nạp audio trước.")
+            bad = [int(sc["seq_num"]) for sc in scenes
+                   if float(sc["end_sec"]) <= float(sc["start_sec"])]
+            if bad:
+                raise ValueError(
+                    f"Scene {bad} có timing không hợp lệ (end_sec <= start_sec) — "
+                    "nạp lại audio + shot.")
+            duration = float(row.get("duration_s") or 0.0)
+            self._transition(short_id, domain.ShortStatus.QUEUED.value,
+                             reason="job phát hành từ audio owner")
+            self._event(short_id, "short.job_ready", actor,
+                        {"scenes": len(scenes), "duration_sec": round(duration, 3),
+                         "audio_source": "owner"})
+            return self.get_job(short_id)
         voice, scenes, _ass, _srt = self._ensure_voice_timeline(short_id, row)
         self._transition(short_id, domain.ShortStatus.QUEUED.value,
                          reason="job đã phát hành cho agent video ngoài")
@@ -1191,6 +1408,50 @@ class ShortService:
         })
         return self.get(short_id)
 
+    def create_from_audio(self, *, raw_bytes: bytes, filename: str = "audio.mp3",
+                          shots: list[dict], title: str = "", mode: str = "cinematic",
+                          lang: str = "vi", actor: str = "ui") -> dict:
+        """Tạo short trực tiếp từ audio + shot list của owner (KHÔNG gọi LLM).
+
+        Kịch bản dựng từ chính text của shot (hook = shot đầu, closing = shot cuối)
+        để các đường đọc `script_json` (publish markdown, danh sách) không vỡ.
+        """
+        if mode not in prompts.MODES:
+            raise ValueError(f"mode không hợp lệ: {mode} (chấp nhận: {', '.join(prompts.MODES)})")
+        if lang not in prompts.LANGS:
+            raise ValueError(f"lang không hợp lệ: {lang} (chấp nhận: {', '.join(prompts.LANGS)})")
+        texts = [str(s.get("text") or "").strip() for s in (shots or [])]
+        texts = [t for t in texts if t]
+        if not texts:
+            raise ValueError("Danh sách shot rỗng — cần ít nhất 1 shot có nội dung.")
+
+        clean_title = (title or "").strip()[:200] or texts[0][:120]
+        script = {
+            "title": clean_title,
+            "hook": texts[0],
+            "beats": texts[1:-1] if len(texts) > 2 else texts[1:],
+            "closing": texts[-1] if len(texts) > 1 else "",
+            "description": "",
+            "source_note": "",
+            "word_count": sum(len(t.split()) for t in texts),
+        }
+        short_id = new_id("sho")
+        t = now()
+        self.store.execute(
+            "INSERT INTO shorts (id, mode, lang, title, status, script_json, source_text, "
+            "source_note, source_link, target_seconds, duration_s, word_count, "
+            "error_detail, audio_source, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (short_id, mode, lang, clean_title, domain.ShortStatus.SCRIPTED.value,
+             json.dumps(script, ensure_ascii=False), clean_title, None, None,
+             None, 0.0, int(script["word_count"]), None, "tts", t, t),
+        )
+        self._event(short_id, "short.created", actor,
+                    {"mode": mode, "lang": lang, "title": clean_title,
+                     "source": "audio-upload"})
+        return self.ingest_audio(short_id, raw_bytes=raw_bytes, filename=filename,
+                                 shots=shots, actor=actor)
+
     def create_from_upload(self, title: str, mode: str = "news", lang: str = "vi",
                            raw_bytes: bytes = b"", filename: str = "short.mp4",
                            source_note: str = "", description: str = "",
@@ -1344,6 +1605,27 @@ def _render_preset(mode: str, lang: str) -> str:
         return "daily_digest"
     return (presets.get("en_default", "split_news_60") if lang == "en"
             else presets.get("vi_default", "viral_redpill"))
+
+
+def _words_from_shots(shots: list[dict]) -> list[dict]:
+    """Word timeline cho audio owner: chia đều từ trong từng shot window.
+
+    Dùng lại công thức offline của TTS (`_cue_words_offline`) — cùng semantics:
+    mỗi từ nhận `duration / len(words)`. Clamp `cue_start` về sau từ cuối của
+    shot trước để `start` tăng dần tuyệt đối kể cả khi window chồng lấn ≤ 0.05s.
+    """
+    words: list[dict] = []
+    for shot in shots:
+        prev_end = words[-1]["end"] if words else 0.0
+        cue_start = max(float(shot["start_sec"]), prev_end)
+        dur = float(shot["end_sec"]) - cue_start
+        if dur <= 0:
+            continue
+        for w in tts_vi._cue_words_offline(str(shot["text"]), cue_start, dur):
+            if w["end"] <= w["start"]:
+                continue
+            words.append(w)
+    return words
 
 
 def _image_prompt_for(short_id: str, seq: int, text: str, lang: str = "vi",

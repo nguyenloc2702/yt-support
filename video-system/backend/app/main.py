@@ -36,7 +36,7 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
                       KnowledgePublishRequest, KnowledgeSyncRequest,
                       KnowledgeUpdateRequest,
                       ReadMeCreateRequest, ReadMePatchRequest,
-                      ReadMePutRequest, ShortCreate, ShortScriptUpdate,
+                      ReadMePutRequest, ShortAudioIngest, ShortCreate, ShortScriptUpdate,
                       ShotChecklistBatchUpdate,
                       ShotCheckUpdate, ShotImport, SyncGdriveRequest,
                       TodoCollectReferencesRequest, TodoFromScriptCreate,
@@ -2081,9 +2081,109 @@ def get_short_audio(short_id: str, download: bool = False, request: Request = No
         raise HTTPException(404, "short not found")
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
-    return FileResponse(p, media_type="audio/wav",
-                        filename=f"{short_id}_voice_vi.wav",
+    return FileResponse(p, media_type=_AUDIO_MEDIA_TYPES.get(p.suffix.lower(), "audio/wav"),
+                        filename=f"{short_id}_voice_vi{p.suffix.lower() or '.wav'}",
                         content_disposition_type="attachment" if download else "inline")
+
+
+_AUDIO_MEDIA_TYPES = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+@app.post("/api/v1/shorts/{short_id}/audio")
+async def ingest_short_audio(short_id: str, request: Request):
+    """Owner nạp audio + danh sách shot (multipart: `file` + `shots` JSON).
+
+    Audio owner thay cho TTS: scenes + timing do owner khai báo, `publish_job`
+    sau đó chỉ chuyển queued mà không gọi TTS.
+    """
+    auth.require(request, "ingest")
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(422, "multipart form must include 'file'")
+    raw_shots = form.get("shots")
+    if raw_shots is None or not str(raw_shots).strip():
+        raise HTTPException(422, "multipart form must include 'shots' (JSON list)")
+    try:
+        decoded = json.loads(str(raw_shots))
+        if isinstance(decoded, list):
+            decoded = {"shots": decoded}
+        parsed = ShortAudioIngest.model_validate(decoded)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(422, f"shots không hợp lệ: {e}")
+    raw_bytes = await upload.read()
+    filename = getattr(upload, "filename", None) or "audio.mp3"
+    try:
+        res = await run_in_threadpool(
+            shorts.ingest_audio,
+            short_id,
+            raw_bytes=raw_bytes,
+            filename=filename,
+            shots=[s.model_dump() for s in parsed.shots],
+        )
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return res
+
+
+@app.delete("/api/v1/shorts/{short_id}/audio")
+def clear_short_audio(short_id: str, request: Request = None):
+    """Bỏ audio owner, quay lại luồng TTS (sửa kịch bản hoặc nạp audio khác)."""
+    auth.require(request, "ingest")
+    try:
+        return shorts.clear_audio(short_id)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/v1/shorts/audio")
+async def create_short_from_audio(request: Request):
+    """Tạo short mới từ audio + shot list của owner (không gọi LLM).
+
+    multipart: `file` (audio), `shots` (JSON list {text,start_sec,end_sec}),
+    `title`, `mode`, `lang`. Trả 201 kèm short đã hydrate (status `scripted`,
+    `audio_source='owner'`) — gọi `publish-job` để agent nhận ngay.
+    """
+    auth.require(request, "ingest")
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(422, "multipart form must include 'file'")
+    raw_shots = form.get("shots")
+    if raw_shots is None or not str(raw_shots).strip():
+        raise HTTPException(422, "multipart form must include 'shots' (JSON list)")
+    try:
+        decoded = json.loads(str(raw_shots))
+        if isinstance(decoded, list):
+            decoded = {"shots": decoded}
+        parsed = ShortAudioIngest.model_validate(decoded)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(422, f"shots không hợp lệ: {e}")
+    raw_bytes = await upload.read()
+    try:
+        res = await run_in_threadpool(
+            shorts.create_from_audio,
+            raw_bytes=raw_bytes,
+            filename=getattr(upload, "filename", None) or "audio.mp3",
+            shots=[s.model_dump() for s in parsed.shots],
+            title=str(form.get("title") or "").strip(),
+            mode=str(form.get("mode") or "cinematic").strip() or "cinematic",
+            lang=str(form.get("lang") or "vi").strip() or "vi",
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return JSONResponse(res, status_code=201)
 
 
 @app.post("/api/v1/shorts/upload")

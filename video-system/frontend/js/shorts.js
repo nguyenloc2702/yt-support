@@ -305,10 +305,17 @@ let shortNewsList = [];
 let shortMode = 'news';
 let shortLang = 'vi';          // vi | en — mảng quốc tế dùng giọng + prompt EN
 let newsLangFilter = '';       // '' = tất cả, 'vi', 'en'
-let shortCreateTab = 'ai';     // 'ai' | 'upload'
+let shortCreateTab = 'ai';     // 'ai' | 'upload' | 'audio'
 let shortUploadFileObj = null;
 let shortUploadPreviewUrl = '';
 let shortQuickPreviewId = '';
+// Tab "Nạp audio + shot" — audio owner (không TTS), timing do người dùng khai
+let shortAudioFileObj = null;
+let shortAudioTitleText = '';
+let shortAudioShotsText = '';
+let shortAudioMode = 'cinematic';
+let shortAudioLang = 'vi';
+let shortAudioCreatedId = '';
 const SHORT_MODE_META = {
   news: { label: 'Tin nóng', hint: '25–40s · 80–110 từ · hook giật gân → 3 beat → câu hỏi mở', target: 32 },
   decode: { label: 'Giải mã tiền bạc', hint: '40–60s · 110–160 từ · nghịch lý → cơ chế → chốt loop', target: 48 },
@@ -673,7 +680,55 @@ function renderShortStudioShell() {
         <div class="short-studio-switcher" role="tablist" aria-label="Phương thức tạo Short">
           <button type="button" class="short-studio-tab ${shortCreateTab === 'ai' ? 'active' : ''}" onclick="switchShortCreateTab('ai')">✨ Tạo từ kịch bản AI</button>
           <button type="button" class="short-studio-tab ${shortCreateTab === 'upload' ? 'active' : ''}" onclick="switchShortCreateTab('upload')">📤 Upload sản phẩm (.MP4)</button>
+          <button type="button" class="short-studio-tab ${shortCreateTab === 'audio' ? 'active' : ''}" onclick="switchShortCreateTab('audio')">🎙 Nạp audio + shot</button>
         </div>
+
+        ${shortCreateTab === 'audio' ? `
+          <div class="short-form-grid">
+            <div class="short-form-row">
+              <label for="shortAudioFile">File audio (bắt buộc):</label>
+              <input type="file" id="shortAudioFile" accept="audio/*" onchange="onShortAudioFilePicked(this)"/>
+              <span id="shortAudioFileName" class="mono" style="font-size:11.5px;color:var(--fg-muted)">
+                ${shortAudioFileObj ? `📎 ${esc(shortAudioFileObj.name)} (${(shortAudioFileObj.size / 1048576).toFixed(2)} MB)` : 'Chưa chọn file'}
+              </span>
+            </div>
+            <div class="short-form-row">
+              <label for="shortAudioTitle">Tiêu đề (tùy chọn):</label>
+              <input type="text" id="shortAudioTitle" placeholder="VD: Sáu giờ sáng, thành phố còn ngủ" maxlength="200"
+                     style="flex:1;min-width:220px" value="${esc(shortAudioTitleText)}"
+                     oninput="shortAudioTitleText=this.value"/>
+            </div>
+            <div class="short-form-row">
+              <label for="shortAudioMode">Mode:</label>
+              <select id="shortAudioMode" onchange="shortAudioMode=this.value">
+                ${Object.entries(SHORT_MODE_META).map(([k, m]) => `
+                  <option value="${k}" ${shortAudioMode === k ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}
+              </select>
+              <label for="shortAudioLang">Ngôn ngữ:</label>
+              <select id="shortAudioLang" onchange="shortAudioLang=this.value">
+                <option value="vi" ${shortAudioLang === 'vi' ? 'selected' : ''}>Tiếng Việt</option>
+                <option value="en" ${shortAudioLang === 'en' ? 'selected' : ''}>English</option>
+              </select>
+            </div>
+            <div class="short-form-row" style="align-items:flex-start">
+              <label for="shortAudioShots">Danh sách shot:</label>
+              <textarea id="shortAudioShots" rows="6" placeholder="0-4.2 | Sáu giờ sáng, thành phố còn ngủ&#10;4.2-8 | Xe buýt lăn bánh qua quảng trường"
+                        style="flex:1;min-width:240px" oninput="shortAudioShotsText=this.value">${esc(shortAudioShotsText)}</textarea>
+            </div>
+            <div id="shortAudioErr" class="hidden" style="color:var(--held);font-size:12px;font-weight:600"></div>
+            <div class="short-form-row">
+              <button type="button" id="shortAudioSubmitBtn" class="btn-primary" onclick="submitShortAudioForm(this)">🎙 Nạp audio &amp; tạo job</button>
+              <span style="font-size:11.5px;color:var(--fg-muted)">Audio do bạn thu. Timing shot phải khớp audio (giây). Hệ thống không tự nhận diện giọng.</span>
+            </div>
+            ${shortAudioCreatedId ? `
+              <div class="short-form-row">
+                <span class="pill pill-ok mono">${esc(shortAudioCreatedId)}</span>
+                <span style="font-size:11.5px;color:var(--fg-muted)">Short đã tạo từ audio owner.</span>
+                <button type="button" class="btn-sm btn-primary" onclick="publishShortJob('${esc(shortAudioCreatedId)}', this)">Phát hành job ngay</button>
+                <button type="button" class="btn-sm" onclick="openShortDetailPage('${esc(shortAudioCreatedId)}')">Mở chi tiết</button>
+              </div>` : ''}
+          </div>
+        ` : ''}
 
         ${shortCreateTab === 'upload' ? `
           <div class="short-form-grid">
@@ -719,7 +774,7 @@ function renderShortStudioShell() {
               <span style="font-size:11.5px;color:var(--fg-muted)">Video sẽ ở trạng thái Sẵn sàng ngay sau khi tải lên.</span>
             </div>
           </div>
-        ` : `
+        ` : shortCreateTab === 'ai' ? `
           <div class="short-mode-tabs" role="group" aria-label="Chọn chế độ Short">
             ${Object.entries(SHORT_MODE_META).map(([k, m]) => `
               <button type="button" class="btn short-mode-tab ${shortMode === k ? 'active' : ''}" data-mode="${k}" onclick="switchShortMode('${k}')">
@@ -755,7 +810,7 @@ function renderShortStudioShell() {
               <span style="font-size:11.5px;color:var(--fg-muted)">Kịch bản sync (10–30s) — chưa duyệt sẽ không render.</span>
             </div>
           </div>
-        `}
+        ` : ''}
       </section>
 
       <section class="panel">
@@ -824,7 +879,7 @@ function renderShortStudioShell() {
 }
 
 function switchShortCreateTab(tab) {
-  shortCreateTab = tab === 'upload' ? 'upload' : 'ai';
+  shortCreateTab = (tab === 'upload' || tab === 'audio') ? tab : 'ai';
   renderShortStudioShell();
 }
 
@@ -849,6 +904,145 @@ function previewShortOnPhone(shortId, ev) {
   if (ev) ev.stopPropagation();
   shortQuickPreviewId = shortId;
   renderShortStudioShell();
+}
+
+// --- Audio owner: nạp audio + shot list (không TTS) ---
+function onShortAudioFilePicked(inputEl) {
+  const file = inputEl?.files?.[0] || null;
+  shortAudioFileObj = file;
+  const label = document.getElementById('shortAudioFileName');
+  if (label) {
+    label.textContent = file
+      ? `📎 ${file.name} (${(file.size / 1048576).toFixed(2)} MB)`
+      : 'Chưa chọn file';
+  }
+}
+
+function shortAudioShowError(msg) {
+  const errEl = document.getElementById('shortAudioErr');
+  if (errEl) {
+    errEl.textContent = msg;
+    errEl.classList.remove('hidden');
+  }
+  showToast(msg, 'error', 5200);
+}
+
+// Nhận cả JSON list ([{text,start_sec,end_sec}]) lẫn text mỗi dòng "start-end | nội dung"
+function parseShortAudioShots(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { shots: [], error: 'Danh sách shot đang trống — cần ít nhất 1 shot.' };
+  let items = null;
+  if (text.startsWith('[') || text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.shots) ? parsed.shots : null);
+      if (list) {
+        items = list.map(s => ({
+          start_sec: Number(s?.start_sec),
+          end_sec: Number(s?.end_sec),
+          text: String(s?.text ?? '').trim()
+        }));
+      }
+    } catch (_) { items = null; }
+  }
+  if (!items) {
+    items = [];
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      const m = line.match(/^([\d]+(?:[.,]\d+)?)\s*[-–—]\s*([\d]+(?:[.,]\d+)?)\s*[|｜]\s*(.+)$/);
+      if (!m) {
+        return { shots: [], error: `Dòng không đúng định dạng "start-end | nội dung": ${line.slice(0, 60)}` };
+      }
+      items.push({
+        start_sec: Number(m[1].replace(',', '.')),
+        end_sec: Number(m[2].replace(',', '.')),
+        text: m[3].trim()
+      });
+    }
+  }
+  if (!items.length) return { shots: [], error: 'Cần ít nhất 1 shot có nội dung.' };
+  for (let i = 0; i < items.length; i++) {
+    const cur = items[i];
+    if (!Number.isFinite(cur.start_sec) || !Number.isFinite(cur.end_sec)) {
+      return { shots: [], error: `Shot #${i + 1}: mốc thời gian không hợp lệ.` };
+    }
+    if (!cur.text) return { shots: [], error: `Shot #${i + 1}: nội dung rỗng.` };
+    if (cur.end_sec <= cur.start_sec) {
+      return { shots: [], error: `Shot #${i + 1}: end phải lớn hơn start.` };
+    }
+    if (i > 0) {
+      const prev = items[i - 1];
+      if (cur.start_sec < prev.start_sec) {
+        return { shots: [], error: `Shot #${i + 1}: start phải tăng dần.` };
+      }
+      if (cur.start_sec < prev.end_sec - 0.05) {
+        return { shots: [], error: `Shot #${i + 1} chồng lấn shot #${i} (start ${cur.start_sec}s < end ${prev.end_sec}s).` };
+      }
+    }
+  }
+  return { shots: items, error: '' };
+}
+
+async function submitShortAudioForm(btnEl) {
+  const file = shortAudioFileObj || document.getElementById('shortAudioFile')?.files?.[0] || null;
+  if (!file) { shortAudioShowError('Vui lòng chọn file audio trước khi nạp.'); return; }
+  const parsed = parseShortAudioShots(document.getElementById('shortAudioShots')?.value || '');
+  if (parsed.error) { shortAudioShowError(parsed.error); return; }
+  const errEl = document.getElementById('shortAudioErr');
+  if (errEl) { errEl.textContent = ''; errEl.classList.add('hidden'); }
+
+  const title = (document.getElementById('shortAudioTitle')?.value || '').trim();
+  const mode = shortAudioMode || 'cinematic';
+  const lang = shortAudioLang || 'vi';
+  const prev = btnEl?.textContent || '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:var(--accent-ink)"></span> Đang nạp...';
+  }
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    fd.append('shots', JSON.stringify(parsed.shots));
+    if (title) fd.append('title', title);
+    fd.append('mode', mode);
+    fd.append('lang', lang);
+    const r = await apiFetch('/api/v1/shorts/audio', { method: 'POST', body: fd, timeoutMs: 180000 });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Lỗi nạp audio + shot'));
+    const created = await r.json();
+    shortDetailsCache[created.id] = created;
+    shortsLoaded = false;
+    shortAudioCreatedId = created.id;
+    shortAudioFileObj = null;
+    shortAudioShotsText = '';
+    shortAudioTitleText = '';
+    const nShots = (created.scenes || parsed.shots).length;
+    showToast(`Đã nạp audio — ${nShots} shot`, 'ok', 4000);
+    openShortDetailPage(created.id);
+  } catch (err) {
+    shortAudioShowError(err.message || 'Lỗi nạp audio + shot');
+  } finally {
+    if (btnEl && btnEl.isConnected) { btnEl.disabled = false; btnEl.textContent = prev || '🎙 Nạp audio & tạo job'; }
+  }
+}
+
+async function clearShortAudioOwner(shortId, btnEl) {
+  if (!window.confirm('Bỏ audio owner và quay lại luồng TTS? Timing shot hiện tại sẽ bị xoá.')) return;
+  const prev = btnEl?.textContent || '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Đang bỏ audio...'; }
+  try {
+    const r = await apiFetch(`/api/v1/shorts/${encodeURIComponent(shortId)}/audio`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Lỗi bỏ audio owner'));
+    const updated = await r.json();
+    shortDetailsCache[shortId] = updated;
+    shortsLoaded = false;
+    if (shortAudioCreatedId === shortId) shortAudioCreatedId = '';
+    renderShortDetailPage(updated);
+    showToast('Đã bỏ audio owner — short quay lại luồng TTS', 'ok', 3200);
+  } catch (err) {
+    showToast(err.message || 'Lỗi bỏ audio owner', 'error', 5200);
+  } finally {
+    if (btnEl && btnEl.isConnected) { btnEl.disabled = false; btnEl.textContent = prev || 'Bỏ audio owner'; }
+  }
 }
 
 async function submitShortUpload(btnEl) {
@@ -959,6 +1153,7 @@ function renderShortDetailPage(short) {
   const scenes = short.scenes || [];
   const hasTimeline = scenes.length > 0 && Number(scenes[0].end_sec) > 0;
   const modeMeta = SHORT_MODE_META[short.mode] || SHORT_MODE_META.news;
+  const ownerAudio = short.audio_source === 'owner';
 
   const scriptEdHtml = `
     <section class="panel">
@@ -966,6 +1161,7 @@ function renderShortDetailPage(short) {
         <div>
           <h3 class="panel-title">Kịch bản — ${esc(SHORT_MODE_NAMES[short.mode] || short.mode)}
             <span class="pill ${SHORT_STATUS_PILL[short.status] || 'pill-ghost'}">${esc(short.status_label)}</span>
+            ${ownerAudio ? '<span class="pill pill-accent">Audio owner</span>' : ''}
           </h3>
           <div class="panel-subtitle">
             <span class="mono">${esc(id)}</span> ·
@@ -1024,6 +1220,8 @@ function renderShortDetailPage(short) {
           <button type="button" id="shortProduceBtn" class="btn-primary btn-sm" onclick="produceShort('${esc(id)}', this)">
             ${short.status === 'ready' ? 'Tổng hợp lại (Voice → Ảnh → MP4 9:16)' : 'Tạo Voice & Ảnh → Xuất MP4 9:16'}
           </button>
+          ${ownerAudio && short.status === 'scripted' ? `<button type="button" class="btn-sm btn-primary" onclick="publishShortJob('${esc(id)}', this)">Phát hành job ngay</button>` : ''}
+          ${ownerAudio && ['scripted', 'draft'].includes(short.status) ? `<button type="button" class="btn-sm" onclick="clearShortAudioOwner('${esc(id)}', this)">Bỏ audio owner</button>` : ''}
           ${short.status !== 'ready' ? '<span style="font-size:11.5px;color:var(--fg-muted)">Voice ≈ vài giây · ảnh theo bank/gen · ghép + QC tự động.</span>' : ''}
         </div>
       </div>

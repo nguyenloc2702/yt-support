@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS shorts (
   source_note TEXT,
   target_seconds REAL,
   audio_asset_id TEXT,
+  audio_source TEXT DEFAULT 'tts',  -- tts | owner (owner nạp audio + shot sẵn)
   words_asset_id TEXT,
   srt_asset_id TEXT,
   ass_asset_id TEXT,
@@ -690,6 +691,7 @@ _SHOT_MIGRATION_COLS = [
 _SHORTS_MIGRATION_COLS = [
     ("source_link", "TEXT"),  # G.11 — link bài báo để lấy ảnh gốc
     ("lang", "TEXT DEFAULT 'vi'"),  # mảng quốc tế EN
+    ("audio_source", "TEXT DEFAULT 'tts'"),  # tts | owner — owner nạp audio + shot
 ]
 
 _SHORT_SCENES_MIGRATION_COLS = [
