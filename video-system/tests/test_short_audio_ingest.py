@@ -231,3 +231,15 @@ def test_create_from_script_rejects_too_many_segments(client, ingest, short_adap
         "beats": [f"b{i}" for i in range(18)], "closing": "c",
     })
     assert r.status_code == 422
+
+
+def test_job_urls_actually_resolve(client, ingest, short_adapters, store_fixture):
+    """Mọi URL trong get_job phải gọi được — trước đây subtitles trỏ /job/... nên 404."""
+    sid = _create_short(client, ingest, short_adapters)
+    assert _ingest(client, ingest, sid, _shots()).status_code == 200
+    assert client.post(f"/api/v1/shorts/{sid}/publish-job", headers=ingest).status_code == 200
+    job = client.get(f"/api/v1/shorts/{sid}/job", headers=ingest).json()
+    for key in ("audio_url", "subtitles_ass_url", "subtitles_srt_url"):
+        r = client.get(job[key], headers=ingest)
+        assert r.status_code == 200, f"{key} -> {job[key]} trả {r.status_code}"
+        assert r.content, f"{key} rỗng"
