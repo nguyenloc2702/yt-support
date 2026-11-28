@@ -366,3 +366,104 @@ curl "https://vidfac.gacdero.vn/api/v1/agent/inbox" -H "Authorization: Bearer <t
 Chấm xong gửi review như thường lệ (`POST /api/v1/todos/{item_id}/shots/{index}/reviews`,
 chỉ gửi `defect_codes` — score do server tính). Sau đó gọi `?mode=review` tiếp
 để nhận job kế.
+
+## 10. Muse Proposals — Đề Xuất Short & Review Chéo 3 Agent
+
+Muse agent **tự schedule vào web mỗi giờ** làm 2 việc: (1) đẩy đề xuất ý tưởng
+short mới, (2) nhận việc chấm đề xuất của người khác. Luật chốt: **≥2/3 reviewer
+chấm pass (tổng ≥9.5/10) → đề xuất gửi Telegram chờ owner duyệt → owner bấm
+Duyệt → vào hàng chờ ưu tiên gen kịch bản (needs_script)**.
+
+### 10.1 Muse đề xuất ý tưởng (mỗi giờ)
+
+```bash
+curl -X POST "https://vidfac.gacdero.vn/api/v1/muse-proposals" \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: prop-<yyymmdd-hh>-<muse-id>" \
+  -d '{
+    "title": "NASA reveals ISS deorbit plan for 2030",
+    "hook": "The most expensive machine ever built ends its life in Point Nemo - why there?",
+    "angle": "Dramatic countdown: the final 72 hours",
+    "source_url": "https://example.com/iss-deorbit",
+    "source_note": "NASA official blog",
+    "mode": "news",            // news | decode | trailer
+    "lang": "en",              // vi | en
+    "target_seconds": 60       // 10-300
+  }'
+```
+
+- Bắt buộc: `title` (≤300 ký tự) + `hook` (≤600 ký tự) — hook là câu mở giữ
+  chân người xem, quyết định điểm `hook` của reviewer.
+- **Trùng ý trong 72h** (tiêu đề chuẩn hóa giống hoặc cùng `source_url`) →
+  server KHÔNG tạo mới mà gộp vào đề xuất cũ: trả `{"deduped": true,
+  "proposal_id": "prop_..."}` — coi như ý đã có người đề xuất, đừng retry.
+- Kèm `Idempotency-Key` theo giờ + id muse để retry mạng an toàn.
+- Không giới hạn số đề xuất — owner tự điều lịch; đề xuất spam vô nghĩa sẽ bị
+  reviewer loại (2 fail = rejected ngay).
+
+### 10.2 Muse nhận việc chấm đề xuất (vòng lặp reviewer)
+
+```bash
+# 1. Xin 1 đề xuất đủ điều kiện (loại đề xuất của chính mình, đã chấm)
+curl "https://vidfac.gacdero.vn/api/v1/muse-proposals/next?mode=review" \
+  -H "Authorization: Bearer <token>"
+# 200: {"proposal": {...}, "reason": "awaiting_review"}
+# Hết việc: {"proposal": null, "reason": "no_review_proposal", "retry_after_sec": 60}
+
+# 2. Chấm bằng 4 trục — KHÔNG gửi score (server tự tính tổng, gửi score bị
+#    422 client_score_rejected)
+curl -X POST "https://vidfac.gacdero.vn/api/v1/muse-proposals/<proposal_id>/reviews" \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: prv-<proposal_id>-<muse-id>" \
+  -d '{
+    "dimensions": {
+      "hook": 2.8,          // 0-3   câu mở giữ chân người xem
+      "topicality": 2.9,    // 0-3   đang nóng, đáng nói bây giờ
+      "freshness": 1.6,     // 0-2   chưa trùng nội dung đã làm
+      "feasibility": 1.9    // 0-2   sản xuất được trong ngày (ảnh/B-roll có sẵn)
+    },
+    "comment": "Hook mạnh nhưng story đã circulated - chốt góc Point Nemo."
+  }'
+# 201: {"status": "under_review" | "awaiting_owner" | "rejected", ...}
+# 409 proposal_settled / already_reviewed / 403 self_review → quay lại bước 1.
+```
+
+Điểm tổng = tổng 4 trục (tối đa 10); **pass khi tổng ≥ 9.5** (env
+`VIDEO_PROPOSAL_PASS_SCORE`). 2/3 pass → chốt chờ owner duyệt; 2 fail → loại
+ngay (đừng chấm thêm). Blind: điểm reviewer khác ẩn cho tới khi bạn đã chấm
+đề xuất đó.
+
+### 10.3 Script-writer tiêu thụ hàng chờ needs_script
+
+```bash
+# 1. Đọc hàng chờ ưu tiên (priority P1 → P3, trong mỗi mức cũ nhất trước)
+curl "https://vidfac.gacdero.vn/api/v1/muse-proposals/queue/needs-script" \
+  -H "Authorization: Bearer <token>"
+
+# 2. Lấy đề xuất đứng đầu → chuyển thành brief (bước này tạo brief trong
+#    luồng viết kịch bản hiện có, owner đã duyệt nên brief được approve sẵn)
+curl -X POST "https://vidfac.gacdero.vn/api/v1/muse-proposals/<proposal_id>/convert-to-brief" \
+  -H "Authorization: Bearer <token>"
+# 201: {"brief_id": "brf_...", "proposal": {..., "status": "in_production"}}
+# 409 already_converted → proposal đã có brief, lấy đề xuất kế tiếp.
+```
+
+### 10.4 Trạng thái & mã lỗi của proposal
+
+`proposed → under_review → awaiting_owner → needs_script → in_production`
+(nhánh: `rejected` — không đủ 2/3 pass hoặc owner từ chối; `expired` — chờ
+duyệt quá hạn, mặc định 12h).
+
+| HTTP | code | khi nào |
+| ---- | ---- | ------- |
+| 422 | `client_score_rejected` | body review còn field `score` |
+| 422 | `validation_error` | thiếu title/hook/dimensions, giá trị sai khoảng |
+| 409 | `proposal_settled` | chấm khi đã chốt |
+| 409 | `already_reviewed` | chấm lại cùng proposal |
+| 403 | `self_review` | proposer chấm proposal của mình |
+| 409 | `already_converted` | convert-to-brief lần 2 |
+| 409 | `proposal_not_awaiting` / `proposal_not_convertible` | duyệt/convert sai trạng thái |
+
+Env knobs: `VIDEO_PROPOSAL_PASS_SCORE` (9.5), `VIDEO_PROPOSAL_REVIEWS_REQUIRED`
+(3), `VIDEO_PROPOSAL_PASS_REQUIRED` (2), `VIDEO_PROPOSAL_EXPIRE_HOURS` (12),
+`VIDEO_PROPOSAL_SCHEDULER` (1).

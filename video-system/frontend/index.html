@@ -6795,11 +6795,16 @@ function mpStatusPill(p) {
     under_review: ['pill-warn', 'Đang chấm'],
     awaiting_owner: ['pill-accent', 'Chờ duyệt'],
     needs_script: ['pill-ok', 'Cần kịch bản'],
+    in_production: ['pill-ok', 'Đang sản xuất'],
     rejected: ['pill-danger', 'Đã từ chối'],
     expired: ['pill-ghost', 'Quá hạn'],
   };
   const [cls, label] = map[p.status] || ['pill-ghost', p.status];
   return `<span class="pill ${cls}" style="font-size:10px;padding:1px 7px">${label}</span>`;
+}
+
+function mpCanConvert() {
+  return !!(VS_ME && VS_ME.scope && VS_ME.scope !== 'read');
 }
 
 function mpPropCard(p, opts = {}) {
@@ -6809,6 +6814,13 @@ function mpPropCard(p, opts = {}) {
     return `<div class="cmt-meta" style="margin-left:2px">• <b>${esc(r.reviewer)}</b>: ${scorePart}${cmtPart}</div>`;
   }).join('');
   const progress = `${p.review_count}/${p.reviews_required || 3} lượt chấm`;
+  const briefLine = p.brief_id
+    ? `<div class="rb-ded" style="margin-top:4px">🧾 Brief: <span class="mono">${esc(p.brief_id)}</span> — kịch bản đang được viết qua luồng brief hiện có</div>` : '';
+  const convertBtn = p.status === 'needs_script' && mpCanConvert() ? `
+    <div style="margin-top:8px">
+      <button type="button" class="btn-primary btn-sm" onclick="mpConvertToBrief('${esc(p.id)}', this)">🎬 Chuyển sang brief (gen kịch bản)</button>
+      <span class="rb-ded">— script-writer lấy đề xuất ở đây để tạo brief viết kịch bản</span>
+    </div>` : '';
   const ownerBtns = mpIsOwner() && p.status === 'awaiting_owner' ? `
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <button type="button" class="btn-ok btn-sm" onclick="mpApprove('${esc(p.id)}', this)">✅ Duyệt → Cần kịch bản</button>
@@ -6835,6 +6847,8 @@ function mpPropCard(p, opts = {}) {
     <div class="rb-ded" style="margin-top:4px">${p.mode}/${p.lang} · ~${Math.round(p.target_seconds)}s · ${progress}${p.avg_score != null ? ` · avg ${p.avg_score}` : ''}</div>
     ${reviewsHtml ? `<div style="margin-top:6px">${reviewsHtml}</div>` : ''}
     ${!p.reviews_visible && (p.review_count || 0) > 0 ? '<div class="rb-ded">🔒 Điểm reviewer ẩn cho tới khi bạn chấm đề xuất này</div>' : ''}
+    ${briefLine}
+    ${convertBtn}
     ${ownerBtns}
   </div>`;
 }
@@ -6844,6 +6858,7 @@ function mpRenderInbox(props) {
   const awaiting = by('awaiting_owner');
   const reviewing = [...by('under_review'), ...by('proposed')];
   const needs = [...by('needs_script')].sort((a, b) => a.priority - b.priority || a.created_at - b.created_at);
+  const producing = by('in_production');
   const done = [...by('rejected'), ...by('expired')];
 
   const sec = (title, list, extra = '') => `
@@ -6854,6 +6869,7 @@ function mpRenderInbox(props) {
     ${sec('⏳ Chờ bạn duyệt (≥2/3 pass ≥9.5)', awaiting)}
     ${sec('🧪 Đang chấm bởi các reviewer', reviewing)}
     ${sec('📋 Cần kịch bản — hàng chờ ưu tiên gen kịch bản', needs)}
+    ${sec('🎬 Đang sản xuất — brief đã tạo, kịch bản đang viết', producing)}
     <details style="margin-top:10px">
       <summary style="font-weight:700;font-size:12.5px;cursor:pointer">🗑 Đã từ chối / Quá hạn${done.length ? ` (${done.length})` : ''}</summary>
       <div style="margin-top:6px">${done.length ? done.map(p => mpPropCard(p)).join('') : '<div class="cmt-meta">— trống —</div>'}</div>
@@ -6941,7 +6957,6 @@ async function mpSubmitReview(pid) {
   const inputs = Array.from(document.querySelectorAll('#mp-review-form .mp-dim'));
   const dimensions = {};
   for (const inp of inputs) dimensions[inp.id.replace('mp-dim-', '')] = parseFloat(inp.value || '0');
-  const total = Math.round(inputs.reduce((s, inp) => s + (parseFloat(inp.value || '0') || 0), 0) * 10) / 10;
   const btn = document.getElementById('mp-submit-btn');
   const commentEl = document.getElementById('mp-comment');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang gửi chấm...'; }
@@ -6949,7 +6964,8 @@ async function mpSubmitReview(pid) {
     const r = await apiFetch(`/api/v1/muse-proposals/${pid}/reviews`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': (crypto.randomUUID ? crypto.randomUUID() : `mp-${Date.now()}-${Math.random().toString(36).slice(2)}`) },
-      body: JSON.stringify({ score: total, dimensions, comment: commentEl ? (commentEl.value.trim() || undefined) : undefined }),
+      // Q3: KHÔNG gửi score — server tự tính từ tổng 4 trục (client score bị chặn)
+      body: JSON.stringify({ dimensions, comment: commentEl ? (commentEl.value.trim() || undefined) : undefined }),
       timeoutMs: 20000
     });
     const d = await r.json().catch(() => ({}));
@@ -6962,6 +6978,26 @@ async function mpSubmitReview(pid) {
   } catch (err) {
     showToast(`❌ Gửi chấm thất bại: ${err.message || err}`, 'error', 6000);
     if (btn) { btn.disabled = false; btn.textContent = '✅ Gửi chấm (server tự tính pass ≥9.5)'; }
+  }
+}
+
+// ---- Script-writer tiêu thụ hàng chờ (Q6) ----
+async function mpConvertToBrief(pid, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang tạo brief...'; }
+  try {
+    const r = await apiFetch(`/api/v1/muse-proposals/${pid}/convert-to-brief`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': (crypto.randomUUID ? crypto.randomUUID() : `mpc-${Date.now()}-${Math.random().toString(36).slice(2)}`) },
+      body: JSON.stringify({}),
+      timeoutMs: 20000
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    showToast(`🎬 Đã tạo brief ${d.brief_id} — kịch bản vào luồng viết script`, 'ok', 6000);
+    await mpLoadInbox();
+  } catch (err) {
+    showToast(`❌ ${err.message || 'Tạo brief thất bại'}`, 'error', 6000);
+    if (btn) { btn.disabled = false; btn.textContent = '🎬 Chuyển sang brief (gen kịch bản)'; }
   }
 }
 

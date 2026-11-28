@@ -48,6 +48,21 @@ def agents_hdrs(client):
 _PROP_SEQ = {"n": 0}
 
 
+def dims_for(score: float) -> dict:
+    """Mảng trục tương ứng điểm mong muốn (server tự tính tổng = score).
+
+    Trừ dần từ trục giới hạn thấp nhất: feasibility (2) → freshness (2) →
+    topicality (3) → hook (3). Score ≤ 10 và ≥ 0."""
+    deficit = round(10.0 - float(score), 2)
+    d = {"hook": 3.0, "topicality": 3.0, "freshness": 2.0, "feasibility": 2.0}
+    for key, cap in (("feasibility", 2.0), ("freshness", 2.0),
+                     ("topicality", 3.0), ("hook", 3.0)):
+        take = min(cap, max(0.0, deficit))
+        d[key] = round(cap - take, 2)
+        deficit = round(deficit - take, 2)
+    return d
+
+
 def _propose(client, hdrs, title=None, hook=None, **over):
     """Mỗi lời gọi mặc định có title/source_url RIÊNG — store dùng chung cả
     session pytest, cùng title sẽ bị dedupe gộp (hành vi đúng của hệ thống)."""
@@ -66,7 +81,8 @@ def _propose(client, hdrs, title=None, hook=None, **over):
 
 
 def _review(client, hdrs, prop_id, score, comment=None):
-    body = {"score": score}
+    """Gửi dimensions ứng với điểm mong muốn — server tự tính score (Q3)."""
+    body = {"dimensions": dims_for(score)}
     if comment:
         body["comment"] = comment
     return client.post(f"/api/v1/muse-proposals/{prop_id}/reviews",
@@ -302,21 +318,21 @@ def test_replay_idempotent_and_comment_too_long(client, agents_hdrs):
     headers = dict(agents_hdrs["muse-2"])
     headers["Idempotency-Key"] = "prop-rev-1"
     first = client.post(f"/api/v1/muse-proposals/{pid}/reviews", headers=headers,
-                        json={"score": 9.6})
+                        json={"dimensions": dims_for(9.6)})
     assert first.status_code == 201, first.text
     replay = client.post(f"/api/v1/muse-proposals/{pid}/reviews", headers=headers,
-                         json={"score": 9.6})
+                         json={"dimensions": dims_for(9.6)})
     assert replay.status_code == 200, replay.text
     assert replay.json().get("idempotent_replay") is True
 
     long = client.post(f"/api/v1/muse-proposals/{pid}/reviews",
                        headers=agents_hdrs["muse-3"],
-                       json={"score": 9.6, "comment": "x" * 2001})
+                       json={"dimensions": dims_for(9.6), "comment": "x" * 2001})
     assert long.status_code == 422, long.text
     assert long.json()["code"] == "comment_too_long"
 
 
-def test_expire_stale_awaiting_owner(client, agents_hdrs):
+def test_expire_stale_awaiting_owner(client, agents_hdrs, monkeypatch):
     from backend.app.main import proposals as proposals_svc, store as app_store
 
     r = _propose(client, agents_hdrs["muse-1"], source_url="https://example.com/stale")
@@ -325,6 +341,12 @@ def test_expire_stale_awaiting_owner(client, agents_hdrs):
     _review(client, agents_hdrs["muse-3"], pid, 9.7)
     assert client.get(f"/api/v1/muse-proposals/{pid}",
                       headers=agents_hdrs["owner"]).json()["status"] == "awaiting_owner"
+
+    # Q4: hết hạn phải báo Telegram (capture thay vì gọi thật — test env
+    # chưa cấu hình token nên phải ép _telegram_configured trả True)
+    sent = []
+    monkeypatch.setattr(proposals_svc, "_telegram_configured", lambda: True)
+    monkeypatch.setattr(proposals_svc, "_send_telegram", lambda text: sent.append(text))
 
     # giả lập chờ quá hạn
     app_store.execute(
@@ -335,6 +357,8 @@ def test_expire_stale_awaiting_owner(client, agents_hdrs):
     assert res["expired"] >= 1
     assert client.get(f"/api/v1/muse-proposals/{pid}",
                       headers=agents_hdrs["owner"]).json()["status"] == "expired"
+    assert sent, "expired phải gửi tin Telegram cho owner"
+    assert "HẾT HẠN" in sent[0] and pid in sent[0]
 
 
 def test_telegram_unconfigured_does_not_break(client, agents_hdrs):
@@ -345,3 +369,81 @@ def test_telegram_unconfigured_does_not_break(client, agents_hdrs):
     r2 = _review(client, agents_hdrs["muse-2"], pid, 9.5)
     r3 = _review(client, agents_hdrs["muse-3"], pid, 9.6)
     assert r3.json()["status"] == "awaiting_owner"
+
+
+# --------------------------------------------------------------------------
+# Q3 — server-computed rubric: client KHÔNG được gửi score
+# --------------------------------------------------------------------------
+def test_client_score_is_rejected(client, agents_hdrs):
+    r = _propose(client, agents_hdrs["muse-1"], source_url="https://example.com/q3")
+    pid = r.json()["proposal"]["id"]
+    cheat = client.post(f"/api/v1/muse-proposals/{pid}/reviews",
+                        headers=agents_hdrs["muse-2"], json={"score": 9.9})
+    assert cheat.status_code == 422, cheat.text
+    assert cheat.json()["code"] == "client_score_rejected"
+
+
+def test_dimensions_validation_and_server_sum(client, agents_hdrs):
+    r = _propose(client, agents_hdrs["muse-1"], source_url="https://example.com/q3b")
+    pid = r.json()["proposal"]["id"]
+
+    # thiếu trục → 422
+    missing = client.post(f"/api/v1/muse-proposals/{pid}/reviews",
+                          headers=agents_hdrs["muse-2"],
+                          json={"dimensions": {"hook": 3, "topicality": 3, "freshness": 2}})
+    assert missing.status_code == 422, missing.text
+
+    # giá trị vượt giới hạn → 422 (hook tối đa 3)
+    over = client.post(f"/api/v1/muse-proposals/{pid}/reviews",
+                       headers=agents_hdrs["muse-2"],
+                       json={"dimensions": {"hook": 3.5, "topicality": 3, "freshness": 2,
+                                            "feasibility": 2}})
+    assert over.status_code == 422, over.text
+
+    # server TỰ tính: trục chỉ đạt 9.0 → dù client "muốn" cao cũng fail
+    nine = client.post(f"/api/v1/muse-proposals/{pid}/reviews",
+                       headers=agents_hdrs["muse-2"],
+                       json={"dimensions": dims_for(9.0)})
+    assert nine.status_code == 201, nine.text
+    assert nine.json()["reviews"][0]["score"] == pytest.approx(9.0)
+    assert nine.json()["reviews"][0]["verdict"] == "fail"
+
+
+# --------------------------------------------------------------------------
+# Q6 — script-writer tiêu thụ hàng chờ: convert-to-brief
+# --------------------------------------------------------------------------
+def test_convert_to_brief_consumes_queue(client, agents_hdrs):
+    r = _propose(client, agents_hdrs["muse-1"], source_url="https://example.com/q6")
+    pid = r.json()["proposal"]["id"]
+    _review(client, agents_hdrs["muse-2"], pid, 9.7)
+    _review(client, agents_hdrs["muse-3"], pid, 9.9)
+
+    # sai trạng thái (đang awaiting_owner) → 409
+    early = client.post(f"/api/v1/muse-proposals/{pid}/convert-to-brief",
+                        headers=agents_hdrs["muse-2"])
+    assert early.status_code == 409, early.text
+
+    ok = client.post(f"/api/v1/muse-proposals/{pid}/approve",
+                     headers=agents_hdrs["owner"], json={})
+    assert ok.status_code == 200, ok.text
+
+    # script-writer (ingest) chuyển đề xuất → brief
+    conv = client.post(f"/api/v1/muse-proposals/{pid}/convert-to-brief",
+                       headers=agents_hdrs["muse-2"])
+    assert conv.status_code == 201, conv.text
+    body = conv.json()
+    assert body["brief_id"], body
+    assert body["brief"]["title"] == "ISS sắp chết — vì sao NASA im lặng? (case %d)" % _PROP_SEQ["n"]
+    assert body["proposal"]["status"] == "in_production"
+    assert body["proposal"]["brief_id"] == body["brief_id"]
+
+    # chuyển lần 2 → 409 already_converted kèm brief_id cũ
+    again = client.post(f"/api/v1/muse-proposals/{pid}/convert-to-brief",
+                        headers=agents_hdrs["muse-3"])
+    assert again.status_code == 409, again.text
+    assert again.json()["code"] == "already_converted"
+
+    # hàng chờ needs_script không còn chứa nó
+    q = client.get("/api/v1/muse-proposals/queue/needs-script",
+                   headers=agents_hdrs["owner"]).json()
+    assert all(p["id"] != pid for p in q["queue"])

@@ -617,6 +617,7 @@ CREATE TABLE IF NOT EXISTS muse_proposals (
   status TEXT NOT NULL DEFAULT 'proposed',
   priority INTEGER NOT NULL DEFAULT 3,
   signals INTEGER NOT NULL DEFAULT 1,
+  brief_id TEXT,
   avg_score REAL,
   review_count INTEGER NOT NULL DEFAULT 0,
   pass_count INTEGER NOT NULL DEFAULT 0,
@@ -703,6 +704,11 @@ _IDEMPOTENCY_MIGRATION_COLS = [
     ("claim_token", "TEXT"),
 ]
 
+# Muse proposals (đã deploy trước khi có brief_id) — ALTER bổ sung khi thiếu.
+_MUSE_PROPOSALS_MIGRATION_COLS = [
+    ("brief_id", "TEXT"),  # link sang job_briefs khi script-writer convert (Q6)
+]
+
 
 def now() -> float:
     return time.time()
@@ -763,6 +769,12 @@ class SQLiteStore(Store):
         for col, col_def in _IDEMPOTENCY_MIGRATION_COLS:
             if existing_idem_cols and col not in existing_idem_cols:
                 conn.execute(f"ALTER TABLE idempotency ADD COLUMN {col} {col_def}")
+        existing_prop_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(muse_proposals)").fetchall()
+        }
+        for col, col_def in _MUSE_PROPOSALS_MIGRATION_COLS:
+            if existing_prop_cols and col not in existing_prop_cols:
+                conn.execute(f"ALTER TABLE muse_proposals ADD COLUMN {col} {col_def}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=30000")

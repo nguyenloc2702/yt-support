@@ -101,7 +101,7 @@ batches = BatchService(store, items, shots)
 importer = ImportGate(store, items)
 todos = TodoService(store, items)
 board = BoardService(store, items)
-proposals = ProposalService(store)
+proposals = ProposalService(store, briefs)
 assembler = AssemblerService(store, items, todos)
 webhooks = WebhookService(store)
 # next_action của agreement đổi -> phát webhook (dedupe theo brief_agreement_state).
@@ -1514,15 +1514,42 @@ async def post_proposal_review(proposal_id: str, request: Request):
         payload = await request.json()
     except Exception:
         raise ApiError(422, "Invalid JSON payload", "validation_error")
-    if not isinstance(payload, dict) or "score" not in payload:
-        raise ApiError(422, "Review body phải có score (0-10).", "validation_error")
+    if not isinstance(payload, dict):
+        raise ApiError(422, "Review body must be a JSON object", "validation_error")
+    if "score" in payload:
+        # Q3: score do server tính từ tổng 4 trục — client gửi score bị chặn
+        # (mirror client_score_rejected của Shot Board).
+        raise ApiError(
+            422, "Client cannot submit score; server computes score from dimensions.",
+            "client_score_rejected",
+        )
+    if "dimensions" not in payload:
+        raise ApiError(
+            422, "Review body phải có dimensions (hook/topicality/freshness/feasibility).",
+            "validation_error",
+        )
     try:
         return await run_in_threadpool(
             _idempotent_call, request, payload,
             lambda: proposals.submit_proposal_review(
-                caller, proposal_id, payload["score"],
-                payload.get("dimensions"), payload.get("comment"),
+                caller, proposal_id, payload["dimensions"], payload.get("comment"),
             ),
+            201, replay_status_200=True, add_replay_flag=True, reject_cross_caller=True,
+        )
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.post("/api/v1/muse-proposals/{proposal_id}/convert-to-brief")
+async def post_proposal_convert(proposal_id: str, request: Request):
+    """Script-writer tiêu thụ hàng chờ needs_script (Q6): tạo brief qua
+    BriefService hiện có, proposal chuyển in_production kèm brief_id."""
+    auth.require(request, "ingest")
+    caller, _ = auth.identity_for(request)
+    try:
+        return await run_in_threadpool(
+            _idempotent_call, request, {},
+            lambda: proposals.convert_to_brief(proposal_id, caller),
             201, replay_status_200=True, add_replay_flag=True, reject_cross_caller=True,
         )
     except ProposalError as e:

@@ -89,6 +89,14 @@ VIDEO_DATA_DIR=data .venv/bin/python -m backend.app.seed   # data demo (gán nh�
 - Backup SQLite **kèm -wal** cùng lúc.
 - Không chạy 2 writer trên cùng SQLite file từ 2 máy — đó là lý do có bước Postgres.
 - Xóa Item là soft delete + giữ audit trail; purge là job nền riêng sau 7 ngày.
+- **Chạy ĐÚNG 1 worker** (`uvicorn` không `--workers N`, 1 instance): Telegram
+  bot long-poll `getUpdates` cùng token từ ≥2 process → 409 CONFLICT → poller
+  **tự tắt vĩnh viễn chỉ còn log** — owner mất kênh `/duyet` `/tuchoi` im lặng.
+  Scheduler daemon (news/digest/proposal expire) cũng nhân bản theo worker.
+- Env pipeline muse proposals (mục 10 AGENT_API_GUIDE): `VIDEO_PROPOSAL_PASS_SCORE`
+  (9.5), `VIDEO_PROPOSAL_REVIEWS_REQUIRED` (3), `VIDEO_PROPOSAL_PASS_REQUIRED` (2),
+  `VIDEO_PROPOSAL_EXPIRE_HOURS` (12), `VIDEO_PROPOSAL_SCHEDULER` (1 = bật).
+  Telegram 2 chiều cần `VIDEO_TELEGRAM_BOT_TOKEN` + `VIDEO_TELEGRAM_CHAT_ID`.
 
 ## Docs
 

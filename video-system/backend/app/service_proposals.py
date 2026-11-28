@@ -32,12 +32,22 @@ from .store import Store
 logger = logging.getLogger("video-system.proposals")
 
 PROPOSAL_STATUSES = (
-    "proposed", "under_review", "awaiting_owner", "needs_script", "rejected", "expired",
+    "proposed", "under_review", "awaiting_owner", "needs_script",
+    "in_production", "rejected", "expired",
 )
 ALLOWED_MODES = ("news", "decode", "trailer")
 ALLOWED_LANGS = ("vi", "en")
 
 DEDUPE_WINDOW_SEC = 72 * 3600
+
+# Rubric 4 trục — server tính tổng, client KHÔNG được gửi score (Q3, mirror
+# luật client_score_rejected của Shot Board). dimensions thiếu/giá trị sai → 422.
+DIMENSION_LIMITS: dict[str, float] = {
+    "hook": 3.0,
+    "topicality": 3.0,
+    "freshness": 2.0,
+    "feasibility": 2.0,
+}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -96,8 +106,9 @@ def _priority_from_avg(avg: float | None) -> int:
 
 
 class ProposalService:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, briefs=None) -> None:
         self.store = store
+        self.briefs = briefs  # BriefService — cần cho convert_to_brief (Q6)
 
     # -- helpers ---------------------------------------------------------------
 
@@ -136,7 +147,7 @@ class ProposalService:
         đã chấm proposal đó (manager/admin thấy hết). Sau khi chốt thì verdict
         tổng hiện với tất cả — progress (review_count) luôn hiện cho UI."""
         reviews = self._reviews(row["id"])
-        settled = row["status"] in {"awaiting_owner", "needs_script", "rejected", "expired"}
+        settled = row["status"] in {"awaiting_owner", "needs_script", "in_production", "rejected", "expired"}
         caller_reviewed = (
             privileged or settled
             or (caller is not None and any(r["reviewer"] == caller for r in reviews))
@@ -169,6 +180,7 @@ class ProposalService:
             "status": row["status"],
             "priority": int(row["priority"] or 3),
             "signals": int(row["signals"] or 1),
+            "brief_id": row.get("brief_id"),
             "avg_score": row.get("avg_score"),
             "review_count": int(row["review_count"] or 0),
             "pass_count": row.get("pass_count") if caller_reviewed else None,
@@ -283,10 +295,14 @@ class ProposalService:
         self,
         caller: str,
         proposal_id: str,
-        score: float,
-        dimensions: dict | None = None,
+        dimensions: dict[str, float],
         comment: str | None = None,
     ) -> dict[str, Any]:
+        """Chấm proposal bằng 4 trục — score do SERVER tính từ tổng trục (Q3).
+
+        Client chỉ gửi dimensions {hook, topicality, freshness, feasibility};
+        route đã chặn body chứa "score" (client_score_rejected). Giúp luật
+        "2/3 pass ≥ 9.5" không thể lách bằng một con số khai ra."""
         row = self._get(proposal_id)
         if row["status"] not in {"proposed", "under_review"}:
             raise ProposalError(
@@ -297,12 +313,30 @@ class ProposalService:
             raise ProposalError(403, "Người đề xuất không chấm proposal của chính mình.", "self_review")
         if self._has_reviewed(proposal_id, caller):
             raise ProposalError(409, "Caller đã chấm proposal này rồi.", "already_reviewed")
-        try:
-            score = round(float(score), 2)
-        except (TypeError, ValueError):
-            raise ProposalError(422, "score phải là số.", "validation_error")
-        if not (0.0 <= score <= 10.0):
-            raise ProposalError(422, "score trong khoảng 0-10.", "validation_error")
+        if not isinstance(dimensions, dict) or not dimensions:
+            raise ProposalError(
+                422, f"dimensions bắt buộc đủ 4 trục: {sorted(DIMENSION_LIMITS)}.",
+                "validation_error",
+            )
+        total = 0.0
+        clean_dims: dict[str, float] = {}
+        for key, limit in DIMENSION_LIMITS.items():
+            if key not in dimensions:
+                raise ProposalError(
+                    422, f"Thiếu trục '{key}' — dimensions phải đủ {sorted(DIMENSION_LIMITS)}.",
+                    "validation_error",
+                )
+            try:
+                v = round(float(dimensions[key]), 2)
+            except (TypeError, ValueError):
+                raise ProposalError(422, f"Trục '{key}' phải là số.", "validation_error")
+            if not (0.0 <= v <= limit):
+                raise ProposalError(
+                    422, f"Trục '{key}' trong khoảng 0-{limit}.", "validation_error",
+                )
+            clean_dims[key] = v
+            total += v
+        score = round(total, 1)
         if comment and len(comment) > 2000:
             raise ProposalError(422, "comment quá 2000 ký tự.", "comment_too_long")
         verdict = "pass" if score >= pass_score() else "fail"
@@ -314,7 +348,7 @@ class ProposalService:
                 "INSERT INTO muse_proposal_reviews (id,proposal_id,reviewer,score,"
                 "dimensions_json,verdict,comment,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (rv_id, proposal_id, caller, score,
-                 json.dumps(dimensions, ensure_ascii=False) if dimensions else None,
+                 json.dumps(clean_dims, ensure_ascii=False),
                  verdict, comment, t),
             )
         return self._settle(proposal_id, caller)
@@ -398,11 +432,50 @@ class ProposalService:
             )
         return self.get_proposal(proposal_id)
 
+    def convert_to_brief(self, proposal_id: str, caller: str) -> dict[str, Any]:
+        """Script-writer tiêu thụ hàng chờ (Q6): needs_script → in_production,
+        tạo brief qua BriefService hiện có (mode calendar — owner đã duyệt đề
+        xuất nên không quay lại vòng objection). Lần chuyển thứ hai → 409
+        already_converted kèm brief_id cũ."""
+        if self.briefs is None:
+            raise ProposalError(500, "BriefService chưa được wire.", "briefs_not_wired")
+        row = self._get(proposal_id)
+        if row["status"] == "in_production" and row.get("brief_id"):
+            raise ProposalError(
+                409, f"Proposal đã chuyển sang brief {row['brief_id']} rồi.",
+                "already_converted",
+            )
+        if row["status"] != "needs_script":
+            raise ProposalError(
+                409, f"Chỉ chuyển được proposal đang needs_script (hiện: {row['status']}).",
+                "proposal_not_convertible",
+            )
+        brief = self.briefs.create(
+            title=row["title"],
+            created_by=caller,
+            angle=(row.get("angle") or row["hook"] or "").strip() or None,
+            target_duration_sec=max(60.0, min(3600.0, float(row["target_seconds"] or 60.0))),
+            language=row["lang"] or "en",
+            source_links=[row["source_url"]] if row.get("source_url") else None,
+            approval_mode="calendar",
+        )
+        t = now()
+        with self.store.transaction() as conn:
+            conn.execute(
+                "UPDATE muse_proposals SET status='in_production', brief_id=?, "
+                "updated_at=? WHERE id=?",
+                (brief["id"], t, proposal_id),
+            )
+        return {"brief_id": brief["id"], "brief": brief,
+                "proposal": self.get_proposal(proposal_id)}
+
     def expire_stale(self) -> dict[str, Any]:
-        """Scheduler gọi: awaiting_owner quá hạn → expired (owner không phản hồi)."""
+        """Scheduler gọi: awaiting_owner quá hạn → expired (owner không phản hồi).
+        Mỗi proposal hết hạn được báo Telegram (Q4) — hết hạn im lặng là lỗ hổng
+        quan sát: owner không biết pipeline đã ngừng chờ mình."""
         cutoff = now() - expire_hours() * 3600.0
         rows = self.store.query(
-            "SELECT id FROM muse_proposals WHERE status='awaiting_owner' AND decided_at < ?",
+            "SELECT * FROM muse_proposals WHERE status='awaiting_owner' AND decided_at < ?",
             (cutoff,),
         )
         t = now()
@@ -411,6 +484,18 @@ class ProposalService:
                 "UPDATE muse_proposals SET status='expired', decided_at=?, updated_at=? WHERE id=?",
                 (t, t, r["id"]),
             )
+            try:
+                if self._telegram_configured():
+                    self._send_telegram(
+                        "⏰ <b>Đề xuất short HẾT HẠN chờ duyệt</b> "
+                        f"(quá {expire_hours():g}h không phản hồi)\n"
+                        f"📌 {r['title']}\n"
+                        f"👤 đề xuất: {r['proposer']} · avg {r['avg_score']}\n"
+                        f"🆔 <code>{r['id']}</code>\n"
+                        f"Xem lại trong web: Short Studio → Inbox đề xuất (mục Đã từ chối / Quá hạn)."
+                    )
+            except Exception as exc:  # noqa: BLE001 — notify không được hỏng scheduler
+                logger.warning("proposal expired notify failed: %s", exc)
         return {"expired": len(rows)}
 
     # -- queries -----------------------------------------------------------------
