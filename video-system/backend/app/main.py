@@ -57,6 +57,7 @@ from .storage_gdrive import check_storage_health, cleanup_item_intermediates, sy
 from .service_batches import BatchService
 from .service_bgm import BgmService
 from .service_board import BoardError, BoardService, defect_codes_public
+from .service_proposals import ProposalError, ProposalService
 from .service_import import ImportGate, ImportRejected, sha256_file
 from .service_items import ItemService
 from .service_readme import ReadMeService
@@ -100,6 +101,7 @@ batches = BatchService(store, items, shots)
 importer = ImportGate(store, items)
 todos = TodoService(store, items)
 board = BoardService(store, items)
+proposals = ProposalService(store)
 assembler = AssemblerService(store, items, todos)
 webhooks = WebhookService(store)
 # next_action của agreement đổi -> phát webhook (dedupe theo brief_agreement_state).
@@ -138,7 +140,9 @@ def _start_news_scheduler() -> None:
     instagram.startup_sweep()
     start_affiliate_sync_scheduler(store, webhooks)
     # Daily Brief human-in-the-loop: chốt /approve /reject /status từ Telegram
-    start_telegram_bot(store, shorts, youtube_svc=youtube)
+    start_telegram_bot(store, shorts, youtube_svc=youtube, proposals_svc=proposals)
+    # Muse proposals: quét awaiting_owner quá hạn mỗi giờ (mặc định bật)
+    proposals.start_expire_scheduler()
     # Bảng chat agent: dọn tin cũ theo retention (mặc định 30 ngày)
     chat.start_retention_worker()
     # Brief: tự duyệt objection-window trong giờ làm việc (scheduler, không read-path)
@@ -1431,6 +1435,131 @@ async def post_shot_comment(item_id: str, shot_index: int, request: Request):
         raise ApiError(e.status_code, e.message, e.code)
     except KeyError:
         raise HTTPException(404, "todo item not found")
+
+
+@app.post("/api/v1/muse-proposals")
+async def post_muse_proposal(request: Request):
+    """Muse agent đẩy đề xuất ý tưởng short (tự schedule mỗi giờ). Trùng ý
+    trong 72h → gộp vào đề xuất cũ (deduped=true), không tạo mới."""
+    auth.require(request, "ingest")
+    caller, _ = auth.identity_for(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(422, "Invalid JSON payload", "validation_error")
+    if not isinstance(payload, dict):
+        raise ApiError(422, "Proposal body must be a JSON object", "validation_error")
+    try:
+        return await run_in_threadpool(
+            _idempotent_call, request, payload,
+            lambda: proposals.create_proposal(caller, payload),
+            201, replay_status_200=True, add_replay_flag=True, reject_cross_caller=True,
+        )
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.get("/api/v1/muse-proposals/queue/needs-script")
+def get_proposal_needs_script_queue(request: Request = None):
+    """Hàng chờ ưu tiên gen kịch bản: priority ASC rồi created_at ASC."""
+    auth.require(request, "read")
+    return proposals.needs_script_queue()
+
+
+@app.get("/api/v1/muse-proposals/next")
+def get_next_proposal_review(mode: str | None = None, request: Request = None):
+    """Reviewer xin 1 đề xuất đủ điều kiện chấm (kiểu board mode=review)."""
+    auth.require(request, "read")
+    caller, _ = auth.identity_for(request)
+    if mode and mode != "review":
+        raise ApiError(422, f"Unknown dispatch mode: {mode}", "invalid_mode")
+    try:
+        return proposals.next_review_proposal(caller)
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.get("/api/v1/muse-proposals")
+def list_muse_proposals(status: str | None = None, request: Request = None):
+    auth.require(request, "read")
+    caller, scope = auth.identity_for(request)
+    try:
+        out = proposals.list_proposals(status)
+        out["proposals"] = [
+            proposals.get_proposal(p["id"], caller=caller,
+                                   privileged=_is_board_privileged(caller, scope))
+            for p in out["proposals"]
+        ]
+        return out
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.get("/api/v1/muse-proposals/{proposal_id}")
+def get_muse_proposal(proposal_id: str, request: Request = None):
+    auth.require(request, "read")
+    caller, scope = auth.identity_for(request)
+    try:
+        return proposals.get_proposal(proposal_id, caller=caller,
+                                      privileged=_is_board_privileged(caller, scope))
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.post("/api/v1/muse-proposals/{proposal_id}/reviews")
+async def post_proposal_review(proposal_id: str, request: Request):
+    auth.require(request, "ingest")
+    caller, _ = auth.identity_for(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(422, "Invalid JSON payload", "validation_error")
+    if not isinstance(payload, dict) or "score" not in payload:
+        raise ApiError(422, "Review body phải có score (0-10).", "validation_error")
+    try:
+        return await run_in_threadpool(
+            _idempotent_call, request, payload,
+            lambda: proposals.submit_proposal_review(
+                caller, proposal_id, payload["score"],
+                payload.get("dimensions"), payload.get("comment"),
+            ),
+            201, replay_status_200=True, add_replay_flag=True, reject_cross_caller=True,
+        )
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.post("/api/v1/muse-proposals/{proposal_id}/approve")
+async def post_proposal_approve(proposal_id: str, request: Request):
+    """Owner duyệt → needs_script (hàng chờ ưu tiên gen kịch bản)."""
+    auth.require(request, "admin")
+    priority: int | None = None
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict) and payload.get("priority") is not None:
+            priority = int(payload["priority"])
+    except Exception:
+        pass
+    try:
+        return await run_in_threadpool(proposals.approve_proposal, proposal_id, priority)
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
+
+
+@app.post("/api/v1/muse-proposals/{proposal_id}/reject")
+async def post_proposal_reject(proposal_id: str, request: Request):
+    auth.require(request, "admin")
+    reason = None
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            reason = (payload.get("reason") or "").strip() or None
+    except Exception:
+        pass
+    try:
+        return await run_in_threadpool(proposals.reject_proposal, proposal_id, reason)
+    except ProposalError as e:
+        raise ApiError(e.status_code, e.message, e.code)
 
 
 @app.get("/api/v1/agent/inbox")

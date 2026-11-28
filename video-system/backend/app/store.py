@@ -601,6 +601,45 @@ CREATE TABLE IF NOT EXISTS shot_comments (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shot_comments_shot ON shot_comments(item_id, shot_index, created_at);
+
+CREATE TABLE IF NOT EXISTS muse_proposals (
+  id TEXT PRIMARY KEY,
+  proposer TEXT NOT NULL,
+  title TEXT NOT NULL,
+  title_norm TEXT NOT NULL,
+  hook TEXT NOT NULL,
+  angle TEXT,
+  source_url TEXT,
+  source_note TEXT,
+  mode TEXT NOT NULL DEFAULT 'news',
+  lang TEXT NOT NULL DEFAULT 'en',
+  target_seconds REAL NOT NULL DEFAULT 60.0,
+  status TEXT NOT NULL DEFAULT 'proposed',
+  priority INTEGER NOT NULL DEFAULT 3,
+  signals INTEGER NOT NULL DEFAULT 1,
+  avg_score REAL,
+  review_count INTEGER NOT NULL DEFAULT 0,
+  pass_count INTEGER NOT NULL DEFAULT 0,
+  decided_at REAL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_muse_proposals_status
+  ON muse_proposals(status, priority, created_at);
+
+CREATE TABLE IF NOT EXISTS muse_proposal_reviews (
+  id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  score REAL NOT NULL,
+  dimensions_json TEXT,
+  verdict TEXT NOT NULL,
+  comment TEXT,
+  created_at REAL NOT NULL,
+  UNIQUE(proposal_id, reviewer)
+);
+CREATE INDEX IF NOT EXISTS idx_muse_proposal_reviews_p
+  ON muse_proposal_reviews(proposal_id, created_at);
 """
 
 _ITEM_MIGRATION_COLS = [

@@ -12,6 +12,7 @@ Conflict 409 (token bị consumer khác poll) -> tắt poller + log lỗi rõ.
 """
 from __future__ import annotations
 
+import html
 import logging
 import os
 import threading
@@ -25,13 +26,36 @@ from . import service_digest, service_news
 logger = logging.getLogger("video-system.telegram_bot")
 
 
-def _handle_command(store, shorts_svc, youtube_svc, text: str) -> str | None:
+def _handle_command(store, shorts_svc, youtube_svc, text: str,
+                    proposals_svc=None) -> str | None:
     """Parse + chạy 1 lệnh. Trả về text reply (None = im lặng)."""
     text = (text or "").strip()
     if not text.startswith("/"):
         return None
     parts = text.split(maxsplit=2)
     cmd = parts[0].lower()
+
+    if cmd in {"/duyet", "/tuchoi"}:
+        if proposals_svc is None:
+            return "⚠️ Proposal service chưa được wire."
+        if len(parts) < 2:
+            return f"Dùng: {cmd} <proposal_id>"
+        prop_id = parts[1].strip()
+        try:
+            if cmd == "/duyet":
+                res = proposals_svc.approve_proposal(prop_id)
+                return (f"✅ Đã duyệt <b>{html.escape(res['title'])}</b> "
+                        f"(<code>{prop_id}</code>) → needs_script "
+                        f"(priority {res['priority']}). "
+                        "Vào hàng chờ gen kịch bản.")
+            reason = parts[2].strip() if len(parts) > 2 else ""
+            res = proposals_svc.reject_proposal(prop_id, reason or None)
+            return (f"🗑 Đã từ chối <b>{html.escape(res['title'])}</b> "
+                    f"(<code>{prop_id}</code>)"
+                    + (f" — {html.escape(reason)}" if reason else ""))
+        except Exception as exc:  # noqa: BLE001 — command lỗi phải báo về chat
+            logger.exception("telegram command %s failed", cmd)
+            return f"❌ Lỗi khi {cmd}: {str(exc)[:300]}"
 
     if cmd == "/status":
         st = service_digest.get_digest_status_today(store)
@@ -67,7 +91,8 @@ def _handle_command(store, shorts_svc, youtube_svc, text: str) -> str | None:
     return None
 
 
-def start_telegram_bot(store, shorts_svc, *, youtube_svc=None) -> threading.Thread | None:
+def start_telegram_bot(store, shorts_svc, *, youtube_svc=None,
+                       proposals_svc=None) -> threading.Thread | None:
     """Long-polling getUpdates trong daemon thread. None nếu Telegram chưa cấu hình."""
     if not service_news._telegram_configured():
         logger.info("telegram bot disabled (VIDEO_TELEGRAM_BOT_TOKEN / CHAT_ID chưa set)")
@@ -100,7 +125,8 @@ def start_telegram_bot(store, shorts_svc, *, youtube_svc=None) -> threading.Thre
                                     (msg.get("chat") or {}).get("id"))
                         continue
                     reply = _handle_command(store, shorts_svc, youtube_svc,
-                                            msg.get("text") or "")
+                                            msg.get("text") or "",
+                                            proposals_svc=proposals_svc)
                     if reply:
                         try:
                             service_news._send_telegram(reply)

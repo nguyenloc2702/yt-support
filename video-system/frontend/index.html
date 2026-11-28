@@ -6746,6 +6746,267 @@ async function toggleShotComments(itemId, idx) {
   if (willOpen) await rbLoadCommentsInto(itemId, idx, `cmt-card-${itemId}-${idx}`);
 }
 
+// =====================================================================
+// MUSE PROPOSALS — Inbox đề xuất Short (muse) → review chéo 3 agent
+// → Telegram chờ owner duyệt → needs_script hàng chờ ưu tiên gen kịch bản.
+// Owner duyệt: panel này (nút Duyệt/Từ chối) hoặc /duyet /tuchoi trên Telegram.
+// =====================================================================
+let MP_CACHE = null;
+
+function mpIsOwner() {
+  return !!(VS_ME && (VS_ME.scope === 'admin' || VS_ME.identity === 'owner'));
+}
+
+async function mpLoadInbox() {
+  const el = document.getElementById('mpInboxList');
+  if (!el) return;
+  try {
+    const r = await apiFetch('/api/v1/muse-proposals', { timeoutMs: 20000 });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Không tải được inbox đề xuất'));
+    MP_CACHE = await r.json();
+    mpPaint();
+  } catch (err) {
+    el.innerHTML = `<div class="rb-empty">❌ ${esc(err.message)}</div>`;
+  }
+}
+
+function mpPaint() {
+  const el = document.getElementById('mpInboxList');
+  if (!el || !MP_CACHE) return;
+  el.innerHTML = mpRenderInbox(MP_CACHE.proposals || []);
+  const props = MP_CACHE.proposals || [];
+  const awaiting = props.filter(p => p.status === 'awaiting_owner').length;
+  const reviewing = props.filter(p => p.status === 'under_review' || p.status === 'proposed').length;
+  const bA = document.getElementById('mpBadgeAwaiting');
+  const bR = document.getElementById('mpBadgeReviewing');
+  if (bA) { bA.textContent = `Chờ duyệt: ${awaiting}`; bA.classList.toggle('hidden', awaiting === 0); }
+  if (bR) { bR.textContent = `Đang chấm: ${reviewing}`; bR.classList.toggle('hidden', reviewing === 0); }
+}
+
+function mpPriorityChip(p) {
+  const label = { 1: 'P1 gấp', 2: 'P2 thường', 3: 'P3 thấp' }[p] || `P${p}`;
+  const cls = p === 1 ? 'pill-danger' : (p === 2 ? 'pill-warn' : 'pill-ghost');
+  return `<span class="pill ${cls}" style="font-size:10px;padding:1px 7px">${label}</span>`;
+}
+
+function mpStatusPill(p) {
+  const map = {
+    proposed: ['pill-ghost', 'Mới đề xuất'],
+    under_review: ['pill-warn', 'Đang chấm'],
+    awaiting_owner: ['pill-accent', 'Chờ duyệt'],
+    needs_script: ['pill-ok', 'Cần kịch bản'],
+    rejected: ['pill-danger', 'Đã từ chối'],
+    expired: ['pill-ghost', 'Quá hạn'],
+  };
+  const [cls, label] = map[p.status] || ['pill-ghost', p.status];
+  return `<span class="pill ${cls}" style="font-size:10px;padding:1px 7px">${label}</span>`;
+}
+
+function mpPropCard(p, opts = {}) {
+  const reviewsHtml = (p.reviews || []).map(r => {
+    const scorePart = r.score != null ? `${r.score} · ${String(r.verdict || '').toUpperCase()}` : '· ẩn (chưa chấm)';
+    const cmtPart = r.comment ? ` — ${esc(String(r.comment).slice(0, 140))}` : '';
+    return `<div class="cmt-meta" style="margin-left:2px">• <b>${esc(r.reviewer)}</b>: ${scorePart}${cmtPart}</div>`;
+  }).join('');
+  const progress = `${p.review_count}/${p.reviews_required || 3} lượt chấm`;
+  const ownerBtns = mpIsOwner() && p.status === 'awaiting_owner' ? `
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button type="button" class="btn-ok btn-sm" onclick="mpApprove('${esc(p.id)}', this)">✅ Duyệt → Cần kịch bản</button>
+      <button type="button" class="btn-sm btn-danger" onclick="mpReject('${esc(p.id)}', this)">❌ Từ chối</button>
+      <select id="mp-prio-${esc(p.id)}" title="Priority khi duyệt" style="width:130px;font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:8px">
+        <option value="">Priority tự động</option>
+        <option value="1">P1 gấp</option>
+        <option value="2">P2 thường</option>
+        <option value="3">P3 thấp</option>
+      </select>
+    </div>` : '';
+  return `
+  <div class="rb-workcard" id="mp-card-${esc(p.id)}" style="margin-bottom:10px">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+      ${mpStatusPill(p)}
+      ${p.status === 'needs_script' ? mpPriorityChip(p.priority) : ''}
+      <span class="rb-ded mono">${esc(p.id)}</span>
+      <span class="rb-ded">bởi ${esc(p.proposer)}${p.signals > 1 ? ` · ${p.signals} muse cùng đề xuất` : ''}</span>
+    </div>
+    <div style="font-weight:700;font-size:13.5px;margin-bottom:3px">${esc(p.title)}</div>
+    <div style="font-size:12.5px;margin-bottom:4px">🎣 ${esc(p.hook)}</div>
+    ${p.angle ? `<div style="font-size:12px;color:var(--fg-muted);margin-bottom:4px">Góc nhìn: ${esc(p.angle)}</div>` : ''}
+    ${p.source_url ? `<div class="rb-ded">🔗 <a href="${esc(p.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(p.source_url)}</a></div>` : ''}
+    <div class="rb-ded" style="margin-top:4px">${p.mode}/${p.lang} · ~${Math.round(p.target_seconds)}s · ${progress}${p.avg_score != null ? ` · avg ${p.avg_score}` : ''}</div>
+    ${reviewsHtml ? `<div style="margin-top:6px">${reviewsHtml}</div>` : ''}
+    ${!p.reviews_visible && (p.review_count || 0) > 0 ? '<div class="rb-ded">🔒 Điểm reviewer ẩn cho tới khi bạn chấm đề xuất này</div>' : ''}
+    ${ownerBtns}
+  </div>`;
+}
+
+function mpRenderInbox(props) {
+  const by = st => props.filter(p => p.status === st);
+  const awaiting = by('awaiting_owner');
+  const reviewing = [...by('under_review'), ...by('proposed')];
+  const needs = [...by('needs_script')].sort((a, b) => a.priority - b.priority || a.created_at - b.created_at);
+  const done = [...by('rejected'), ...by('expired')];
+
+  const sec = (title, list, extra = '') => `
+    <div style="font-weight:700;font-size:12.5px;margin:12px 0 6px">${title}${list.length ? ` (${list.length})` : ''}</div>
+    ${list.length ? list.map(p => mpPropCard(p, extra)).join('') : '<div class="cmt-meta">— trống —</div>'}`;
+
+  return `
+    ${sec('⏳ Chờ bạn duyệt (≥2/3 pass ≥9.5)', awaiting)}
+    ${sec('🧪 Đang chấm bởi các reviewer', reviewing)}
+    ${sec('📋 Cần kịch bản — hàng chờ ưu tiên gen kịch bản', needs)}
+    <details style="margin-top:10px">
+      <summary style="font-weight:700;font-size:12.5px;cursor:pointer">🗑 Đã từ chối / Quá hạn${done.length ? ` (${done.length})` : ''}</summary>
+      <div style="margin-top:6px">${done.length ? done.map(p => mpPropCard(p)).join('') : '<div class="cmt-meta">— trống —</div>'}</div>
+    </details>`;
+}
+
+// ---- Reviewer chấm đề xuất (4 trục + tổng + comment) ----
+async function mpTakeReviewJob(btn) {
+  const area = document.getElementById('mpWorkArea');
+  if (!area) return;
+  if (btn) btn.disabled = true;
+  area.innerHTML = '<div class="rb-empty"><span class="spinner-ring"></span> Đang xin đề xuất để chấm...</div>';
+  try {
+    const r = await apiFetch('/api/v1/muse-proposals/next?mode=review', { timeoutMs: 15000 });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { area.innerHTML = rbErrorHtml(d.detail, d.code); return; }
+    if (!d.proposal) {
+      area.innerHTML = `<div class="rb-empty">🎉 Hết đề xuất phù hợp với bạn lúc này (${esc(d.reason || 'no_review_proposal')}).${d.retry_after_sec ? ` Thử lại sau ~${d.retry_after_sec}s.` : ''}</div>`;
+      return;
+    }
+    mpRenderReviewForm(d.proposal);
+  } catch (err) {
+    area.innerHTML = rbErrorHtml(err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function mpRenderReviewForm(p) {
+  const area = document.getElementById('mpWorkArea');
+  if (!area) return;
+  const dims = [
+    ['hook', 'Hook — câu mở giữ chân người xem', 3],
+    ['topicality', 'Tính thời sự — đang nóng, đáng nói bây giờ', 3],
+    ['freshness', 'Độ mới — chưa trùng nội dung đã làm', 2],
+    ['feasibility', 'Khả thi sản xuất trong ngày (ảnh/B-roll có sẵn)', 2],
+  ];
+  area.innerHTML = `
+  <div class="rb-workcard" id="mp-review-form" style="border-color:var(--accent)">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+      <span class="pill pill-accent" style="font-size:10px;padding:1px 7px">CHẤM ĐỀ XUẤT</span>
+      <span class="rb-ded mono">${esc(p.id)}</span>
+      <button type="button" class="btn-xs" onclick="mpTakeReviewJob()" title="Bỏ qua, lấy đề xuất khác">⏭ Bỏ qua</button>
+    </div>
+    <div style="font-weight:700;font-size:14px;margin-bottom:4px">${esc(p.title)}</div>
+    <div style="font-size:12.5px;margin-bottom:6px">🎣 ${esc(p.hook)}</div>
+    ${p.angle ? `<div style="font-size:12px;color:var(--fg-muted);margin-bottom:6px">Góc nhìn: ${esc(p.angle)}</div>` : ''}
+    ${p.source_url ? `<div class="rb-ded" style="margin-bottom:8px">🔗 <a href="${esc(p.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(p.source_url)}</a> ${p.source_note ? '· ' + esc(p.source_note) : ''}</div>` : ''}
+    <div class="rb-defect-grid">
+      ${dims.map(([k, label, max]) => `
+        <div class="rb-defect-item" style="cursor:default">
+          <span style="flex:1">${esc(label)}</span>
+          <input type="number" class="mp-dim" data-max="${max}" min="0" max="${max}" step="0.1" value="${max}"
+                 id="mp-dim-${k}" onchange="mpSyncScore()" style="width:64px;padding:4px 6px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px"/>
+          <span class="rb-ded">/${max}</span>
+        </div>`).join('')}
+    </div>
+    <div class="rb-preview" id="mp-score-preview"></div>
+    <input type="text" id="mp-comment" placeholder="Góp ý cho người đề xuất (không bắt buộc)" style="width:100%;margin-top:8px;padding:7px 9px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px"/>
+    <button type="button" class="btn-primary btn-sm" id="mp-submit-btn" style="width:100%;margin-top:8px" onclick="mpSubmitReview('${esc(p.id)}')">✅ Gửi chấm (server tự tính pass ≥9.5)</button>
+  </div>`;
+  mpSyncScore();
+}
+
+function mpSyncScore() {
+  const inputs = Array.from(document.querySelectorAll('#mp-review-form .mp-dim'));
+  let total = 0;
+  for (const inp of inputs) {
+    let v = parseFloat(inp.value || '0');
+    if (isNaN(v) || v < 0) v = 0;
+    const max = parseFloat(inp.dataset.max || '3');
+    if (v > max) { v = max; inp.value = max; }
+    total += v;
+  }
+  total = Math.round(total * 10) / 10;
+  const preview = document.getElementById('mp-score-preview');
+  if (preview) {
+    const verdict = total >= 9.5 ? 'PASS' : 'FAIL';
+    preview.innerHTML = `Tổng điểm dự kiến: <span class="pill ${verdict === 'PASS' ? 'pill-ok' : 'pill-danger'}" style="font-size:11px;padding:1px 8px">${total.toFixed(1)} · ${verdict}</span>
+      <span class="rb-ded">— ngưỡng pass 9.5; server vẫn tự tính lại</span>`;
+  }
+}
+
+async function mpSubmitReview(pid) {
+  const inputs = Array.from(document.querySelectorAll('#mp-review-form .mp-dim'));
+  const dimensions = {};
+  for (const inp of inputs) dimensions[inp.id.replace('mp-dim-', '')] = parseFloat(inp.value || '0');
+  const total = Math.round(inputs.reduce((s, inp) => s + (parseFloat(inp.value || '0') || 0), 0) * 10) / 10;
+  const btn = document.getElementById('mp-submit-btn');
+  const commentEl = document.getElementById('mp-comment');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang gửi chấm...'; }
+  try {
+    const r = await apiFetch(`/api/v1/muse-proposals/${pid}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': (crypto.randomUUID ? crypto.randomUUID() : `mp-${Date.now()}-${Math.random().toString(36).slice(2)}`) },
+      body: JSON.stringify({ score: total, dimensions, comment: commentEl ? (commentEl.value.trim() || undefined) : undefined }),
+      timeoutMs: 20000
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    const st = d.status || '';
+    showToast(st === 'awaiting_owner' ? '✅ Đủ 2/3 pass — đã gửi Telegram chờ owner duyệt'
+      : (st === 'rejected' ? '❌ Đề xuất bị loại (không đủ 2/3 pass)' : '✅ Đã chấm — chờ reviewer khác'), st === 'rejected' ? 'info' : 'ok', 5000);
+    await mpLoadInbox();
+    await mpTakeReviewJob();
+  } catch (err) {
+    showToast(`❌ Gửi chấm thất bại: ${err.message || err}`, 'error', 6000);
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Gửi chấm (server tự tính pass ≥9.5)'; }
+  }
+}
+
+// ---- Owner duyệt / từ chối ----
+async function mpApprove(pid, btn) {
+  const prioEl = document.getElementById(`mp-prio-${pid}`);
+  const prio = prioEl && prioEl.value ? parseInt(prioEl.value, 10) : null;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang duyệt...'; }
+  try {
+    const r = await apiFetch(`/api/v1/muse-proposals/${pid}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(prio ? { priority: prio } : {}),
+      timeoutMs: 15000
+    });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Duyệt thất bại'));
+    const d = await r.json();
+    showToast(`✅ Đã duyệt → needs_script (priority ${d.priority})`, 'ok', 5000);
+    await mpLoadInbox();
+  } catch (err) {
+    showToast(`❌ ${err.message || 'Duyệt thất bại'}`, 'error', 6000);
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Duyệt → Cần kịch bản'; }
+  }
+}
+
+async function mpReject(pid, btn) {
+  const reason = prompt('Lý do từ chối (không bắt buộc):');
+  if (reason === null) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang từ chối...'; }
+  try {
+    const r = await apiFetch(`/api/v1/muse-proposals/${pid}/reject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason || undefined }),
+      timeoutMs: 15000
+    });
+    if (!r.ok) throw new Error(await extractApiError(r, 'Từ chối thất bại'));
+    showToast('🗑 Đã từ chối đề xuất', 'ok', 4000);
+    await mpLoadInbox();
+  } catch (err) {
+    showToast(`❌ ${err.message || 'Từ chối thất bại'}`, 'error', 6000);
+    if (btn) { btn.disabled = false; btn.textContent = '❌ Từ chối'; }
+  }
+}
+
 // --- Interactive Shot Checklist Board for Video Generation Agent ---
 function renderAgentShotChecklistSection(item, cl) {
   const itemId = item.item_id;
@@ -8264,6 +8525,7 @@ function openShortStudioPage() {
   renderShortStudioShell();
   loadShorts({ force: true });
   loadNewsInbox();
+  mpLoadInbox();
 }
 
 function hideTodoDetailDom() {
@@ -8315,6 +8577,7 @@ async function loadShorts(opts = {}) {
     if (saved.target && target) target.value = saved.target;
     switchShortMode(saved.mode);
     switchShortLang(saved.lang);
+    mpPaint();
   }
 }
 
@@ -8556,6 +8819,25 @@ function renderShortStudioShell() {
       <div class="stat-value" style="color:var(--held)">${failedCount}</div>
       <div class="stat-sub">Cần xử lý — có lý do chi tiết</div>
     </div>
+  </section>
+
+  <section class="panel" id="mpInboxPanel" style="margin-bottom:12px">
+    <div class="panel-header">
+      <div>
+        <h3 class="panel-title">
+          🛡 Inbox đề xuất Short (muse)
+          <span id="mpBadgeAwaiting" class="hidden" style="background:var(--accent);color:#fff;border-radius:9px;font-size:10px;padding:1px 6px"></span>
+          <span id="mpBadgeReviewing" class="hidden" style="background:var(--fg-muted);color:#fff;border-radius:9px;font-size:10px;padding:1px 6px;margin-left:4px"></span>
+        </h3>
+        <div class="panel-subtitle">Muse agent tự đề xuất ý tưởng → 3 agent bất kỳ chấm chéo (muse tự lên lịch vào web mỗi giờ). Đề xuất đạt ≥2/3 chấm ≥9.5 → chờ bạn duyệt → needs_script vào hàng chờ ưu tiên gen kịch bản.</div>
+      </div>
+      <div class="rb-actions">
+        <button type="button" class="btn-primary btn-sm" onclick="mpTakeReviewJob(this)">🧪 Chấm đề xuất tiếp theo</button>
+        <button type="button" class="btn-xs" onclick="mpLoadInbox()">🔄 Làm mới</button>
+      </div>
+    </div>
+    <div id="mpInboxList"><div class="cmt-meta">Đang tải inbox đề xuất...</div></div>
+    <div id="mpWorkArea"></div>
   </section>
 
   <div class="shorts-layout">
