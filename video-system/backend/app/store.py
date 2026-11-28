@@ -699,6 +699,8 @@ _SHORT_SCENES_MIGRATION_COLS = [
     ("attribution", "TEXT"),
     ("agent_checked", "INTEGER DEFAULT 0"),   # G.13: clip agent phủ scene
     ("generated_duration_sec", "REAL DEFAULT 0.0"),
+    # Prompt visual do người viết tay (đè prompt tự sinh trong get_job)
+    ("visual_prompt_override", "TEXT"),
 ]
 
 _NEWS_MIGRATION_COLS = [

@@ -919,6 +919,44 @@ class ShortService:
                                       and covered_dur >= audio_dur - tol,
         }
 
+    def set_scene_prompts(self, short_id: str, prompts: dict[int, str],
+                          actor: str = "ui") -> dict:
+        """Ghi prompt visual viết tay cho từng scene (đè prompt tự sinh trong get_job).
+
+        Cho phép sau khi publish: agent fetch lại job là thấy prompt mới, không cần
+        tạo lại short hay đổi timing audio.
+        """
+        row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
+        if not row:
+            raise KeyError(short_id)
+        if row["status"] not in {domain.ShortStatus.SCRIPTED.value,
+                                 domain.ShortStatus.QUEUED.value,
+                                 domain.ShortStatus.RENDERING.value}:
+            raise ValueError(
+                "Chỉ sửa prompt khi short ở 'scripted'/'queued'/'rendering' "
+                f"(hiện: {row['status']}).")
+        scenes = self.store.query(
+            "SELECT seq_num FROM short_scenes WHERE short_id=? ORDER BY seq_num",
+            (short_id,))
+        valid = {int(s["seq_num"]) for s in scenes}
+        if not prompts:
+            raise ValueError("Không có prompt nào để ghi.")
+        t = now()
+        for seq, text in prompts.items():
+            seq_i = int(seq)
+            if seq_i not in valid:
+                raise ValueError(f"Scene #{seq_i} không tồn tại (short có {len(valid)} scene).")
+            body = (text or "").strip()
+            if not body:
+                raise ValueError(f"Prompt scene #{seq_i} rỗng.")
+            self.store.execute(
+                "UPDATE short_scenes SET visual_prompt_override=?, updated_at=? "
+                "WHERE short_id=? AND seq_num=?",
+                (body, t, short_id, seq_i))
+        self._event(short_id, "short.scene_prompts_set", actor,
+                    {"scenes": sorted(int(k) for k in prompts)})
+        return self.get_job(short_id)
+
     def get_job(self, short_id: str) -> dict:
         """Package đầy đủ cho agent video ngoài (audio + timing + template)."""
         row = self.store.query_one("SELECT * FROM shorts WHERE id=?", (short_id,))
@@ -939,7 +977,8 @@ class ShortService:
             dur_s = round(float(sc["end_sec"]) - float(sc["start_sec"]), 3)
             kw = (kw_en_list[seq - 1].strip() if seq - 1 < len(kw_en_list) else "") or stock_media.keywords_for_query(sc["text"])
             shot_type = "hook" if seq == 1 else ("closing" if seq == len(scenes) else "beat")
-            detailed_prompt = skill_bundle_short.build_detailed_shot_prompt(
+            override = (sc.get("visual_prompt_override") or "").strip()
+            detailed_prompt = override or skill_bundle_short.build_detailed_shot_prompt(
                 shot_type, seq, sc["text"], dur_s,
                 lang=lang, headline_hint=headline_hint, stock_keywords=kw,
                 style=style,
@@ -951,6 +990,7 @@ class ShortService:
                 "audio_end_sec": float(sc["end_sec"]),
                 "duration_sec": dur_s,
                 "visual_prompt": detailed_prompt,
+                "prompt_source": "override" if override else "generated",
                 "stock_search_keywords": kw,
                 "sub_shots": skill_bundle_short.slice_sub_shots(
                     seq, sc["text"], float(sc["start_sec"]), float(sc["end_sec"]),

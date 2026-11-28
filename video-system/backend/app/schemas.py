@@ -378,6 +378,16 @@ class ShortFromScript(BaseModel):
     search_keywords_en: list[str] = Field(default_factory=list, max_length=20)
 
 
+class ShortScenePrompt(BaseModel):
+    """1 prompt visual viết tay cho 1 scene (seq bắt đầu từ 1)."""
+    seq: int = Field(ge=1, le=64)
+    prompt: str = Field(min_length=1, max_length=8000)
+
+
+class ShortScenePrompts(BaseModel):
+    prompts: list[ShortScenePrompt] = Field(min_length=1, max_length=64)
+
+
 class ShortAudioShot(BaseModel):
     """1 shot owner khai báo cho audio đã nạp (start/end tính bằng giây)."""
     text: str = Field(min_length=1, max_length=2000)

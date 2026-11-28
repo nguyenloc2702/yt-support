@@ -243,3 +243,31 @@ def test_job_urls_actually_resolve(client, ingest, short_adapters, store_fixture
         r = client.get(job[key], headers=ingest)
         assert r.status_code == 200, f"{key} -> {job[key]} trả {r.status_code}"
         assert r.content, f"{key} rỗng"
+
+
+def test_scene_prompt_override_wins_over_generated(client, ingest, short_adapters,
+                                                    store_fixture):
+    sid = _create_short(client, ingest, short_adapters)
+    assert _ingest(client, ingest, sid, _shots()).status_code == 200
+    assert client.post(f"/api/v1/shorts/{sid}/publish-job", headers=ingest).status_code == 200
+
+    job = client.get(f"/api/v1/shorts/{sid}/job", headers=ingest).json()
+    assert job["scenes"][0]["prompt_source"] == "generated"
+
+    custom = "[SHOT #01] custom brief: photoreal Soyuz capsule, 9:16, no text"
+    r = client.put(f"/api/v1/shorts/{sid}/scene-prompts", headers=ingest,
+                   json={"prompts": [{"seq": 1, "prompt": custom}]})
+    assert r.status_code == 200, r.text
+    job = client.get(f"/api/v1/shorts/{sid}/job", headers=ingest).json()
+    assert job["scenes"][0]["visual_prompt"] == custom
+    assert job["scenes"][0]["prompt_source"] == "override"
+    # scene khác vẫn dùng prompt tự sinh
+    assert job["scenes"][1]["prompt_source"] == "generated"
+
+
+def test_scene_prompt_override_rejects_unknown_seq(client, ingest, short_adapters):
+    sid = _create_short(client, ingest, short_adapters)
+    assert _ingest(client, ingest, sid, _shots()).status_code == 200
+    r = client.put(f"/api/v1/shorts/{sid}/scene-prompts", headers=ingest,
+                   json={"prompts": [{"seq": 99, "prompt": "x"}]})
+    assert r.status_code == 422

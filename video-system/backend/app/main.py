@@ -37,6 +37,7 @@ from .schemas import (AudioRegenerateRequest, BatchCreate, BgmTrackSubmitJson,
                       KnowledgeUpdateRequest,
                       ReadMeCreateRequest, ReadMePatchRequest,
                       ReadMePutRequest, ShortAudioIngest, ShortCreate, ShortFromScript,
+                      ShortScenePrompts,
                       ShortScriptUpdate,
                       ShotChecklistBatchUpdate,
                       ShotCheckUpdate, ShotImport, SyncGdriveRequest,
@@ -2142,6 +2143,24 @@ def clear_short_audio(short_id: str, request: Request = None):
     auth.require(request, "ingest")
     try:
         return shorts.clear_audio(short_id)
+    except KeyError:
+        raise HTTPException(404, "short not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.put("/api/v1/shorts/{short_id}/scene-prompts")
+def set_short_scene_prompts(short_id: str, body: ShortScenePrompts,
+                            request: Request = None):
+    """Ghi prompt visual viết tay cho từng shot (đè prompt tự sinh).
+
+    Dùng khi cần gen đúng một hướng hình ảnh cụ thể (reference video, style riêng).
+    Agent fetch lại `/job` là thấy prompt mới; timing audio không đổi.
+    """
+    auth.require(request, "ingest")
+    try:
+        return shorts.set_scene_prompts(
+            short_id, {p.seq: p.prompt for p in body.prompts})
     except KeyError:
         raise HTTPException(404, "short not found")
     except ValueError as e:
