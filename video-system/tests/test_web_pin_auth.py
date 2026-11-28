@@ -106,27 +106,30 @@ def test_forwarded_ip_isolation_and_proxy_loopback_protection(client):
 
 
 def test_redesigned_ui_4_column_grid_checklist_and_no_raw_clutter(client):
-    """Verify the redesigned index.html includes the 4-column shot grid,
-    empty slot placeholders, agent checklist board, in-page viewer modal,
-    Quick Job Directory, Cache-Control no-store, scroll-margin-top, filter-conflict recovery,
-    inline video #t=0.05 preview frame, and removes raw API key/endpoint clutter."""
-    r = client.get("/", headers={"Accept-Encoding": "gzip"})
+    """MPA: trang /todos + theme.css + todos.js/core.js phải đủ 4-column shot
+    grid, empty slot placeholders, checklist board, viewer modal, Quick Job
+    Directory, Cache-Control no-store, scroll-margin-top, preview #t=0.05 —
+    và không còn rỉ raw API key/endpoint."""
+    r = client.get("/todos", headers={"Accept-Encoding": "gzip"})
     assert r.status_code == 200
     assert "no-store" in r.headers.get("cache-control", "").lower()
     html = r.text
-    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in html
-    assert "shot-video-grid" in html
-    assert "jobDirectoryContainer" in html
-    assert "TRỐNG — THIẾU SHOT" in html
+    css = client.get("/static/css/theme.css").text
+    todos_js = client.get("/static/js/todos.js").text
+    core_js = client.get("/static/js/core.js").text
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in css
+    assert "shot-video-grid" in todos_js
+    assert "jobDirectoryContainer" in todos_js
+    assert "TRỐNG — THIẾU SHOT" in todos_js
     assert "webViewerModal" in html
-    assert "/shot-checklist" in html
-    assert "scroll-margin-top: 76px" in html
-    assert "syncStatusTabsUi" in html
-    assert "cleanupVideosInContainer" in html
-    assert "rerenderSingleCard" in html
-    assert "syncCinemaModalShotState" in html
-    assert "#t=0.05" in html
-    assert "devkey-read" not in html
+    assert "/shot-checklist" in todos_js
+    assert "scroll-margin-top: 76px" in css
+    assert "syncStatusTabsUi" in todos_js
+    assert "cleanupVideosInContainer" in core_js
+    assert "rerenderSingleCard" in todos_js
+    assert "syncCinemaModalShotState" in core_js
+    assert "#t=0.05" in todos_js
+    assert "devkey-read" not in html + css + todos_js + core_js
 
 
 def test_browser_blocked_even_if_proxy_injects_default_bearer(client):
@@ -241,46 +244,51 @@ def test_loading_states_try_catch_and_error_reporting(client, read_key, monkeypa
     r_fav = client.get("/favicon.ico")
     assert r_fav.status_code == 204
 
-    # 2. Index HTML includes loading UI, skeleton states, error banner, toast, and try/catch
-    r_html = client.get("/")
+    # 2. MPA: trang /todos + module JS chứa loading UI, skeleton, error banner,
+    #    toast, try/catch — assert tách theo file mới
+    r_html = client.get("/todos")
     assert r_html.status_code == 200
     html = r_html.text
+    core_js = client.get("/static/js/core.js").text
+    todos_js = client.get("/static/js/todos.js").text
+    shorts_js = client.get("/static/js/shorts.js").text
+    youtube_js = client.get("/static/js/youtube.js").text
     assert 'id="globalStatusBanner"' in html
     assert 'id="toastContainer"' in html
     assert 'id="refreshAllBtn"' in html
-    assert "function extractApiError(" in html
-    assert "function showStatusBanner(" in html
-    assert "function renderLoadingSkeleton(" in html
-    assert "function renderLoadErrorState(" in html
-    assert "function isShotGridCollapsed(" in html
-    assert "function isChecklistCollapsed(" in html
-    assert "TODO_INFINITE_BATCH_SIZE" in html
-    assert "function cancelPendingTodoAppendTimer(" in html
-    assert "function appendNextTodoCardsBatch(" in html
-    assert "function loadMoreShotsBatch(" in html
-    assert "function loadMoreChecklistRowsBatch(" in html
-    assert "function unloadOffscreenIdleVideo(" in html
-    assert "function handleRefImagesToggle(" in html
-    assert 'data-lazy-kind="checklist"' in html
-    assert "video-lazy-overlay" in html
-    assert "img-lazy-loader" in html
-    assert "todoInfiniteSentinel" in html
+    assert "function extractApiError(" in core_js
+    assert "function showStatusBanner(" in core_js
+    assert "function renderLoadingSkeleton(" in core_js
+    assert "function renderLoadErrorState(" in core_js
+    assert "function isShotGridCollapsed(" in todos_js
+    assert "function isChecklistCollapsed(" in todos_js
+    assert "TODO_INFINITE_BATCH_SIZE" in todos_js
+    assert "function cancelPendingTodoAppendTimer(" in todos_js
+    assert "function appendNextTodoCardsBatch(" in todos_js
+    assert "function loadMoreShotsBatch(" in todos_js
+    assert "function loadMoreChecklistRowsBatch(" in todos_js
+    assert "function unloadOffscreenIdleVideo(" in todos_js
+    assert "function handleRefImagesToggle(" in todos_js
+    assert 'data-lazy-kind="checklist"' in todos_js
+    assert "video-lazy-overlay" in todos_js
+    assert "img-lazy-loader" in todos_js
+    assert "todoInfiniteSentinel" in todos_js
     assert 'id="pageTodoList"' in html
     assert 'id="pageTodoDetail"' in html
-    assert "function openTodoDetailPage(" in html
-    assert "function backToTodoListPage(" in html
-    assert "function switchDetailFlowTab(" in html
-    assert "function renderTodoSummaryCard(" in html
-    assert "function renderTodoDetailPage(" in html
-    assert "todo-summary-card" in html
-    assert "detail-flow-tabs" in html
+    assert "function openTodoDetailPage(" in todos_js
+    assert "function backToTodoListPage(" in todos_js
+    assert "function switchDetailFlowTab(" in todos_js
+    assert "function renderTodoSummaryCard(" in todos_js
+    assert "function renderTodoDetailPage(" in todos_js
+    assert "todo-summary-card" in todos_js
+    assert "detail-flow-tabs" in todos_js
     assert 'id="tabShorts"' in html
-    assert "function renderShortSummaryCard(" in html
-    assert "function openShortPreviewModal(" in html
-    assert "function renderYoutubeActionButton(" in html
-    assert "/youtube/publish" in html
-    assert "Không thể tải dữ liệu danh sách công việc TODO" in html
-    assert "Thử tải lại ngay" in html
+    assert "function renderShortSummaryCard(" in todos_js
+    assert "function openShortPreviewModal(" in todos_js
+    assert "function renderYoutubeActionButton(" in youtube_js
+    assert "/youtube/publish" in youtube_js
+    assert "Không thể tải dữ liệu danh sách công việc TODO" in core_js
+    assert "Thử tải lại ngay" in core_js
 
     # 3. Simulated backend exception in list_todos returns structured 500 JSON with detail
     from backend.app import main as app_main

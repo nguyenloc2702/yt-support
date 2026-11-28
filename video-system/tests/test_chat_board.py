@@ -171,12 +171,16 @@ def test_body_limits(client, three_agents):
 
 
 def test_spa_has_chat_nav(client):
-    shell = client.get("/")
-    assert shell.status_code == 200
-    assert "navChatBtn" in shell.text
-    assert "pageChat" in shell.text
+    """MPA: trang /chat có nav chat + pageChat; goChatPage/esc nằm trong module
+    chat.js/core.js (tách khỏi monolith index.html)."""
+    page = client.get("/chat")
+    assert page.status_code == 200
+    assert "/chat#/chat" in page.text
+    assert "pageChat" in page.text
+    chat_js = client.get("/static/js/chat.js").text
+    core_js = client.get("/static/js/core.js").text
     # Regression: chat JS từng gọi escapeHtml() không tồn tại (helper thật là esc())
     # → lỗi runtime "escapeHtml is not defined" khi mở tab chat. Không được tái phạm.
-    assert "escapeHtml" not in shell.text
-    assert "function goChatPage(" in shell.text
-    assert "function esc(" in shell.text
+    assert "escapeHtml" not in chat_js + core_js
+    assert "function goChatPage(" in chat_js
+    assert "function esc(" in core_js

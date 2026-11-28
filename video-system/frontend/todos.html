@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Điều Phối & Kiểm Duyệt Shot Video EN</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/theme.css?v=b1"/>
+</head>
+<body>
+<div id="authOverlay" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+  <form class="auth-card" onsubmit="submitPin(event)" autocomplete="off">
+    <div class="lock-badge"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" stroke="#1C1917" stroke-width="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3" stroke="#1C1917" stroke-width="2"/></svg></div>
+    <h2 id="authTitle" style="margin:0 0 4px;font-size:16px;font-weight:600">Xác Thực Truy Cập Hệ Thống</h2>
+    <p id="authSubtitle" style="margin:0;font-size:12px;color:var(--fg-muted)">Nhập mã PIN 6 chữ số để mở bảng điều phối sản xuất & danh sách công việc TODO</p>
+    <div class="seg-tabs auth-mode-tabs" id="authModeTabs" role="group" aria-label="Kiểu đăng nhập">
+      <button type="button" class="seg-tab active" id="authModeOwner" onclick="setAuthMode('owner')">Owner (PIN)</button>
+      <button type="button" class="seg-tab" id="authModeAgent" onclick="setAuthMode('agent')">Agent (mã 6 số)</button>
+    </div>
+    <div class="pin-boxes" id="pinBoxes">
+      <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 1" id="pin0"/>
+      <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 2" id="pin1"/>
+      <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 3" id="pin2"/>
+      <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 4" id="pin3"/>
+      <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 5" id="pin4"/>
+      <input type="password" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Chữ số 6" id="pin5"/>
+    </div>
+    <div class="auth-err" id="authErr"></div>
+    <button type="submit" id="authBtn" class="btn-primary" style="width:100%;padding:10px">Mở Khóa</button>
+  </form>
+</div>
+
+<!-- Sticky Topbar -->
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand" style="cursor:pointer" role="button" tabindex="0" data-kb-click="1" aria-label="Quay về Trang Danh Sách Công Việc TODO" onclick="backToTodoListPage()" title="Quay về Trang Danh Sách Công Việc TODO">
+      <div class="brand-mark">VS</div>
+      <div>
+        <h1 class="brand-title">
+          Điều Phối & Kiểm Duyệt Shot Video EN
+          <span class="pill pill-accent desktop-grid-pill">Chuẩn 4 Video / Dòng</span>
+        </h1>
+        <p class="brand-sub">Kiến trúc 2 Trang gọn nhẹ: Danh sách TODO tổng quan & Trang chi tiết 6 Tab Lazy Load</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <div class="top-nav-group" role="group" aria-label="Chuyển giữa các trang">
+      <a class="top-nav-btn" href="/todos#/todos" data-nav="todos">Điều phối Shot</a>
+      <a class="top-nav-btn" href="/shorts#/shorts" data-nav="shorts">Short Studio</a>
+      <a class="top-nav-btn" href="/youtube#/youtube" data-nav="youtube">📺 YouTube</a>
+      <a class="top-nav-btn" href="/publish#/publish" data-nav="publish">📲 Publish</a>
+      <a class="top-nav-btn" href="/library" data-nav="library">📚 Thư viện</a>
+      <a class="top-nav-btn" href="/chat#/chat" data-nav="chat">💬 Agent Chat<span id="chatUnreadBadge" class="hidden" style="background:#ef4444;color:#fff;border-radius:9px;font-size:10px;padding:1px 6px;margin-left:5px"></span></a>
+      </div>
+      <button type="button" onclick="openAgentGuideModal()">📖 Xem Hướng Dẫn Agent</button>
+      <button type="button" id="storageBadgeBtn" onclick="openStorageStatusModal()">☁️ Lưu Trữ: Đang kiểm tra...</button>
+      <button type="button" id="refreshAllBtn" class="btn-primary" onclick="loadTodos({force:true, notify:true})">🔄 Làm mới dữ liệu</button>
+      <span class="rb-identity hidden" id="identityChip" title="Danh tính phiên đăng nhập"></span>
+      <button type="button" id="logoutBtn" onclick="logout()" style="display:none">🔒 Khóa phiên</button>
+    </div>
+  </div>
+</header>
+
+  <main class="wrap">
+  <div id="globalStatusBanner" class="status-banner hidden" role="alert" aria-live="polite"></div>
+  <div id="pageTodoList" class="page-view">
+    <!-- Overview Stats -->
+    <section class="overview-bar" id="overviewBar">
+      <div class="stat-card">
+        <div class="stat-label">Tổng Công Việc (Jobs)</div>
+        <div class="stat-value" id="statTotalJobs">0</div>
+        <div class="stat-sub" id="statTotalJobsSub">Đang tải danh sách...</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Shot Đã Gen / Tổng Shot</div>
+        <div class="stat-value" id="statShotsChecked">0 / 0</div>
+        <div class="stat-sub" id="statShotsCheckedSub">Đã tick hoàn tất trên bảng Agent</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Thời Lượng Đã Gen / Chuẩn</div>
+        <div class="stat-value" id="statDurationGen">0.0s / 0.0s</div>
+        <div class="stat-sub" id="statDurationGenSub">Đối chiếu trực tiếp với Audio EN</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Cần Gen Thêm</div>
+        <div class="stat-value" id="statRemainingSec" style="color:var(--run)">0.0s</div>
+        <div class="stat-sub" id="statRemainingSub">Số giây Agent cần tạo bổ sung</div>
+      </div>
+    </section>
+
+    <!-- Filter, Search & Sort Bar -->
+    <section class="toolbar">
+      <div class="toolbar-group">
+        <div class="seg-tabs" id="statusTabs">
+          <button type="button" class="seg-tab active" data-status="" id="tabAll" onclick="setStatusFilter('')">Tất cả</button>
+          <button type="button" class="seg-tab" data-status="todo" id="tabTodo" onclick="setStatusFilter('todo')">Đang chờ video</button>
+          <button type="button" class="seg-tab" data-status="ready_to_assemble" id="tabReady" onclick="setStatusFilter('ready_to_assemble')">Đủ thời lượng (Chờ ráp)</button>
+          <button type="button" class="seg-tab" data-status="assembled" id="tabAssembled" onclick="setStatusFilter('assembled')">Đã ráp thành phẩm</button>
+          <button type="button" class="seg-tab" data-status="shorts" id="tabShorts" onclick="setStatusFilter('shorts')">📱 Short Video</button>
+        </div>
+        <input type="search" id="searchBox" class="search-input" placeholder="Tìm theo tiêu đề bài hoặc mã công việc..." oninput="renderFilteredTodos()"/>
+        <select id="sortSelect" aria-label="Sắp xếp danh sách công việc" onchange="setTodoSortOrder(this.value)">
+          <option value="default">Thứ tự mặc định (#01 → #11)</option>
+          <option value="progress_desc">Tiến độ cao nhất trước</option>
+          <option value="progress_asc">Cần ưu tiên gen (Thiếu nhiều)</option>
+          <option value="duration_desc">Thời lượng dài nhất trước</option>
+        </select>
+      </div>
+      <div class="toolbar-group">
+        <span id="summaryText" style="font-size:12px;color:var(--fg-muted)"></span>
+      </div>
+    </section>
+
+    <!-- Quick Job Directory Strip -->
+    <div id="jobDirectoryContainer"></div>
+
+    <!-- Compact Todo Summary Cards Grid Container -->
+    <div id="todoList">
+      <div class="loading-panel" id="initialLoadingPanel">
+        <div style="display:inline-flex;align-items:center;gap:10px;font-size:14px;font-weight:600;color:var(--fg)">
+          <span class="spinner-ring lg"></span>
+          <span>Đang kết nối máy chủ và tải danh sách công việc TODO...</span>
+        </div>
+        <div style="font-size:12px;color:var(--fg-muted);margin-top:6px">
+          Hệ thống đang đồng bộ tiến độ Shot, thời lượng Audio EN và bảng Checklist của Agent.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PAGE 2: TRANG CHI TIẾT CÔNG VIỆC THEO LUỒNG (JOB DETAIL VIEW) -->
+  <div id="pageTodoDetail" class="page-view hidden"></div>
+
+  <!-- PAGE 3: SHORT STUDIO (Phụ lục G — Tin nóng & Giải mã tiền bạc, 9:16) -->
+  </main>
+<div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+<!-- Floating Back-to-Top / Back-to-Directory Button for Mobile -->
+<button type="button" id="mobileFabTop" class="mobile-fab-top hidden" onclick="scrollToJobDirectory()">
+<button type="button" id="mobileFabTop" class="mobile-fab-top hidden" onclick="scrollToJobDirectory()">
+  ⬆️ Lên đầu trang
+</button>
+
+<!-- In-Page Universal Web Viewer Modal (Cinema Video, Image Lightbox, Script/SRT/JSON Viewer) -->
+
+<div id="webViewerModal" class="modal-backdrop" onclick="if(event.target===this)closeWebModal()">
+  <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="webModalTitle">
+    <div class="modal-head">
+      <div>
+        <h3 class="modal-title" id="webModalTitle">Xem Trực Tiếp Trên Màn Hình</h3>
+        <div id="webModalSubtitle" style="font-size:12px;color:var(--fg-muted);margin-top:2px"></div>
+      </div>
+      <div class="modal-head-actions">
+        <div id="webModalNav" style="display:flex;gap:6px"></div>
+        <button type="button" id="webModalCloseBtn" class="btn-sm" onclick="closeWebModal()">✕ Đóng (Esc)</button>
+      </div>
+    </div>
+    <div class="modal-content" id="webModalBody"></div>
+    <div class="modal-foot" id="webModalFoot"></div>
+  </div>
+</div>
+
+<!-- Hidden Quick File Input for Empty Slot 1-Click Video Upload -->
+
+<input type="file" id="quickSlotVideoInput" accept="video/*" style="display:none" onchange="handleQuickSlotVideoSelected(event)"/>
+
+
+<script src="/static/js/core.js?v=b1"></script>
+<script src="/static/js/todos.js?v=b1"></script>
+<script src="/static/js/shorts.js?v=b1"></script>
+<script src="/static/js/youtube.js?v=b1"></script>
+<script src="/static/js/publish.js?v=b1"></script>
+<script src="/static/js/chat.js?v=b1"></script>
+<script>window.VS_PAGE = 'todos';</script>
+<script src="/static/js/router.js?v=b1"></script>
+</body>
+</html>

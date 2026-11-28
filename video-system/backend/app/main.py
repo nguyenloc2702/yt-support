@@ -157,7 +157,8 @@ def _start_news_scheduler() -> None:
 # màn hình khóa — dữ liệu vẫn nằm sau API được bảo vệ).
 # Ngoại lệ prefix: /b/{slug} + /bio/{handle} (trang công khai cho bio TikTok/IG),
 # /api/v1/instagram/media/ (signed URL để IG pull video), callback OAuth IG.
-_WEB_OPEN_PATHS = {"/", "/library", "/favicon.ico", "/api/v1/health",
+_WEB_OPEN_PATHS = {"/", "/todos", "/shorts", "/youtube", "/publish", "/chat",
+                   "/library", "/favicon.ico", "/api/v1/health",
                    "/api/v1/auth/login", "/api/v1/auth/session", "/api/v1/auth/logout",
                    "/api/v1/youtube/auth/callback",
                    "/api/v1/instagram/auth/callback"}
@@ -168,11 +169,22 @@ _WEB_OPEN_PREFIXES = ("/b/", "/bio/", "/api/v1/instagram/media/", "/static/")
 async def pin_gate(request: Request, call_next):
     path = request.url.path
     if request.method == "OPTIONS" or path in _WEB_OPEN_PATHS:
-        return await call_next(request)
+        resp = await call_next(request)
+        if path.startswith("/static/"):
+            # JS/CSS tách module: luôn lấy bản mới (tránh heuristic cache
+            # khiến agent chạy code cũ sau mỗi lần deploy frontend)
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
     if any(path.startswith(p) for p in _WEB_OPEN_PREFIXES):
-        return await call_next(request)
+        resp = await call_next(request)
+        if path.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
     if webauth.request_allowed(request):
-        return await call_next(request)
+        resp = await call_next(request)
+        if path.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
     return JSONResponse({"detail": "Yêu cầu đăng nhập — nhập mã PIN để tiếp tục",
                          "code": "pin_required"}, status_code=401)
 
@@ -412,10 +424,40 @@ def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def index():
+    # MPA: mỗi feature 1 trang — / redirect về trang Điều phối chính
+    return RedirectResponse("/todos", status_code=307)
+
+
+def _page(fname: str):
     return FileResponse(
-        Path(__file__).parents[2] / "frontend" / "index.html",
+        FRONTEND_DIR / fname,
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
+
+
+@app.api_route("/todos", methods=["GET", "HEAD"])
+def todos_page():
+    return _page("todos.html")
+
+
+@app.api_route("/shorts", methods=["GET", "HEAD"])
+def shorts_page():
+    return _page("shorts.html")
+
+
+@app.api_route("/youtube", methods=["GET", "HEAD"])
+def youtube_page():
+    return _page("youtube.html")
+
+
+@app.api_route("/publish", methods=["GET", "HEAD"])
+def publish_page():
+    return _page("publish.html")
+
+
+@app.api_route("/chat", methods=["GET", "HEAD"])
+def chat_page():
+    return _page("chat.html")
 
 
 @app.api_route("/library", methods=["GET", "HEAD"])
