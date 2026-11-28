@@ -121,7 +121,7 @@ class ShortService:
              script.get("source_note") or source_note, source_link or None,
              target_seconds, 0.0, int(script.get("word_count") or 0), None, t, t),
         )
-        self._sync_scenes(short_id, script, lang=lang)
+        self._sync_scenes(short_id, script, lang=lang, mode=mode)
         self._transition(short_id, domain.ShortStatus.SCRIPTED.value,
                          reason="kịch bản đã tạo")  # draft → scripted (assert DRAFT→SCRIPTED)
         self._event(short_id, "short.created", actor,
@@ -130,8 +130,9 @@ class ShortService:
         return self.get(short_id)
 
     # ------------------------------------------------------------------ scenes
-    def _sync_scenes(self, short_id: str, script: dict, lang: str = "vi") -> None:
-        """Scene = 1 cue thoại; image_prompt phong cách Vector/Crayon dọc 9:16."""
+    def _sync_scenes(self, short_id: str, script: dict, lang: str = "vi",
+                     mode: str = "news") -> None:
+        """Scene = 1 cue thoại; image_prompt theo style của mode (news/cinematic)."""
         texts = prompts.narration_texts(script)
         max_scenes = int(SHORT_CONFIG["limits"]["max_scenes"])
         if len(texts) > max_scenes:
@@ -144,7 +145,7 @@ class ShortService:
                 "end_sec, image_prompt, created_at, updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (new_id("ssc"), short_id, i, text, 0.0, 0.0,
-                 _image_prompt_for(short_id, i, text, lang), t, t),
+                 _image_prompt_for(short_id, i, text, lang, mode), t, t),
             )
 
     # ------------------------------------------------------------------ read
@@ -225,7 +226,7 @@ class ShortService:
              (patch.get("title") or validated["title"]).strip()[:200],
              int(validated.get("word_count") or 0), now(), short_id),
         )
-        self._sync_scenes(short_id, validated, lang=lang)
+        self._sync_scenes(short_id, validated, lang=lang, mode=mode)
         if row["status"] == domain.ShortStatus.FAILED.value:
             self._transition(short_id, domain.ShortStatus.SCRIPTED.value)  # failed → scripted
         self._event(short_id, "short.script_updated", actor,
@@ -270,7 +271,7 @@ class ShortService:
                 "INSERT INTO short_scenes (id, short_id, seq_num, text, start_sec, end_sec, "
                 "image_prompt, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (new_id("ssc"), short_id, i, text, float(span["start"]), float(span["end"]),
-                 _image_prompt_for(short_id, i, text, lang), t, t),
+                 _image_prompt_for(short_id, i, text, lang, mode), t, t),
             )
         scenes = self.store.query(
             "SELECT * FROM short_scenes WHERE short_id=? ORDER BY seq_num", (short_id,))
@@ -579,11 +580,7 @@ class ShortService:
             for sc in scenes
         ]
         out_dir = objects / "exports"
-        presets = SHORT_CONFIG.get("render_presets") or {}
-        if mode == "daily_digest":
-            preset = "daily_digest"
-        else:
-            preset = presets.get("en_default", "split_news_60") if lang == "en" else presets.get("vi_default", "viral_redpill")
+        preset = _render_preset(mode, lang)
         overlay_spec: dict[str, Any] = {
             "preset": preset,
             "hook_headline": str(script.get("title") or row.get("title") or "").strip(),
@@ -716,6 +713,7 @@ class ShortService:
         clips = self.store.query(
             "SELECT * FROM short_clips WHERE short_id=? ORDER BY seq_num", (short_id,))
         lang = row.get("lang") or "vi"
+        style = "cinematic" if row["mode"] == "cinematic" else "news"
         kw_en_list = list(script.get("search_keywords_en") or [])
         headline_hint = str(script.get("title") or row.get("title") or "").strip()
         scene_rows = []
@@ -727,6 +725,7 @@ class ShortService:
             detailed_prompt = skill_bundle_short.build_detailed_shot_prompt(
                 shot_type, seq, sc["text"], dur_s,
                 lang=lang, headline_hint=headline_hint, stock_keywords=kw,
+                style=style,
             )
             scene_rows.append({
                 "seq": seq,
@@ -739,6 +738,7 @@ class ShortService:
                 "sub_shots": skill_bundle_short.slice_sub_shots(
                     seq, sc["text"], float(sc["start_sec"]), float(sc["end_sec"]),
                     lang=lang, headline_hint=headline_hint, stock_keywords=kw,
+                    style=style,
                 ),
                 "agent_checked": bool(sc["agent_checked"]),
                 "generated_duration_sec": float(sc["generated_duration_sec"] or 0.0),
@@ -761,7 +761,7 @@ class ShortService:
             "lang": row.get("lang") or "vi",
             "title": row["title"],
             "status": row["status"],
-            "template": skill_bundle_short.get_short_skill_summary(),
+            "template": skill_bundle_short.get_short_skill_summary(style=style),
             "script": script,
             "scenes": scene_rows,
             "clips": clip_rows,
@@ -1039,8 +1039,7 @@ class ShortService:
                            check=True, timeout=300)
             # 3) Mix voice + BGM theo mood + Impact/Whoosh SFX
             mixed = tmp / "mixed.wav"
-            presets = SHORT_CONFIG.get("render_presets") or {}
-            preset = presets.get("en_default", "split_news_60") if lang == "en" else presets.get("vi_default", "viral_redpill")
+            preset = _render_preset(row["mode"], lang)
             mood = "energetic" if (lang == "en" or row["mode"] == "decode") else "ominous"
             whoosh_times = ([float(scenes[0]["end_sec"]), max(0.4, float(scenes[-1]["start_sec"]) - 0.1)]
                             if len(scenes) >= 2 else [])
@@ -1336,10 +1335,33 @@ class ShortService:
 
 
 # --------------------------------------------------------------------- helpers
-def _image_prompt_for(short_id: str, seq: int, text: str, lang: str = "vi") -> str:
+def _render_preset(mode: str, lang: str) -> str:
+    """Preset overlay theo mode — cinematic dùng karaoke-only (không badge/headline)."""
+    presets = SHORT_CONFIG.get("render_presets") or {}
+    if mode == "cinematic":
+        return presets.get("cinematic", "clean_karaoke")
+    if mode == "daily_digest":
+        return "daily_digest"
+    return (presets.get("en_default", "split_news_60") if lang == "en"
+            else presets.get("vi_default", "viral_redpill"))
+
+
+def _image_prompt_for(short_id: str, seq: int, text: str, lang: str = "vi",
+                      mode: str = "news") -> str:
     """Prompt fallback khi không có ảnh gốc/bank (G.11: KHÔNG dùng style crayon
-    của bên video dài — phong cách tin tức trung tính)."""
+    của bên video dài — news: phong cách tin tức trung tính; cinematic: editorial
+    điện ảnh kể chuyện)."""
     snippet = text.strip()[:140].replace("\n", " ")
+    if mode == "cinematic":
+        base = (
+            "Cinematic editorial visual for a vertical storytelling short, film-like "
+            "grade, shallow depth of field, volumetric light, muted palette with one "
+            "focal accent colour, natural atmosphere, no text in image, no watermark, "
+            "no logo. "
+        )
+        if lang == "en":
+            return base + "Scene: " + snippet
+        return base + "Ý cảnh: " + snippet
     base = (
         "Professional news editorial visual, photojournalistic or clean modern "
         "flat illustration, muted realistic palette, suitable for a business "

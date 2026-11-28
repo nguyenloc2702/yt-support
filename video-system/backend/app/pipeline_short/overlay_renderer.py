@@ -8,6 +8,8 @@ Hỗ trợ 2 preset chuẩn retention:
 - `split_news_60` (mặc định EN): Split-screen 50/50 hook (headline Cyan/Trắng +
   badge giữa IN 30 SECONDS + badge tròn kênh), floating callout pill, karaoke gọn
   trong safe-zone + source_note pill.
+- `clean_karaoke` (mode cinematic): CHỈ karaoke theo word trong safe-zone — không
+  badge, không headline, không source pill. Preset lạ vẫn rơi về hành vi cũ.
 """
 from __future__ import annotations
 
@@ -127,6 +129,38 @@ def _draw_source_pill(d, text: str, f_badge) -> None:
     d.text((98, 104), txt, font=f_badge, fill=(245, 247, 250, 255))
 
 
+def _draw_vi_karaoke(d, chunk: list[dict] | None, active_idx: int, f_kara) -> None:
+    """Vẽ khối karaoke 2 dòng ALL-CAPS trong safe-zone (dùng chung cho preset VI)."""
+    if not chunk:
+        return
+    tokens = [str(w["text"]).upper() for w in chunk]
+    mid = max(1, (len(tokens) + 1) // 2) if len(tokens) > 2 else len(tokens)
+    rows = [(tokens[:mid], 0), (tokens[mid:], mid)] if mid < len(tokens) else [(tokens, 0)]
+    safe_center_x = 498
+    base_y = 1295 if len(rows) == 2 else 1350
+    for r_idx, (row_toks, offset) in enumerate(rows):
+        widths = [d.textbbox((0, 0), t, font=f_kara)[2] - d.textbbox((0, 0), t, font=f_kara)[0] for t in row_toks]
+        gap = 22
+        total_w = sum(widths) + gap * max(0, len(row_toks) - 1)
+        cx = max(64, safe_center_x - total_w // 2)
+        cy = base_y + r_idx * 78
+        for ti, tok in enumerate(row_toks):
+            g_idx = offset + ti
+            tw = widths[ti]
+            if g_idx == active_idx:
+                is_num = is_numeric_word(tok)
+                pill_col = (255, 184, 0, 255) if is_num else (229, 9, 20, 255)
+                txt_col = (12, 12, 16, 255) if is_num else (255, 255, 255, 255)
+                d.rounded_rectangle([cx - 14, cy - 8, cx + tw + 16, cy + 62], radius=14, fill=pill_col)
+                if is_num:
+                    d.text((cx, cy), tok, font=f_kara, fill=txt_col)
+                else:
+                    _draw_stroked_text(d, (cx, cy), tok, f_kara, txt_col, (0, 0, 0, 220), stroke_w=3)
+            else:
+                _draw_stroked_text(d, (cx, cy), tok, f_kara, (255, 255, 255, 255), (0, 0, 0, 255), stroke_w=5)
+            cx += tw + gap
+
+
 def _make_vi_frame(chunk: list[dict] | None, active_idx: int, show_hook: bool,
                    hook_headline: str, source_note: str, badge_label: str = "TIN NÓNG QUỐC TẾ"):
     from PIL import Image, ImageDraw, ImageFont
@@ -160,32 +194,21 @@ def _make_vi_frame(chunk: list[dict] | None, active_idx: int, show_hook: bool,
         return img
 
     if chunk:
-        tokens = [str(w["text"]).upper() for w in chunk]
-        mid = max(1, (len(tokens) + 1) // 2) if len(tokens) > 2 else len(tokens)
-        rows = [(tokens[:mid], 0), (tokens[mid:], mid)] if mid < len(tokens) else [(tokens, 0)]
-        safe_center_x = 498
-        base_y = 1295 if len(rows) == 2 else 1350
-        for r_idx, (row_toks, offset) in enumerate(rows):
-            widths = [d.textbbox((0, 0), t, font=f_kara)[2] - d.textbbox((0, 0), t, font=f_kara)[0] for t in row_toks]
-            gap = 22
-            total_w = sum(widths) + gap * max(0, len(row_toks) - 1)
-            cx = max(64, safe_center_x - total_w // 2)
-            cy = base_y + r_idx * 78
-            for ti, tok in enumerate(row_toks):
-                g_idx = offset + ti
-                tw = widths[ti]
-                if g_idx == active_idx:
-                    is_num = is_numeric_word(tok)
-                    pill_col = (255, 184, 0, 255) if is_num else (229, 9, 20, 255)
-                    txt_col = (12, 12, 16, 255) if is_num else (255, 255, 255, 255)
-                    d.rounded_rectangle([cx - 14, cy - 8, cx + tw + 16, cy + 62], radius=14, fill=pill_col)
-                    if is_num:
-                        d.text((cx, cy), tok, font=f_kara, fill=txt_col)
-                    else:
-                        _draw_stroked_text(d, (cx, cy), tok, f_kara, txt_col, (0, 0, 0, 220), stroke_w=3)
-                else:
-                    _draw_stroked_text(d, (cx, cy), tok, f_kara, (255, 255, 255, 255), (0, 0, 0, 255), stroke_w=5)
-                cx += tw + gap
+        _draw_vi_karaoke(d, chunk, active_idx, f_kara)
+    return img
+
+
+def _make_clean_karaoke_frame(chunk: list[dict] | None, active_idx: int):
+    """Preset `clean_karaoke` (mode cinematic): CHỈ vẽ karaoke theo word — không
+    badge "TIN NÓNG QUỐC TẾ", không headline split-screen, không source pill."""
+    from PIL import Image, ImageDraw, ImageFont
+    _bold_p, bi_p, _ui_p = _fonts_available()
+    f_kara = ImageFont.truetype(bi_p, 56)
+
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    if chunk:
+        d = ImageDraw.Draw(img)
+        _draw_vi_karaoke(d, chunk, active_idx, f_kara)
     return img
 
 
@@ -500,6 +523,8 @@ def render_overlay_and_mux(
             while sc_ptr + 1 < len(digest_scenes) and t > float(digest_scenes[sc_ptr].get("end_sec") or duration):
                 sc_ptr += 1
             sc_or_hook = sc_ptr
+        elif preset == "clean_karaoke":
+            sc_or_hook = 0  # karaoke-only: không hook card, không badge, không headline
         else:
             sc_or_hook = 1 if t < hook_end_sec else 0
         frame_states.append((sc_or_hook, cur_ci, cur_wi))
@@ -519,6 +544,8 @@ def render_overlay_and_mux(
         cur_chunk = chunks[cur_ci] if 0 <= cur_ci < len(chunks) else None
         if preset == "daily_digest" and digest_bases:
             img = _draw_digest_subtitles(digest_bases[sc_or_hook], cur_chunk, cur_wi)
+        elif preset == "clean_karaoke":
+            img = _make_clean_karaoke_frame(cur_chunk, cur_wi)
         elif preset == "split_news_60":
             img = _make_en_frame(cur_chunk, cur_wi, bool(sc_or_hook), hook_headline, source_note, duration)
         else:

@@ -2911,6 +2911,10 @@ summary:focus-visible {
   padding: 8px 10px;
   justify-content: flex-start;
   text-align: left;
+  /* 5 mode: hint dài phải xuống dòng trong ô, không tràn sang cột bên cạnh */
+  align-items: flex-start;
+  height: auto;
+  white-space: normal;
 }
 
 .short-mode-tab small {
@@ -2919,6 +2923,9 @@ summary:focus-visible {
   font-size: 11px;
   color: var(--fg-muted);
   margin-top: 2px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .short-mode-tab.active {

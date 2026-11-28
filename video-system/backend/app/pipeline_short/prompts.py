@@ -11,7 +11,7 @@ import re
 
 from ..config import SHORT_CONFIG
 
-MODES = ("news", "decode", "daily_digest", "trailer")
+MODES = ("news", "decode", "daily_digest", "trailer", "cinematic")
 LANGS = ("vi", "en")
 
 _MODE_NAME_VI = {
@@ -19,12 +19,14 @@ _MODE_NAME_VI = {
     "decode": "Giải mã tiền bạc",
     "daily_digest": "Điểm tin nhanh",
     "trailer": "Trailer video dài",
+    "cinematic": "Kể chuyện điện ảnh",
 }
 _MODE_NAME_EN = {
     "news": "Breaking News",
     "decode": "Money Decode",
     "daily_digest": "Daily World Brief",
     "trailer": "Long-Video Trailer",
+    "cinematic": "Cinematic Story",
 }
 
 # Chủ đề né cho mảng Tin nóng (bắt buộc theo G.1 — an toàn nền tảng)
@@ -159,6 +161,46 @@ Return JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "c
 "hashtags": {{"tiktok": [...max 6...], "facebook": [...max 6...], "youtube": [...max 5...]}},
 "description": "1-2 sentence post description linking to the full video", "source_note": ""}}"""
 
+# Cinematic (Kể chuyện điện ảnh): short kể chuyện, KHÔNG đưa tin — hook mở cảnh,
+# beat diễn tiến, closing kết. Style lock lấy từ video dài (skill_bundle_short).
+_SYSTEM_CINEMATIC = """Bạn là người kể chuyện cho kênh short dọc (TikTok/Reels/Shorts) về thế giới, tiền bạc và con người — dạng KỂ CHUYỆN ĐIỆN ẢNH, KHÔNG phải bản tin.
+
+NHIỆM VỤ: từ chủ đề/tư liệu người dùng dán vào, viết kịch bản 40-50 giây bằng tiếng Việt theo một mạch kể liền:
+1. hook (0-3s): MỞ CẢNH — một hình ảnh, một khoảnh khắc, một chi tiết cụ thể kéo người xem vào câu chuyện. KHÔNG giật tít, KHÔNG mở bằng "Theo thông tin...", KHÔNG đọc số liệu tổng hợp.
+2. beats (3-4 beat): diễn tiến câu chuyện theo trình tự thời gian hoặc nhân quả — mỗi beat là một bước tiến của cùng một mạch, không liệt kê tin rời rạc.
+3. closing: KẾT câu chuyện bằng một hình ảnh hoặc một câu lắng lại. KHÔNG dùng câu hỏi kích bình luận.
+
+QUY TẮC:
+- Ngôn ngữ: tiếng Việt kể chuyện, câu có nhịp và giàu hình ảnh, nói được thành tiếng; giữ nguyên tên riêng/địa danh.
+- Chỉ dùng dữ kiện có trong nguồn; KHÔNG bịa số liệu hay tình tiết.
+- {banned_topics}
+- Nếu nguồn rơi vào nhóm bị cấm, từ chối bằng trường "rejected".
+- Kèm `search_keywords_en`: mảng gồm 5 cụm từ tiếng Anh ngắn (2-3 từ mỗi cụm, mô tả bối cảnh/vật thể cụ thể của từng cảnh theo thứ tự [hook, beat1, beat2, beat3, closing]) để tìm video b-roll quốc tế.
+
+Trả JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
+"search_keywords_en": ["foggy harbor dawn", "old paper sea chart", "..."],
+"hashtags": {{"tiktok": [...tối đa 6...], "facebook": [...tối đa 6...], "youtube": [...tối đa 5...]}},
+"description": "1-2 câu mô tả đăng bài", "source_note": "Nguồn: <tên nguồn>"}}"""
+
+_SYSTEM_CINEMATIC_EN = """You are a storyteller for a vertical short channel (TikTok/Reels/Shorts) about the world, money and people — CINEMATIC STORYTELLING, NOT a news bulletin.
+
+TASK: from the topic/material the user pastes in, write a 40-50 second English script on one continuous narrative thread:
+1. hook (0-3s): OPEN THE SCENE — one image, one moment, one concrete detail that pulls the viewer in. NEVER a shock headline, NEVER "According to reports...", NEVER a recap of aggregate figures.
+2. beats (3-4 beats): the story advancing in time or cause-and-effect order — each beat is the next step of the SAME thread, not a list of separate news items.
+3. closing: END the story on an image or a quiet line. NEVER a comment-bait question.
+
+RULES:
+- Language: natural spoken English, rhythmic and vivid, written to be read aloud. Keep proper nouns and place names as-is.
+- Use ONLY facts present in the source; NEVER invent figures or events.
+- {banned_topics}
+- If the source falls into these groups, refuse via the "rejected" field.
+- Provide `search_keywords_en`: 5 short English phrases (2-3 words each) describing the concrete setting/objects of each scene in order [hook, beat1, beat2, beat3, closing] for international b-roll search.
+
+Return JSON: {{"title": "...", "hook": "...", "beats": ["...", "...", "..."], "closing": "...",
+"search_keywords_en": ["foggy harbor dawn", "old paper sea chart", "..."],
+"hashtags": {{"tiktok": [...max 6...], "facebook": [...max 6...], "youtube": [...max 5...]}},
+"description": "1-2 sentence post description", "source_note": "Source: <source name>"}}"""
+
 _JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -209,6 +251,10 @@ def system_prompt(mode: str, lang: str = "vi") -> str:
         if lang != "en":
             raise ValueError('mode "trailer" hiện chỉ hỗ trợ lang="en" (video dài là EN explainer).')
         return _SYSTEM_TRAILER_EN
+    if mode == "cinematic":
+        if lang == "en":
+            return _SYSTEM_CINEMATIC_EN.replace("{banned_topics}", _BANNED_TOPIC_NOTE_EN)
+        return _SYSTEM_CINEMATIC.replace("{banned_topics}", _BANNED_TOPIC_NOTE)
     if lang == "en":
         if mode == "daily_digest":
             return _SYSTEM_DAILY_DIGEST_EN

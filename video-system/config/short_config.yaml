@@ -39,6 +39,15 @@ modes:
     fast_mode: true
     hero_images: 2              # AI-gen hook + 1 beat khi stock/bank không khớp chủ đề video dài
     voice: "en-US-BrianMultilingualNeural"  # đồng bộ giọng Creator EN của daily_digest
+  cinematic:
+    target_seconds: 45          # 30–60s kể chuyện (mục tiêu 45s)
+    min_words: 100              # VI 100–140 từ
+    max_words: 140
+    min_words_en: 85            # EN nói chậm hơn (~2.45 từ/s) → 85–120 từ
+    max_words_en: 120
+    images_per_scene: 1
+    fast_mode: true             # scene thường dùng bank, gen tối đa hero_images
+    hero_images: 2
 tts_vi:
   default_voice: "vi-VN-HoaiMyNeural"
   fallback_voice: "vi-VN-HoaiMyNeural"
@@ -54,6 +63,7 @@ tts_en:
 render_presets:
   vi_default: "viral_redpill"
   en_default: "split_news_60"
+  cinematic: "clean_karaoke"    # karaoke-only: không badge "TIN NÓNG", không headline
 master:
   loudness_lufs: -16
   true_peak_dbtp: -1.5

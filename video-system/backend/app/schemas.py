@@ -335,8 +335,8 @@ class ShotChecklistBatchUpdate(BaseModel):
 # --- Short Studio (Phụ lục G) ------------------------------------------------
 
 class ShortCreate(BaseModel):
-    mode: str = Field(pattern="^(news|decode|daily_digest|trailer)$",
-                      description="news = Tin nóng 25-40s; decode = Giải mã tiền bạc 40-60s; daily_digest = Điểm tin quốc tế 12-15 tin (<180s); trailer = Teaser video dài 30-45s (EN, CTA về video dài)")
+    mode: str = Field(pattern="^(news|decode|daily_digest|trailer|cinematic)$",
+                      description="news = Tin nóng 25-40s; decode = Giải mã tiền bạc 40-60s; daily_digest = Điểm tin quốc tế 12-15 tin (<180s); trailer = Teaser video dài 30-45s (EN, CTA về video dài); cinematic = Kể chuyện điện ảnh 30-60s (không đưa tin)")
     lang: str = Field(default="vi", pattern="^(vi|en)$",
                       description="vi = tiếng Việt; en = mảng quốc tế (voice + prompt EN)")
     source_text: str = Field(min_length=1, max_length=14000,

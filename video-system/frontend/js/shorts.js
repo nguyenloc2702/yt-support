@@ -313,14 +313,15 @@ const SHORT_MODE_META = {
   news: { label: 'Tin nóng', hint: '25–40s · 80–110 từ · hook giật gân → 3 beat → câu hỏi mở', target: 32 },
   decode: { label: 'Giải mã tiền bạc', hint: '40–60s · 110–160 từ · nghịch lý → cơ chế → chốt loop', target: 48 },
   daily_digest: { label: 'Daily World Brief (EN)', hint: '140–170s · 250–430 từ · 12–15 tin quốc tế (<180s Shorts)', target: 155 },
-  trailer: { label: 'Trailer video dài (EN)', hint: '30–45s · 70–105 từ EN · hook định vị → 2-3 beat tease (không spoil) → CTA về video dài', target: 38 }
+  trailer: { label: 'Trailer video dài (EN)', hint: '30–45s · 70–105 từ EN · hook định vị → 2-3 beat tease (không spoil) → CTA về video dài', target: 38 },
+  cinematic: { label: 'Kể chuyện điện ảnh', hint: '30–60s · 100–140 từ · kể chuyện, không badge tin tức', target: 45 }
 };
 const SHORT_STATUS_PILL = {
   draft: 'pill-ghost', scripted: 'pill-ready', queued: 'pill-warn',
   rendering: 'pill-warn', producing: 'pill-warn',
   ready: 'pill-assembled', failed: 'pill-failed', cancelled: 'pill-ghost'
 };
-const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc', daily_digest: 'Daily World Brief', trailer: 'Trailer video dài' };
+const SHORT_MODE_NAMES = { news: 'Tin nóng', decode: 'Giải mã tiền bạc', daily_digest: 'Daily World Brief', trailer: 'Trailer video dài', cinematic: 'Kể chuyện điện ảnh' };
 
 function goShortStudioPage() {
   setActiveNav('shorts');

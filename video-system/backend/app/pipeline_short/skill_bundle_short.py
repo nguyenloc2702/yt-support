@@ -50,6 +50,47 @@ black bars — fill 1080x1920 completely.
 
 STYLE_NEWS_916 = STYLE_GLOBAL_HYBRID_916
 
+# Adapt STYLE_LOCK_V2 (video dài, 16:9) sang short dọc: bỏ yêu cầu 16:9, thêm
+# safe-zone karaoke đáy 25% + lề phải 130px cho UI TikTok. Hai lane visual:
+# `editorial` (illustration cinematic như video dài) và `live_action` (footage thật).
+STYLE_CINEMATIC_916 = """STYLE LOCKED — CINEMATIC EDITORIAL 9:16 (Storytelling, not news)
+
+OUTPUT: 1 vertical clip per shot, MP4 h264, 1080x1920 @30fps, yuv420p,
+duration EXACTLY matching the shot audio window (duration_sec ±0.25s).
+
+VISUAL IDENTITY (pick ONE lane per shot, keep lighting cohesive):
+- Lane `editorial` (illustrated storytelling): hybrid cinematic editorial
+  illustration — ultra-detailed semi-realistic cinema-grade environment with
+  dramatic volumetric lighting, realistic textures (wet steel, ocean swells,
+  brushed metal, glowing glass), shallow depth of field and rich mood lighting.
+  Characters stay clean minimalist 2D figures with ONLY 2-3 signature
+  recognizable traits (distinctive hairstyle, jacket/suit colour, glasses),
+  ambient rim-light on hair/edges and a soft grounded shadow so they feel
+  inside the world (never flat pasted stickers).
+- Lane `live_action` (real footage): cinematic live-action frames, natural
+  practical light, film-like grade, one focal subject per shot.
+
+FRAMING (9:16 1080x1920):
+- Foreground: soft out-of-focus element framing the subject.
+- Midground: the single hero subject — clear silhouette, readable on a phone
+  screen in <0.5s.
+- Background: atmospheric depth, haze and volumetric light shafts.
+- ONE accent colour per shot (crimson red, glowing amber or electric cyan)
+  anchoring the viewer's eye against the muted cinematic palette.
+
+SAFE-ZONE LAW (CRITICAL):
+- Bottom 25% (y=1440..1920) MUST stay clean and darker-toned — the system burns
+  word-by-word karaoke captions there.
+- Right 130px margin (x=950..1080) MUST stay clear — TikTok UI icons sit there.
+
+MOTION: ONE slow continuous cinematic camera movement per shot (slow push-in,
+gentle orbital pan, or tilt). No cuts inside a shot, no handheld shake.
+
+NEGATIVE (hard bans): NO baked subtitles or captions, NO on-screen data panels
+or map overlays, NO garbled AI text, NO watermarks, NO stock logos, NO distorted
+AI faces/hands, NO letterboxing or black bars — fill 1080x1920 completely.
+"""
+
 SHORT_SHOT_TYPES = {
     "hook": {
         "when_to_use": "Scene 1 — the shock opener",
@@ -95,6 +136,22 @@ GOLDEN_RULES = [
 
 _GUIDE_RELPATH = "AGENT_SHORT_GUIDE.md"
 
+# Storytelling roles (mode `cinematic`) — không dùng focal/motion kiểu tin nóng.
+_CINEMATIC_SHOT_ROLES = {
+    "hook": (
+        "the opening image that establishes place, mood and hero subject",
+        "slow push-in from wide to medium on the hero subject",
+    ),
+    "beat": (
+        "the concrete action or object that advances the story",
+        "gentle orbital pan or slow lateral track following the subject",
+    ),
+    "closing": (
+        "the final image that lets the story land",
+        "slow pull-back or tilt-up, settle and hold",
+    ),
+}
+
 
 def _has_numeric_metric(text: str) -> bool:
     import re
@@ -110,8 +167,16 @@ def build_detailed_shot_prompt(
     lang: str = "vi",
     headline_hint: str = "",
     stock_keywords: str = "",
+    style: str = "news",
 ) -> str:
-    """Sinh prompt dài, chi tiết chuẩn 9:16 (Audio-First) cho 1 shot AI video."""
+    """Sinh prompt dài, chi tiết chuẩn 9:16 (Audio-First) cho 1 shot AI video.
+
+    `style="news"` (mặc định) giữ NGUYÊN output cũ cho 4 mode tin tức;
+    `style="cinematic"` thay HUD/3-layer tactical bằng composition cinematic.
+    """
+    if style == "cinematic":
+        return _build_cinematic_shot_prompt(
+            shot_type, seq, narration, duration_sec, lang, headline_hint, stock_keywords)
     role = SHORT_SHOT_TYPES.get(shot_type, SHORT_SHOT_TYPES["beat"])
     is_data = _has_numeric_metric(narration)
     render_hint = (
@@ -137,9 +202,37 @@ def build_detailed_shot_prompt(
     )
 
 
+def _build_cinematic_shot_prompt(
+    shot_type: str,
+    seq: int,
+    narration: str,
+    duration_sec: float,
+    lang: str,
+    headline_hint: str,
+    stock_keywords: str,
+) -> str:
+    """Prompt 1 shot kể chuyện: composition cinematic thay cho HUD/tactical 3 lớp."""
+    focal, motion = _CINEMATIC_SHOT_ROLES.get(
+        shot_type, _CINEMATIC_SHOT_ROLES["beat"])
+    return (
+        f"[SHOT #{seq:02d} | TYPE: {shot_type.upper()} | DURATION: {duration_sec:.2f}s | LANG: {lang.upper()}]\n"
+        f"RENDER MODE: AI Video / Keyframe-to-Video (cinematic editorial illustration or live-action footage).\n"
+        f"NARRATION BEAT: \"{narration.strip()}\"\n"
+        f"VISUAL KEYWORDS: {stock_keywords or 'cinematic atmosphere, quiet human moment'}\n"
+        f"STORY CONTEXT: {headline_hint.strip()}\n"
+        f"FOCAL POINT: {focal}\n"
+        f"CAMERA & CONTINUOUS MOTION: {motion} — ONE slow move across the whole shot, no cuts.\n"
+        f"CINEMATIC COMPOSITION (9:16 1080x1920): Foreground out-of-focus framing element; "
+        f"Midground single hero subject in the upper-middle band (y=280..1180) with shallow "
+        f"depth of field; Background atmospheric depth, haze and volumetric light shafts.\n"
+        f"SAFE-ZONE: Keep bottom 25% (y=1440..1920) & right 130px clear for word karaoke & TikTok UI.\n\n"
+        f"{STYLE_CINEMATIC_916.strip()}"
+    )
+
+
 def slice_sub_shots(seq_num: int, narration: str, start_sec: float, end_sec: float,
                     lang: str, headline_hint: str, stock_keywords: str,
-                    max_sub_dur: float = 3.5) -> list[dict]:
+                    max_sub_dur: float = 3.5, style: str = "news") -> list[dict]:
     """Chẻ 1 scene dài thành các sub-shot 2.5-3.5s để AI gen chuyển động mượt hơn."""
     dur = max(0.5, float(end_sec) - float(start_sec))
     n_parts = 2 if dur > max_sub_dur else 1
@@ -158,16 +251,19 @@ def slice_sub_shots(seq_num: int, narration: str, start_sec: float, end_sec: flo
             "visual_prompt": build_detailed_shot_prompt(
                 shot_type, seq_num, narration, round(e - s, 3),
                 lang=lang, headline_hint=headline_hint, stock_keywords=stock_keywords,
+                style=style,
             ),
         })
     return parts
 
 
-def get_short_skill_summary() -> dict:
+def get_short_skill_summary(style: str = "news") -> dict:
+    cinematic = style == "cinematic"
     return {
-        "skill_name": f"{SKILL_NAME} (VI + EN international)",
+        "skill_name": (f"{SKILL_NAME}-cinematic (VI + EN storytelling)" if cinematic
+                       else f"{SKILL_NAME} (VI + EN international)"),
         "version": SKILL_VERSION,
-        "style_lock": STYLE_GLOBAL_HYBRID_916,
+        "style_lock": STYLE_CINEMATIC_916 if cinematic else STYLE_GLOBAL_HYBRID_916,
         "shot_types": SHORT_SHOT_TYPES,
         "golden_rules": GOLDEN_RULES,
         "agent_guide_url": "/api/v1/short-agent-guide",
