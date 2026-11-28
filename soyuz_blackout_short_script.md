@@ -49,7 +49,7 @@ tạo job trên prod** — cập nhật lại sau mỗi lần đổi script ho�
 | **07** | `1:42.5 – 1:56.9` | `LANDING` | Six Engines Fire At The Final Meter | *"That reveals six solid-fuel engines... cushions the touchdown."* |
 | **08** | `1:56.9 – 2:16.4` | `RECOVERY` | Zero-G Aftermath & Steppe Rescue | *"Even after landing... seat back to Earth?"* |
 
-**Tổng: 136.38s (2:16)** — short prod `sho_296b62342df5`, status `queued`.
+**Tổng: 136.38s (2:16)** — short prod `sho_e82b0996baa8`, status `queued`, 8 prompt override.
 
 ---
 
