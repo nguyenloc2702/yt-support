@@ -2864,14 +2864,14 @@ def youtube_auth_start(request: Request = None):
 def youtube_auth_callback(code: str = "", state: str = "", error: str = ""):
     import urllib.parse as _up
     if error:
-        return RedirectResponse(f"/#/youtube?yt=error&reason={_up.quote(error)}", status_code=302)
+        return RedirectResponse(f"/youtube#/youtube?yt=error&reason={_up.quote(error)}", status_code=302)
     if not code or not state:
-        return RedirectResponse("/#/youtube?yt=error&reason=missing_code_or_state", status_code=302)
+        return RedirectResponse("/youtube#/youtube?yt=error&reason=missing_code_or_state", status_code=302)
     try:
         youtube.handle_callback(code, state)
-        return RedirectResponse("/#/youtube?yt=connected", status_code=302)
+        return RedirectResponse("/youtube#/youtube?yt=connected", status_code=302)
     except YouTubeError as exc:
-        return RedirectResponse(f"/#/youtube?yt=error&reason={_up.quote(exc.message)}", status_code=302)
+        return RedirectResponse(f"/youtube#/youtube?yt=error&reason={_up.quote(exc.message)}", status_code=302)
 
 
 @app.get("/api/v1/youtube/channel")
@@ -3024,14 +3024,14 @@ def instagram_auth_start(request: Request = None):
 def instagram_auth_callback(code: str = "", state: str = "", error: str = ""):
     import urllib.parse as _up
     if error:
-        return RedirectResponse(f"/#/publish?ig=error&reason={_up.quote(error)}", status_code=302)
+        return RedirectResponse(f"/publish#/publish?ig=error&reason={_up.quote(error)}", status_code=302)
     if not code or not state:
-        return RedirectResponse("/#/publish?ig=error&reason=missing_code_or_state", status_code=302)
+        return RedirectResponse("/publish#/publish?ig=error&reason=missing_code_or_state", status_code=302)
     try:
         instagram.handle_callback(code, state)
-        return RedirectResponse("/#/publish?ig=connected", status_code=302)
+        return RedirectResponse("/publish#/publish?ig=connected", status_code=302)
     except InstagramError as exc:
-        return RedirectResponse(f"/#/publish?ig=error&reason={_up.quote(exc.message)}", status_code=302)
+        return RedirectResponse(f"/publish#/publish?ig=error&reason={_up.quote(exc.message)}", status_code=302)
 
 
 @app.delete("/api/v1/instagram/account")

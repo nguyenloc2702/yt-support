@@ -171,11 +171,13 @@ def _shot(client, hdrs, job_id, index=1):
 
 
 def _review(client, hdrs, job_id, index, video_hash, codes, *, pairing_ok=True,
-            regen_brief=None, key=None):
+            regen_brief=None, key=None, note=None):
     body = {"defect_codes": codes, "pairing_ok": pairing_ok,
             "reviewed_video_hash": video_hash, "frames_checked": [0, 12, 23]}
     if regen_brief is not None:
         body["regen_brief"] = regen_brief
+    if note is not None:
+        body["note"] = note
     headers = dict(hdrs)
     if key:
         headers["Idempotency-Key"] = key
@@ -653,3 +655,72 @@ def test_c7_manager_scope_sees_scores_but_is_not_admin(
                              headers=board_agents["muse-boss"], json={})
     assert admin_call.status_code == 403, (
         f"manager không được có quyền admin; got {admin_call.status_code}")
+
+
+# --------------------------------------------------------------------------
+# C-4 — chấm mù phải ẩn cả DANH TÍNH người chấm, không chỉ điểm
+# --------------------------------------------------------------------------
+def test_c4_blind_hides_reviewer_and_note(
+        client, upload_clip, board_agents, job):
+    """Chưa chấm version hiện tại → không biết ai đã chấm, chấm lúc nào, note gì.
+
+    Lỗ hổng cũ: chỉ `score`/`defect_codes` bị redact, còn `reviewer`/`note`
+    vẫn lộ. Reviewer thấy "ai chấm trước" là đủ để a dua hoặc né người khó
+    tính — mất tính độc lập. `verdict` vẫn phải còn (quyết định C-4: shot đỏ
+    ai cũng thấy, ẩn chỉ bắt UI thêm trạng thái).
+    """
+    up = upload_clip(actor="muse-2", shot_index=3)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 3)["video_hash"]
+
+    r = _review(client, board_agents["muse-3"], job, 3, vh, ["HELMET_BALL"],
+                note="góc máy hơi lệch nhưng tổng thể ổn")
+    assert r.status_code in (200, 201), r.text
+
+    blind = _shot(client, board_agents["muse-1"], job, 3)
+    assert blind["scores_summary"] is None
+    rv = blind["reviews"][0]
+    assert rv["reviewer"] is None, "không được lộ ai đã chấm"
+    assert rv["note"] is None, "note có thể gợi ý kết quả — phải ẩn"
+    assert rv["score"] is None
+    assert rv["defect_codes"] is None
+    assert rv["verdict"] == "pass", "verdict cố ý KHÔNG redact (C-4)"
+    assert rv["created_at"], "created_at giữ nguyên — không định danh được ai"
+    assert set(rv) >= {"reviewer", "note", "score", "defect_codes", "verdict",
+                       "created_at"}, "shape reviews[] phải giữ đủ key, chỉ null giá trị"
+
+
+def test_c4_reveal_after_own_review_shows_reviewer(
+        client, upload_clip, board_agents, job):
+    """Sau khi chính worker chấm version này → thấy reviewer của các lượt khác."""
+    up = upload_clip(actor="muse-2", shot_index=4)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 4)["video_hash"]
+
+    r1 = _review(client, board_agents["muse-3"], job, 4, vh, ["HELMET_BALL"])
+    assert r1.status_code in (200, 201), r1.text
+    r2 = _review(client, board_agents["muse-1"], job, 4, vh, [])
+    assert r2.status_code in (200, 201), r2.text
+
+    seen = _shot(client, board_agents["muse-1"], job, 4)
+    assert seen["scores_summary"]["count"] == 2
+    reviewers = [rv["reviewer"] for rv in seen["reviews"]]
+    assert None not in reviewers, "đã chấm rồi thì phải thấy danh tính"
+    assert "muse-3" in reviewers and "muse-1" in reviewers
+
+
+def test_c4_manager_always_sees_reviewer(
+        client, upload_clip, board_agents, job):
+    """manager (privileged) thấy reviewer/note kể cả khi chưa chấm."""
+    up = upload_clip(actor="muse-2", shot_index=1)
+    assert up.status_code == 201, up.text
+    vh = _shot(client, board_agents["muse-2"], job, 1)["video_hash"]
+
+    r = _review(client, board_agents["muse-3"], job, 1, vh, ["HELMET_BALL"],
+                note="bóng bay vào khung ở frame 12")
+    assert r.status_code in (200, 201), r.text
+
+    seen = _shot(client, board_agents["muse-boss"], job, 1)
+    assert seen["reviews"][0]["reviewer"] == "muse-3"
+    assert seen["reviews"][0]["note"] == "bóng bay vào khung ở frame 12"
+    assert seen["scores_summary"]["count"] == 1

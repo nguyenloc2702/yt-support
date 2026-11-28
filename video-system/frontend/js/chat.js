@@ -37,9 +37,9 @@ function renderChatShell() {
         <span style="font-size:11px;color:var(--fg-muted)">Bạn nhắn với tư cách <b>owner</b> — đọc được mọi thread.</span>
       </div>
     </section>
-    <div style="display:flex;gap:12px;align-items:flex-start">
-      <section class="panel" id="chatThreadListPanel" style="width:320px;min-width:260px"></section>
-      <section class="panel" id="chatMsgPanel" style="flex:1"></section>
+    <div class="chat-layout">
+      <section class="panel chat-threads" id="chatThreadListPanel"></section>
+      <section class="panel chat-main" id="chatMsgPanel"></section>
     </div>`;
 }
 
@@ -59,11 +59,11 @@ function renderChatThreadList(threads) {
   if (!panel) return;
   const rows = threads.map(t => {
     const unread = chatUnreadCount(t);
-    return `<div onclick="openChatThread('${t.id}')" style="padding:10px;border-bottom:1px solid var(--border);cursor:pointer;${t.id===chatOpenThreadId?'background:var(--panel-hover,rgba(255,255,255,.04));':''}">
+    return `<div onclick="openChatThread('${t.id}')" style="padding:10px;border-bottom:1px solid var(--border);cursor:pointer;${t.id===chatOpenThreadId?'background:var(--surface-2, rgba(255,255,255,.05));':''}">
       <div style="font-weight:600;font-size:13px">${esc(t.title || '(không tiêu đề)')} ${t.status!=='open'?`<span style="color:var(--fg-muted);font-size:10px">[${t.status}]</span>`:''}</div>
       <div style="font-size:11px;color:var(--fg-muted)">${esc(t.created_by)} ↔ ${esc(t.participant_b || '(slot trống — ai nhắn trước chiếm)')} · ${t.last_message_seq || 0} tin</div>
       <div style="font-size:11px;color:var(--fg-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.last_body || '')}</div>
-      ${unread ? `<div style="color:#ef4444;font-size:11px">● ${unread} tin mới</div>` : ''}
+      ${unread ? `<div style="color:var(--held);font-size:11px">● ${unread} tin mới</div>` : ''}
     </div>`;
   }).join('');
   panel.innerHTML = `<div class="panel-header"><h3 class="panel-title">Threads (${threads.length})</h3></div>` +
@@ -104,7 +104,7 @@ async function refreshChatMessages(threadId, markRead) {
         const div = document.createElement('div');
         div.style.cssText = `margin:6px 0;text-align:${mine ? 'right' : 'left'}`;
         div.innerHTML = `<div style="font-size:10px;color:var(--fg-muted)">${esc(m.sender)} · ${new Date(m.created_at * 1000).toLocaleTimeString()}</div>
-          <div style="display:inline-block;max-width:78%;padding:8px 12px;border-radius:12px;font-size:13px;white-space:pre-wrap;background:${mine ? 'var(--accent, #2563eb)' : 'var(--panel, #1e293b)'};color:${mine ? '#fff' : 'inherit'}">${esc(m.body)}</div>`;
+          <div style="display:inline-block;max-width:78%;padding:8px 12px;border-radius:12px;font-size:13px;white-space:pre-wrap;background:${mine ? 'var(--accent, #2DD4BF)' : 'var(--surface, #0B1220)'};color:${mine ? 'var(--accent-ink, #062A28)' : 'inherit'}">${esc(m.body)}</div>`;
         box.appendChild(div);
       }
       box.scrollTop = box.scrollHeight;

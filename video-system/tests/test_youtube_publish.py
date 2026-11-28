@@ -100,10 +100,10 @@ def test_oauth_start_callback_and_replay_protection(client, read_key, yt_env, mo
     parsed = httpx.URL(auth_url)
     state = parsed.params["state"]
 
-    # Callback succeeds and redirects to /#/youtube?yt=connected
+    # Callback succeeds and redirects to the YouTube page with hash state
     r_cb = client.get(f"/api/v1/youtube/auth/callback?code=auth_code_xyz&state={state}", follow_redirects=False)
     assert r_cb.status_code == 302
-    assert r_cb.headers["location"] == "/#/youtube?yt=connected"
+    assert r_cb.headers["location"] == "/youtube#/youtube?yt=connected"
 
     # Replaying same state must fail with error redirect
     r_replay = client.get(f"/api/v1/youtube/auth/callback?code=auth_code_xyz&state={state}", follow_redirects=False)

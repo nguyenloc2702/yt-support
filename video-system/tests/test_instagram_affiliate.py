@@ -179,7 +179,7 @@ def test_oauth_start_callback_and_replay_protection(client, read_key, ig_env, mo
 
     r_cb = client.get(f"/api/v1/instagram/auth/callback?code=xyz&state={state}", follow_redirects=False)
     assert r_cb.status_code == 302
-    assert r_cb.headers["location"] == "/#/publish?ig=connected"
+    assert r_cb.headers["location"] == "/publish#/publish?ig=connected"
 
     r_replay = client.get(f"/api/v1/instagram/auth/callback?code=xyz&state={state}", follow_redirects=False)
     assert r_replay.status_code == 302

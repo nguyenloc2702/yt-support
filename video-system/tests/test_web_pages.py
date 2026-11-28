@@ -4,7 +4,11 @@ Chạy ungated (routes tĩnh không đụng board): `pytest tests/test_web_pages
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 
 
 @pytest.mark.parametrize("path", ["/todos", "/shorts", "/youtube", "/publish", "/chat"])
@@ -30,3 +34,26 @@ def test_page_scripts_have_no_store_cache(client):
     r = client.get("/static/js/core.js")
     assert r.status_code == 200
     assert r.headers.get("cache-control") == "no-store"
+
+
+def test_youtube_oauth_callback_redirects_to_youtube_page(client):
+    """OAuth callback phải về `/youtube#/youtube?...` — trước đây là `/#/youtube`
+    và sau MPA bị 307 sang /todos, mất toast + trạng thái kết nối."""
+    r = client.get("/api/v1/youtube/auth/callback", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/youtube#/youtube?yt=error")
+
+
+def test_instagram_oauth_callback_redirects_to_publish_page(client):
+    r = client.get("/api/v1/instagram/auth/callback", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/publish#/publish?ig=error")
+
+
+def test_frontend_monolith_index_archived():
+    """Monolith 10.5k dòng đã archive — không được quay lại frontend/."""
+    assert not (FRONTEND_DIR / "index.html").exists(), (
+        "frontend/index.html (monolith cũ) không còn được serve; "
+        "giữ bản backup ở _archive/, không đặt lại trong frontend/"
+    )
+

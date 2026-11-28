@@ -72,8 +72,8 @@ function renderPublishDashboard() {
   let igCard = '';
   if (!st.configured) {
     igCard = `
-      <div style="padding:14px;border-radius:10px;border:1px dashed var(--warn);background:rgba(255,193,7,.08)">
-        <div style="font-weight:700;margin-bottom:6px">⚙️ Chưa cấu hình Instagram OAuth trên máy chủ</div>
+      <div style="padding:14px;border-radius:10px;border:1px dashed rgba(245,158,11,.35);background:var(--run-soft)">
+        <div style="font-weight:700;margin-bottom:6px;color:var(--run)">⚙️ Chưa cấu hình Instagram OAuth trên máy chủ</div>
         <div style="font-size:12px;color:var(--fg-muted);line-height:1.6">
           Thêm <code>INSTAGRAM_APP_ID</code>, <code>INSTAGRAM_APP_SECRET</code>, <code>IG_TOKEN_ENCRYPTION_KEY</code> vào <code>.env</code>.<br>
           Redirect URI trên Meta App: <code>${esc(st.redirect_uri || '')}</code>
@@ -247,7 +247,7 @@ async function openIgPublishModal(targetId, targetType = 'todo') {
   wrap.id = 'igModalOverlay';
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   wrap.innerHTML = `
-    <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:540px;width:100%;padding:18px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:540px;width:100%;padding:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h3 style="margin:0;font-size:16px">${targetType === 'short' ? '📲 Đăng Short lên Instagram Reels' : '📲 Đăng Video lên Instagram Reels'}</h3>
         <button type="button" class="btn-sm" onclick="document.getElementById('igModalOverlay')?.remove()">✖</button>
@@ -353,7 +353,7 @@ function openAffiliateProductModal() {
   wrap.id = 'affModalOverlay';
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   wrap.innerHTML = `
-    <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:500px;width:100%;padding:18px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:500px;width:100%;padding:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h3 style="margin:0;font-size:16px">➕ Thêm sản phẩm Affiliate</h3>
         <button type="button" class="btn-sm" onclick="document.getElementById('affModalOverlay')?.remove()">✖</button>

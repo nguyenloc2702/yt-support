@@ -70,8 +70,8 @@ function renderYoutubeDashboard() {
   let channelCard = '';
   if (!st.configured) {
     channelCard = `
-      <div style="padding:14px;border-radius:10px;border:1px dashed var(--warn);background:rgba(255,193,7,.08)">
-        <div style="font-weight:700;margin-bottom:6px">⚙️ Chưa cấu hình YouTube OAuth trên máy chủ</div>
+      <div style="padding:14px;border-radius:10px;border:1px dashed rgba(245,158,11,.35);background:var(--run-soft)">
+        <div style="font-weight:700;margin-bottom:6px;color:var(--run)">⚙️ Chưa cấu hình YouTube OAuth trên máy chủ</div>
         <div style="font-size:12px;color:var(--fg-muted);line-height:1.6">
           Vui lòng thêm <code>YOUTUBE_CLIENT_ID</code>, <code>YOUTUBE_CLIENT_SECRET</code> và <code>YOUTUBE_TOKEN_ENCRYPTION_KEY</code> vào <code>.env</code>.<br>
           Authorized redirect URI trên Google Cloud Console: <code>${esc(st.redirect_uri || '')}</code>
@@ -288,19 +288,19 @@ function renderTodoYoutubeStatusBanner(item, targetType = 'todo') {
   const targetId = targetType === 'short' ? (item.id || item.item_id) : (item.item_id || item.id);
   const schedNote = formatYoutubeScheduleNote(u.publish_at);
   if (u.upload_status === 'uploaded' && u.youtube_url) {
-    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(46,204,113,.35);background:rgba(46,204,113,.08);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px">
+    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(34,197,94,.35);background:var(--ok-soft);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px">
       <span>✅ <strong>Đã đăng YouTube</strong> (${esc(u.privacy_status)})${esc(schedNote)} ${u.error_message ? `<span style="color:var(--warn)">· ${esc(u.error_message)}</span>` : ''}</span>
       <a href="${esc(u.youtube_url)}" target="_blank" rel="noopener" class="btn-xs btn-primary" style="text-decoration:none" onclick="event.stopPropagation()">▶ Xem trên YouTube ↗</a>
     </div>`;
   }
   if (['queued', 'uploading', 'processing'].includes(u.upload_status)) {
-    return `<div id="ytUploadProgress-${esc(targetType)}-${esc(targetId)}" style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(52,152,219,.35);background:rgba(52,152,219,.08)">
+    return `<div id="ytUploadProgress-${esc(targetType)}-${esc(targetId)}" style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(45,212,191,.35);background:var(--accent-soft)">
       <div style="font-size:12px;font-weight:600">⏳ Đang đăng lên YouTube (${esc(u.upload_status)}): <span class="mono">${Number(u.progress_pct || 0).toFixed(1)}%</span></div>
-      <div style="height:6px;border-radius:4px;background:rgba(255,255,255,.1);margin-top:6px;overflow:hidden"><div style="height:100%;width:${Math.min(100, Number(u.progress_pct || 0))}%;background:var(--accent)"></div></div>
+      <div style="height:6px;border-radius:4px;background:rgba(255,255,255,.08);margin-top:6px;overflow:hidden"><div style="height:100%;width:${Math.min(100, Number(u.progress_pct || 0))}%;background:var(--accent)"></div></div>
     </div>`;
   }
   if (u.upload_status === 'failed') {
-    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(231,76,60,.35);background:rgba(231,76,60,.08);display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:var(--held-soft);display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
       <span style="font-size:12px">❌ Đăng YouTube thất bại: ${esc(u.error_message || '')}</span>
       <button type="button" class="btn-xs" onclick="event.stopPropagation();retryYoutubeUpload('${esc(u.id || u.upload_id)}').then(() => refreshSingleTarget('${esc(targetId)}', '${esc(targetType)}'))">🔁 Thử lại</button>
     </div>`;
@@ -348,7 +348,7 @@ function openYoutubePublishModal(targetId, targetType = 'todo') {
   wrap.id = 'ytModalOverlay';
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   wrap.innerHTML = `
-    <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:540px;width:100%;padding:18px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:540px;width:100%;padding:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h3 style="margin:0;font-size:16px">${isShort ? '📱 Đăng Short 9:16 lên YouTube' : '📺 Đăng Video lên YouTube'}</h3>
         <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">✖</button>
@@ -462,7 +462,7 @@ function openYoutubeEditVideoModal(videoId) {
   wrap.id = 'ytModalOverlay';
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   wrap.innerHTML = `
-    <div style="background:var(--card,#141821);border:1px solid var(--border);border-radius:12px;max-width:520px;width:100%;padding:18px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:520px;width:100%;padding:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h3 style="margin:0;font-size:16px">✏️ Sửa Video YouTube (${esc(videoId)})</h3>
         <button type="button" class="btn-sm" onclick="document.getElementById('ytModalOverlay')?.remove()">✖</button>

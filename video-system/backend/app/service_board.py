@@ -219,6 +219,13 @@ class BoardService:
                 for rv in reviews:
                     rv["score"] = None
                     rv["defect_codes"] = None
+                    # Danh tính người chấm cũng là thông tin chấm mù: thấy "ai
+                    # chấm trước, chấm lúc nào" là đủ để a dua hoặc né người
+                    # khó tính. `note` có thể hé lộ kết quả nên ẩn cùng.
+                    # `verdict`/`regen_brief` vẫn để nguyên (quyết định C-4);
+                    # `created_at` giữ vì không định danh được ai.
+                    rv["reviewer"] = None
+                    rv["note"] = None
         if include_reviews:
             comments_info = self._comments_block(shot, caller, privileged, reviews)
 

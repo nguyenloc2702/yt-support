@@ -243,7 +243,7 @@ function showToast(message, type = 'info', durationMs = 4200) {
     <div style="display:flex;align-items:flex-start;gap:8px;line-height:1.35">
       <span>${esc(message)}</span>
     </div>
-    <button type="button" class="btn-xs" style="padding:1px 6px;background:rgba(255,255,255,0.15);color:#fff;border:none" onclick="this.parentElement.remove()">✕</button>
+    <button type="button" class="btn-xs" style="padding:1px 6px;background:rgba(255,255,255,0.15);color:currentColor;border:none" onclick="this.parentElement.remove()">✕</button>
   `;
   box.appendChild(item);
   if (durationMs > 0) {
@@ -302,10 +302,10 @@ function renderLoadErrorState(errMsg) {
         <div style="font-size:15px;font-weight:700;margin-bottom:6px">
           Không thể tải dữ liệu danh sách công việc TODO
         </div>
-        <div class="mono" style="font-size:12px;background:rgba(255,255,255,0.75);padding:8px 12px;border-radius:var(--r);display:inline-block;max-width:100%;margin-bottom:14px;border:1px solid #FCA5A5">
+        <div class="mono" style="font-size:12px;background:var(--held-soft);padding:8px 12px;border-radius:var(--r);display:inline-block;max-width:100%;margin-bottom:14px;border:1px solid rgba(239,68,68,.4)">
           Chi tiết lỗi: ${esc(errMsg)}
         </div>
-        <div style="font-size:12px;margin-bottom:14px;color:#7F1D1D">
+        <div style="font-size:12px;margin-bottom:14px;color:var(--held)">
           Nguyên nhân có thể do kết nối mạng bị gián đoạn tạm thời hoặc phiên đăng nhập đã hết hạn.
         </div>
         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">

@@ -645,8 +645,8 @@ function renderShortStudioShell() {
       <div>
         <h3 class="panel-title">
           🛡 Inbox đề xuất Short (muse)
-          <span id="mpBadgeAwaiting" class="hidden" style="background:var(--accent);color:#fff;border-radius:9px;font-size:10px;padding:1px 6px"></span>
-          <span id="mpBadgeReviewing" class="hidden" style="background:var(--fg-muted);color:#fff;border-radius:9px;font-size:10px;padding:1px 6px;margin-left:4px"></span>
+          <span id="mpBadgeAwaiting" class="hidden" style="background:var(--accent);color:var(--accent-ink);border-radius:9px;font-size:10px;padding:1px 6px"></span>
+          <span id="mpBadgeReviewing" class="hidden" style="background:var(--fg-muted);color:var(--bg);border-radius:9px;font-size:10px;padding:1px 6px;margin-left:4px"></span>
         </h3>
         <div class="panel-subtitle">Muse agent tự đề xuất ý tưởng → 3 agent bất kỳ chấm chéo (muse tự lên lịch vào web mỗi giờ). Đề xuất đạt ≥2/3 chấm ≥9.5 → chờ bạn duyệt → needs_script vào hàng chờ ưu tiên gen kịch bản.</div>
       </div>
@@ -861,7 +861,7 @@ async function submitShortUpload(btnEl) {
   const prev = btnEl?.textContent || '';
   if (btnEl) {
     btnEl.disabled = true;
-    btnEl.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:#fff"></span> Đang tải lên...';
+    btnEl.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:var(--accent-ink)"></span> Đang tải lên...';
   }
   try {
     const fd = new FormData();
@@ -1244,7 +1244,7 @@ async function saveShortScript(shortId, btnEl) {
 
 async function produceShort(shortId, btnEl) {
   const prev = btnEl?.textContent || '';
-  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:#fff"></span> Đang tổng hợp...'; }
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:var(--accent-ink)"></span> Đang tổng hợp...'; }
   showToast('Đang tổng hợp Short: voice → ảnh → ghép MP4 9:16 (có thể mất vài phút với ảnh gen)', 'info', 8000);
   try {
     const r = await apiFetch(`/api/v1/shorts/${encodeURIComponent(shortId)}/produce`, {

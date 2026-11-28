@@ -214,7 +214,7 @@ async function loadTodos(opts = {}) {
   const refreshBtn = document.getElementById('refreshAllBtn');
   if (refreshBtn) {
     refreshBtn.disabled = true;
-    refreshBtn.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:#fff"></span> Đang tải dữ liệu...';
+    refreshBtn.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;border-width:2px;border-top-color:var(--accent-ink)"></span> Đang tải dữ liệu...';
   }
   const subEl = document.getElementById('statTotalJobsSub');
   if (subEl && !allTodos.length) {
@@ -340,18 +340,18 @@ function updateOverviewStats() {
 
   const shortsTotal = allShorts.length;
   const shortsReady = allShorts.filter(s => s.status === 'ready').length;
-  document.getElementById('statTotalJobs').textContent = String(allTodos.length + shortsTotal);
-  document.getElementById('statTotalJobsSub').textContent =
+  // MPA: stat ids chỉ tồn tại trên trang todos — guard null cho trang khác
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('statTotalJobs', String(allTodos.length + shortsTotal));
+  set('statTotalJobsSub',
     `${todoCount} đang gen · ${readyCount} chờ ráp · ${assembledCount} đã ráp` +
-    (shortsTotal > 0 ? ` · ${shortsTotal} Short (${shortsReady} sẵn sàng)` : '');
-  document.getElementById('statShotsChecked').textContent = `${checkedShots} / ${totalShots}`;
-  document.getElementById('statShotsCheckedSub').textContent =
-    `Còn ${Math.max(0, totalShots - checkedShots)} shot chưa gen`;
-  document.getElementById('statDurationGen').textContent =
-    `${generatedSec.toFixed(1)}s / ${expectedSec.toFixed(1)}s`;
-  document.getElementById('statRemainingSec').textContent = `+${remainingSec.toFixed(1)}s`;
-  document.getElementById('statRemainingSec').style.color =
-    remainingSec <= 0.5 ? 'var(--ok)' : 'var(--held)';
+    (shortsTotal > 0 ? ` · ${shortsTotal} Short (${shortsReady} sẵn sàng)` : ''));
+  set('statShotsChecked', `${checkedShots} / ${totalShots}`);
+  set('statShotsCheckedSub', `Còn ${Math.max(0, totalShots - checkedShots)} shot chưa gen`);
+  set('statDurationGen', `${generatedSec.toFixed(1)}s / ${expectedSec.toFixed(1)}s`);
+  set('statRemainingSec', `+${remainingSec.toFixed(1)}s`);
+  const rem = document.getElementById('statRemainingSec');
+  if (rem) rem.style.color = remainingSec <= 0.5 ? 'var(--ok)' : 'var(--held)';
 
   const tabAll = document.getElementById('tabAll');
   const tabTodo = document.getElementById('tabTodo');
@@ -1334,7 +1334,7 @@ function openShortPreviewModal(shortId) {
     title: `📱 Short Video 9:16 — ${s.title}`,
     subtitle: `${s.id} · ${Number(s.duration_s || 0).toFixed(1)}s · ${(s.lang || 'vi').toUpperCase()}`,
     bodyHtml: `
-      <div style="display:flex;justify-content:center;background:#0B1120;border-radius:12px;padding:12px">
+      <div style="display:flex;justify-content:center;background:var(--stage);border-radius:12px;padding:12px">
         <video controls autoplay playsinline src="/api/v1/shorts/${esc(shortId)}/video" style="max-height:72vh;width:auto;max-width:100%;aspect-ratio:9/16;border-radius:10px;background:#000"></video>
       </div>
     `,
@@ -1906,7 +1906,7 @@ function renderTodoCard(summaryItem) {
         ${(vp.has_thumbnail || item.has_thumbnail)
           ? `<span class="pill pill-ok" title="Đã có ảnh thumbnail cho video">🖼️ Có Thumbnail</span>`
           : `<span class="pill pill-warn" title="Bắt buộc có 1 ảnh thumbnail trước khi hoàn thành job">⚠️ Thiếu Thumbnail</span>`}
-        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none" title="Gắn chữ ký mờ @StickSto chuyển động chống re-up vào video thành phẩm">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surface-muted);cursor:pointer;user-select:none" title="Gắn chữ ký mờ @StickSto chuyển động chống re-up vào video thành phẩm">
           <input type="checkbox" id="wmToggle-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
           <span>🛡️ Chữ ký mờ @StickSto</span>
         </label>
@@ -1979,7 +1979,7 @@ function renderFinalVideoTabSection(item, cl, vp) {
           <div style="font-size:12px;color:var(--fg-muted)">Tải theo yêu cầu (preload="none") — bấm Play hoặc mở chế độ Cinema toàn màn hình.</div>
         </div>
         <div class="final-video-actions" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surface-muted);cursor:pointer;user-select:none">
             <input type="checkbox" id="wmToggleTab-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
             <span>🛡️ Chữ ký mờ @StickSto</span>
           </label>
@@ -2022,11 +2022,11 @@ function renderFinalVideoTabSection(item, cl, vp) {
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.04);cursor:pointer;user-select:none">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surface-muted);cursor:pointer;user-select:none">
           <input type="checkbox" id="wmToggleTab-${esc(itemId)}" checked onchange="syncWatermarkToggle('${esc(itemId)}', this.checked)">
           <span>🛡️ Chữ ký mờ @StickSto</span>
         </label>
-        <div style="margin:10px 0;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,.03);display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <div style="margin:10px 0;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:var(--surface-muted);display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           ${hasThumb && thumbUrl
             ? `<img src="${esc(thumbUrl)}" alt="Video Thumbnail" style="width:128px;height:72px;object-fit:cover;border-radius:6px;border:1px solid var(--border)">`
             : `<div style="width:128px;height:72px;border-radius:6px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted)">Chưa có Thumbnail</div>`}
@@ -2400,7 +2400,7 @@ function rbReviewableCount(itemId) {
 function rbTabBadgeHtml(itemId) {
   const n = rbReviewableCount(itemId);
   if (n == null || n <= 0) return '';
-  return `<span style="background:var(--accent);color:#fff;border-radius:9px;font-size:10px;padding:1px 6px;margin-left:5px">Chấm: ${n}</span>`;
+  return `<span style="background:var(--accent);color:var(--accent-ink);border-radius:9px;font-size:10px;padding:1px 6px;margin-left:5px">Chấm: ${n}</span>`;
 }
 
 function rbTodoChipHtml(itemId) {
@@ -2608,7 +2608,7 @@ async function rbRenderReviewPanel(itemId, shot, area) {
           Pairing OK — keyframe khớp narration &amp; đúng vị trí câu
         </label>
 
-        <input type="text" id="rb-note-${esc(itemId)}-${idx}" placeholder="Ghi chú ngắn (không bắt buộc)" style="width:100%;margin-top:10px;padding:7px 9px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px;background:rgba(255,255,255,.04);color:var(--fg)"/>
+        <input type="text" id="rb-note-${esc(itemId)}-${idx}" placeholder="Ghi chú ngắn (không bắt buộc)" style="width:100%;margin-top:10px;padding:7px 9px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:12.5px;background:var(--surface-muted);color:var(--fg)"/>
 
         <div class="rb-brief" id="rb-brief-${esc(itemId)}-${idx}">
           <div style="font-weight:700;font-size:12.5px;color:var(--held)">⛔ Việc này sẽ FAIL — bắt buộc regen brief để agent gen lại biết cách sửa</div>
@@ -2638,7 +2638,7 @@ async function rbRenderReviewPanel(itemId, shot, area) {
 }
 
 function rbBriefViewHtml(brief) {
-  return `<div class="rb-workcard" style="border-color:rgba(220,38,38,.6);background:rgba(220,38,38,.04);margin-top:10px">
+  return `<div class="rb-workcard" style="border-color:var(--held);background:var(--held-soft);margin-top:10px">
     <div style="font-weight:700;font-size:12.5px;color:var(--held);margin-bottom:6px">⛔ REGEN BRIEF (bắt buộc thực hiện khi gen lại)</div>
     <div style="font-size:12.5px"><b>what_wrong:</b> ${esc(brief.what_wrong || '')}</div>
     <div style="font-size:12.5px"><b>do_instead:</b> ${esc(brief.do_instead || '')}</div>
@@ -2656,10 +2656,15 @@ function rbReviewsListHtml(shot) {
     const codesHtml = revealed && Array.isArray(r.defect_codes) && r.defect_codes.length
       ? `<div class="rb-ded" style="margin-top:3px">${esc(r.defect_codes.join(', '))}</div>` : '';
     const noteHtml = r.note ? `<div style="margin-top:3px">${esc(r.note)}</div>` : '';
+    // Chấm mù: server trả reviewer=null cho tới khi caller chấm version này.
+    // Nhãn trung tính thay vì "?" trần để UI không trông như dữ liệu lỗi.
+    const anon = !r.reviewer;
+    const who = anon ? 'Người chấm ẩn danh' : r.reviewer;
+    const avatar = anon ? '•' : String(r.reviewer).slice(0, 1).toUpperCase();
     return `<div class="cmt-item">
-      <span class="cmt-avatar">${esc(String(r.reviewer || '?').slice(0, 1).toUpperCase())}</span>
+      <span class="cmt-avatar">${esc(avatar)}</span>
       <div class="cmt-bubble">
-        <div class="cmt-meta"><b>${esc(r.reviewer || '?')}</b><span>${rbFmtTime(r.created_at)}</span></div>
+        <div class="cmt-meta"><b>${esc(who)}</b><span>${rbFmtTime(r.created_at)}</span></div>
         <div><span class="pill ${vc}" style="font-size:10px;padding:1px 7px">${scoreHtml} ${esc(r.verdict || '').toUpperCase()}</span>${codesHtml}${noteHtml}</div>
       </div>
     </div>`;
@@ -2756,7 +2761,7 @@ function rbRegenPanelHtml(itemId, s) {
   const local = rbShotLocal(itemId, idx) || {};
   const videoUrl = local.video_url || '';
   return `
-  <div class="rb-workcard" style="border-color:rgba(220,38,38,.6)">
+  <div class="rb-workcard" style="border-color:var(--held)">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
       <span class="pill pill-danger mono">⛔ SHOT ĐỎ #${padIdx} — VIỆC CỦA BẠN</span>
       <span class="rb-ded mono">version ${s.video_version || 1}</span>
